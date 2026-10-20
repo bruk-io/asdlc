@@ -4,7 +4,7 @@
 - Status: draft. Merging this file approves it and starts planning.
 - Evals: [`agentic-sdlc-plugin-evals.md`](agentic-sdlc-plugin-evals.md) is part of this spec.
 
-The plugin implements all twelve plays of Anthropic's AI-native SDLC playbook as one Claude Code plugin, keeps every artefact as a plain file in git with a pull request as each gate, and replaces itself only when its own eval suite says the new version is no worse. Four design choices below are proposals that need approval before planning starts; they are marked **Proposed**.
+The plugin implements all twelve plays of Anthropic's AI-native SDLC playbook as one Claude Code plugin, keeps every artefact as a plain file in git with a pull request as each gate, and replaces itself only when its own eval suite says the new version is no worse. The four design choices that answer the intent's open questions were agreed by the gate owner on 2026-10-20.
 
 ## Requirements
 
@@ -65,7 +65,7 @@ The plugin implements all twelve plays of Anthropic's AI-native SDLC playbook as
 | CI workflows | Evals, review, release, detection; templates for repositories that install the plugin |
 | Templates | Intent, spec, plan, `REVIEW.md`, bands, managed settings |
 
-### Where artefacts live (answers intent question 1) - **Proposed**
+### Where artefacts live (answers intent question 1) - agreed
 
 Plain files in git, as the playbook has them, with a pull request as the gate for each:
 
@@ -79,11 +79,11 @@ Plain files in git, as the playbook has them, with a pull request as the gate fo
 
 Why: no tracker dependency, git is the single timestamp authority, every eval can read history directly, and the playbook's legacy-systems sidebar covers linking to a tracker if a repository has one.
 
-### Where the first eval cases come from (answers intent question 2) - **Proposed**
+### Where the first eval cases come from (answers intent question 2) - agreed
 
 Version 0 is built by hand and contains only the playbook's no-prerequisite plays: capture intent, CLAUDE.md, skills, feedback loop, hooks, plan mode. From then on the plugin's own history supplies cases. Until it holds 20, the maintainer writes a case by hand for each play as it lands, and the gate in R22 compares against those.
 
-### Infrastructure plays without an organisation (answers intent question 3) - **Proposed**
+### Infrastructure plays without an organisation (answers intent question 3) - agreed
 
 The plugin's own release is its production:
 
@@ -92,7 +92,7 @@ The plugin's own release is its production:
 - **Production metrics** are the plugin's own outcome metrics (evals file).
 - **Managed settings** are applied on the maintainer's machine from the template.
 
-### Model judges (answers intent question 4) - **Proposed**, partly carried forward
+### Model judges (answers intent question 4) - agreed, partly carried forward
 
 No judge until an eval has no deterministic check. The first judge is introduced with a labelling step in review, where the gate owner rates a sample of its verdicts; it gates nothing until it agrees with those labels. How many labels are enough is carried forward until the first judge exists.
 
@@ -102,7 +102,7 @@ Carried forward to planning: the choice depends on what runs with no install ste
 
 ## Areas of concern
 
-- **One person at every gate.** The stand-ins in R6 reduce self-approval but do not remove it. Accepting that residual risk is the gate owner's call, recorded here when this spec is approved.
+- **One person at every gate.** The stand-ins in R6 reduce self-approval but do not remove it. The gate owner accepted that residual risk on 2026-10-20: self-approval is allowed, and the stand-ins stay visible at each gate.
 - **The loop judging itself.** A hook can be bypassed locally, so R23's protection has to live in CI, where the plugin under test cannot reach it.
 - **Public repository versus eval contamination.** Public cases may end up in future training data and flatter later models. A private holdout set would conflict with the intent's public-repository constraint. Needs a decision.
 - **Managed settings on a personal machine.** Settings meant to stop an organisation's engineers widening rules would also restrict the maintainer's other work on that machine.
