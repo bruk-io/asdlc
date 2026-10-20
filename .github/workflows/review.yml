@@ -1,0 +1,55 @@
+name: review
+
+# Spec R15: every pull request is reviewed by Claude before a person merges it.
+#
+# This runs on pull_request_target, so this file, REVIEW.md and CLAUDE.md all come from
+# the base branch: a pull request can't loosen the review that judges it. The reviewer
+# reads the change through the GitHub API (gh pr diff); the pull request's code is never
+# checked out or run. Findings never approve or block.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  id-token: write
+
+concurrency:
+  group: review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the base branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Review
+        id: review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
+          plugins: "code-review@claude-code-plugins"
+          prompt: "/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+          claude_args: >-
+            --max-turns 60
+            --append-system-prompt-file REVIEW.md
+            --allowedTools "mcp__github_inline_comment__create_inline_comment"
+
+      - uses: astral-sh/setup-uv@v7
+        if: always()
+
+      - name: Record the review's cost (spec R29)
+        if: always()
+        env:
+          EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
+        run: uv run --script scripts/review_cost.py "$EXECUTION_FILE" >> "$GITHUB_STEP_SUMMARY"

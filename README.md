@@ -25,10 +25,14 @@ Then, in Claude Code:
 
 Templates for intents, specs and plans are in `templates/`, and `scripts/artefacts.py` checks that each artefact has what the next stage needs.
 
+## Review
+
+Every pull request to this repository is reviewed by Claude in CI, using Anthropic's `code-review` plugin under the rules in [`REVIEW.md`](REVIEW.md), both read from `main`. Findings arrive as inline comments and never approve or block; the cost of each review is in the run's job summary.
+
 ## What it does not do yet
 
 - No eval suite, so changes merge on review alone until the eval gate lands.
-- The requirements-and-design play, PR review, approval gates, CI/CD and closing the loop on metrics are specified in `spec/agentic-sdlc-plugin.md` and come in later versions.
+- The requirements-and-design play, approval gates, CI/CD and closing the loop on metrics are specified in `spec/agentic-sdlc-plugin.md` and come in later versions.
 
 ## How it is built
 
