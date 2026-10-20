@@ -111,6 +111,8 @@ A run:
 
 Each case runs three times per version so the gate can tell a real change from noise; a drop larger than the run-to-run spread blocks the merge. Whether three is enough is measured on the first suite.
 
+About a quarter of the cases sit in a private holdout set that only CI reads (spec R30). The gate needs both the public suite and the holdout to hold, and a widening gap between their scores is itself a signal that the plugin is fitting its public cases.
+
 ## Build order
 
 1. Trace checks over existing history, for baselines.

@@ -51,6 +51,7 @@ The plugin implements all twelve plays of Anthropic's AI-native SDLC playbook as
 - **R27.** A script builds a session index from Claude Code session transcripts: artefact id, skills loaded, subagents spawned, tool calls, tokens, prompts shown to a person.
 - **R28.** Every eval in the evals file is implemented, using deterministic checks first and a model judge only where none exists.
 - **R29.** Every eval run records its cost: input and output tokens per case and in total, wall time, the model, and the cost at published API prices, even when the run uses a subscription.
+- **R30.** About a quarter of the eval cases form a private holdout set that only CI can read. A change merges only when both the public suite and the holdout hold, and the holdout is reported as an aggregate score, never as cases.
 
 ## Design
 
@@ -97,6 +98,16 @@ The plugin's own release is its production:
 
 No judge until an eval has no deterministic check. The first judge is introduced with a labelling step in review, where the gate owner rates a sample of its verdicts; it gates nothing until it agrees with those labels. How many labels are enough is carried forward until the first judge exists.
 
+### Private holdout set - agreed
+
+- The holdout lives in a private repository (`bruk-io/asdlc-holdout`).
+- The public repository's eval workflow fetches it with a read-only deploy key stored as a CI secret. Building sessions are never given that repository.
+- CI publishes the holdout's aggregate score, cost and run-to-run spread beside the public suite's, and never a case, transcript or diff from it.
+- A widening gap between the public and holdout scores is read as the plugin fitting its public cases, and becomes an intent.
+- Holdout cases are drawn the same way as public ones (R24) and assigned at random when they are added.
+
+The plugin, its evals and how it is judged stay public; only the answer key is private, so this keeps to the intent's public-repository constraint.
+
 ### Language for scripts and hooks
 
 Carried forward to planning: the choice depends on what runs with no install step wherever the plugin is installed.
@@ -105,7 +116,7 @@ Carried forward to planning: the choice depends on what runs with no install ste
 
 - **One person at every gate.** The stand-ins in R6 reduce self-approval but do not remove it. The gate owner accepted that residual risk on 2026-10-20: self-approval is allowed, and the stand-ins stay visible at each gate.
 - **The loop judging itself.** A hook can be bypassed locally, so R23's protection has to live in CI, where the plugin under test cannot reach it.
-- **Public eval cases.** Two risks. The agent building the plugin can read the cases in the repository it works in, so it can tune the plugin to them, which is the larger risk. Public cases may also end up in future training data, which flatters absolute scores and model comparisons more than the version-to-version gate, since both versions benefit alike. A private holdout set, read only by CI, would answer both. Needs a decision.
+- **Public eval cases.** The agent building the plugin can read the public cases and tune the plugin to them, and public cases may end up in future training data. The private holdout set (R30) answers both; its residual risk is that a case leaks through a log or a failure message, so CI output from holdout runs is reduced to scores before it is published.
 - **Eval cost.** Runs use a subscription, so cost shows up as usage limits rather than a bill. R29 records it anyway; the cadence in R14 and R25 is set once one full run is measured.
 
 ## Out of scope
