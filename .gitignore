@@ -1,0 +1,3 @@
+# The hook decision log is per machine (spec R26); collecting logs comes with the session index (R27).
+.asdlc/
+__pycache__/

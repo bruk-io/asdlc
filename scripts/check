@@ -1,0 +1,33 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.15"
+# ///
+"""The single check command: every artefact check, then the tests.
+
+Exits non-zero when anything fails, so it works the same by hand, in a hook and in CI.
+"""
+
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _run(label: str, command: list[str]) -> bool:
+    print(f"== {label}", flush=True)
+    passed = subprocess.run(command, cwd=ROOT).returncode == 0
+    print(f"== {label}: {'passed' if passed else 'FAILED'}\n", flush=True)
+    return passed
+
+
+def main() -> int:
+    results = [
+        _run("artefacts", [sys.executable, str(ROOT / "scripts" / "artefacts.py")]),
+        _run("tests", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."]),
+    ]
+    return 0 if all(results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
