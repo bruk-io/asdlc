@@ -6,6 +6,7 @@ A Claude Code plugin implementing Anthropic's AI-native SDLC playbook. It builds
 
 - `./scripts/check` - every artefact check and every test, under Python 3.15 through uv. Exits non-zero on any failure. Run it before saying any change is done, and paste its result.
 - `uv run --script scripts/artefacts.py .` - the artefact checks alone.
+- To try the plugin on this repository, load it from a separate worktree of a released commit (`claude --plugin-dir <that worktree>`), never from this working copy: Claude Code refuses edits inside a loaded plugin's own folder, and the released version must not edit itself (spec R21).
 - `claude plugin validate .` - the plugin and marketplace manifests. Not `--strict`: it warns that this `CLAUDE.md` doesn't ship with the plugin, which is intended, since it is this repository's own.
 
 ## The loop
