@@ -50,6 +50,7 @@ The plugin implements all twelve plays of Anthropic's AI-native SDLC playbook as
 - **R26.** Every hook appends one JSON line per decision: time, hook, tool, verdict, reason, artefact id.
 - **R27.** A script builds a session index from Claude Code session transcripts: artefact id, skills loaded, subagents spawned, tool calls, tokens, prompts shown to a person.
 - **R28.** Every eval in the evals file is implemented, using deterministic checks first and a model judge only where none exists.
+- **R29.** Every eval run records its cost: input and output tokens per case and in total, wall time, the model, and the cost at published API prices, even when the run uses a subscription.
 
 ## Design
 
@@ -104,9 +105,8 @@ Carried forward to planning: the choice depends on what runs with no install ste
 
 - **One person at every gate.** The stand-ins in R6 reduce self-approval but do not remove it. The gate owner accepted that residual risk on 2026-10-20: self-approval is allowed, and the stand-ins stay visible at each gate.
 - **The loop judging itself.** A hook can be bypassed locally, so R23's protection has to live in CI, where the plugin under test cannot reach it.
-- **Public repository versus eval contamination.** Public cases may end up in future training data and flatter later models. A private holdout set would conflict with the intent's public-repository constraint. Needs a decision.
-- **Managed settings on a personal machine.** Settings meant to stop an organisation's engineers widening rules would also restrict the maintainer's other work on that machine.
-- **Eval cost.** Unknown until one full run is measured; the cadence in R14 and R25 follows from it.
+- **Public eval cases.** Two risks. The agent building the plugin can read the cases in the repository it works in, so it can tune the plugin to them, which is the larger risk. Public cases may also end up in future training data, which flatters absolute scores and model comparisons more than the version-to-version gate, since both versions benefit alike. A private holdout set, read only by CI, would answer both. Needs a decision.
+- **Eval cost.** Runs use a subscription, so cost shows up as usage limits rather than a bill. R29 records it anyway; the cadence in R14 and R25 is set once one full run is measured.
 
 ## Out of scope
 
