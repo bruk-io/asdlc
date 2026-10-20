@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 from tests.support import ROOT, load, run_script
 
@@ -99,6 +101,16 @@ class CleanArtefactsTest(unittest.TestCase):
         done = run_script("scripts/artefacts.py", str(ROOT))
         self.assertEqual(done.returncode, 0, done.stdout)
 
+    def test_naming_files_reports_only_their_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for path, text in {**clean(), "CLAUDE.md": "line\n" * 100}.items():
+                (root / path).parent.mkdir(parents=True, exist_ok=True)
+                (root / path).write_text(text)
+            self.assertEqual(run_script("scripts/artefacts.py", str(root)).returncode, 1)
+            done = run_script("scripts/artefacts.py", str(root), "intent/a.md")
+            self.assertEqual(done.returncode, 0, done.stdout)
+
 
 class MissingSectionTest(unittest.TestCase):
     def assert_flags(self, path: str, heading: str) -> None:
@@ -163,10 +175,31 @@ class LinkAndNumberingTest(unittest.TestCase):
         del files["spec/a.md"]
         self.assertIn(("plan/a.md", "spec-link"), self.rules(files))
 
-    def test_supporting_documents_in_spec_are_not_specs(self) -> None:
+    def test_a_document_a_spec_links_from_its_header_is_supporting(self) -> None:
         files = clean()
+        files["spec/a.md"] = SPEC.replace("- Status: draft.", "- Status: draft.\n- Evals: [`a-evals.md`](a-evals.md)")
         files["spec/a-evals.md"] = "# Evals for a thing\n\nTables.\n"
         self.assertEqual(artefacts.check_all(files), [])
+
+    def test_any_other_file_in_spec_is_checked_as_a_spec(self) -> None:
+        files = clean()
+        files["spec/b.md"] = SPEC.replace("# Spec: a thing", "# Specification: b")
+        self.assertIn(("spec/b.md", "title"), self.rules(files))
+
+    def test_none_is_a_valid_answer_for_open_questions(self) -> None:
+        files = clean()
+        files["intent/a.md"] = INTENT.replace("- [ ] First?\n- [x] Second?", "None.")
+        self.assertEqual(artefacts.check_all(files), [])
+
+    def test_question_numbers_match_whole_numbers(self) -> None:
+        questions = "\n".join(f"- [ ] Q{n}?" for n in range(1, 11))
+        files = clean()
+        files["intent/a.md"] = INTENT.replace("- [ ] First?\n- [x] Second?", questions)
+        answers = "".join(f" intent question {n}." for n in range(2, 11))
+        files["spec/a.md"] = SPEC.replace("This answers intent question 1.", "This answers" + answers)
+        findings = [f.message for f in artefacts.check_all(files) if f.rule == "open-questions"]
+        self.assertEqual(len(findings), 1)
+        self.assertIn("intent question 1 ", findings[0])
 
 
 class ClaudeMdTest(unittest.TestCase):

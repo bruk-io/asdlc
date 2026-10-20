@@ -26,14 +26,15 @@ Scripts and hooks are Python 3.15 (released 2026-10-09), standard library only, 
 | `skills/write-policy-skill/SKILL.md` | yes | Turn one policy into a skill from the template, and name its enforcement | R11 |
 | `commands/intent.md` | yes | Runs capture-intent by hand | R3 |
 | `commands/plan.md` | yes | Runs plan-change by hand | R3 |
-| `hooks/hooks.json` | yes | Registers the hooks below, each run with `uv run --script` | R13, R26 |
+| `hooks/hooks.json` | yes | Registers the guard on file edits and shell commands, run with `uv run --script`; a uv failure never blocks | R13, R26 |
 | `hooks/decision_log.py` | yes | Appends one JSON line per hook decision to `.asdlc/hooks.jsonl` | R26 |
-| `hooks/guard_test_edits.py` | yes | On a `fix/` branch, denies edits to test files that exist on the merge base, with the reason | R13 |
+| `hooks/guard_test_edits.py` | yes | On a `fix/` branch, denies changes to test files that exist on the base branch, through the file tools or plain shell writes, with the reason; says so when it can't decide | R13 |
 | `scripts/check` | yes | The single check command: every artefact check, then the tests under 3.15 through uv; exits non-zero on any failure | R13 |
 | `scripts/artefacts.py` | yes | Shape checks for intent, spec and plan files; open questions settled; CLAUDE.md under a page | R1, R7, R8, R9, R10 |
-| `scripts/protected_paths.py` | yes | Fails a pull request that changes the plugin and anything under `evals/` together | R23 |
+| `scripts/protected_paths.py` | yes | Fails a pull request that changes the plugin and the eval suite (`evals/`, `spec/*-evals.md`) together, counting renames as both sides | R23 |
 | `tests/` | yes | One `unittest` module per script and hook, using throwaway git repositories | R13 |
-| `.github/workflows/ci.yml` | yes | Installs uv, then runs `scripts/check` and `scripts/protected_paths.py` on every pull request | R13, R23 |
+| `.github/workflows/ci.yml` | yes | Installs uv, then runs `scripts/check` and `claude plugin validate` on every pull request | R13 |
+| `.github/workflows/protected-paths.yml` | yes | Runs `scripts/protected_paths.py` from the base branch on `pull_request_target`, so a pull request can't remove the check that judges it | R23 |
 | `.gitignore` | yes | Ignores `.asdlc/` | R26 |
 | `README.md` | no | Install (uv is the prerequisite), what version 0 does, and what it does not do yet | - |
 
@@ -52,6 +53,8 @@ Scripts and hooks are Python 3.15 (released 2026-10-09), standard library only, 
 
 - **Version 0 judges itself.** Until the eval gate exists, nothing but review stands behind the skills. Mitigation: keep version 0 small, and make building the gate the next intent.
 - **The test-edit guard keys on a branch name.** A fix done on a branch not named `fix/` is unguarded. Accepted for version 0; the plan template's bug kind replaces the branch name later.
+- **The guard reads shell commands by pattern.** It catches plain writes (`sed -i`, redirects, `tee`, `mv`, `rm`, `cp`, `git checkout --`, `git restore`), but a shell can always write a file in a way it doesn't recognise. It is a guardrail, and review remains the backstop.
+- **The R23 check runs from `main` only once merged.** Until this pull request merges, `protected-paths.yml` doesn't exist on the base branch, so it can't run here. Making it a required status check is a repository setting for the owner.
 - **The decision log is per machine.** `.asdlc/hooks.jsonl` is gitignored, so cloud sessions and other machines keep separate logs. Collecting them is part of the session-index change (R27).
 - **uv on the hook path.** Every hook starts through uv, so a machine without uv runs no guards, and the first run waits for uv to fetch 3.15. Mitigation: each hook command fails loudly with an install message when uv is missing, and step 3's tests time a warm hook start; if it is slow enough to notice, the hooks move to one long-lived entry point.
 - **Plugin manifest and hook formats change across Claude Code releases.** `claude plugin validate` in step 4 and in CI catches a broken manifest before release.

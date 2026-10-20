@@ -5,8 +5,11 @@
 """Shape checks for the loop's artefacts: intents, specs, plans and CLAUDE.md.
 
 Each finding names the file, the rule, and why the rule exists, so the fix is clear
-without reading this script. Run with a repository root as the only argument, or from
-inside the repository.
+without reading this script.
+
+Usage: artefacts.py [<repository root> [<file> ...]]
+Every artefact is read so links resolve, but when files are named only their findings
+are reported, so checking a new intent never reports on someone else's CLAUDE.md.
 """
 
 import re
@@ -83,9 +86,15 @@ def _missing(path: str, doc: Document, prefix: str, header_keys: Iterable[str], 
     return findings
 
 
+def _question_lines(doc: Document) -> list[str]:
+    """The open-question lines, or none when the section says there are none."""
+    lines = [line for line in doc.sections.get("Open questions", "").splitlines() if line.strip()]
+    return [] if [line.strip().rstrip(".").lower() for line in lines] == ["none"] else lines
+
+
 def open_questions(doc: Document) -> tuple[tuple[int, bool], ...]:
     """Number each open question from 1 and say whether it is ticked."""
-    lines = [line for line in doc.sections.get("Open questions", "").splitlines() if line.strip()]
+    lines = _question_lines(doc)
     return tuple(
         (number, match.group(1) != " ")
         for number, line in enumerate(lines, start=1)
@@ -95,10 +104,9 @@ def open_questions(doc: Document) -> tuple[tuple[int, bool], ...]:
 
 def check_intent(path: str, doc: Document) -> list[Finding]:
     findings = _missing(path, doc, "Intent: ", ("Author", "Status"), INTENT_SECTIONS)
-    lines = [line for line in doc.sections.get("Open questions", "").splitlines() if line.strip()]
-    for line in lines:
+    for line in _question_lines(doc):
         if not _CHECKBOX.match(line):
-            findings.append(Finding(path, "open-questions", f"'{line.strip()}' is not a checkbox; each open question is '- [ ]' so the spec can settle it by number"))
+            findings.append(Finding(path, "open-questions", f"'{line.strip()}' is not a checkbox; each open question is one '- [ ]' line so the spec can settle it by number, or the section says 'None.'"))
     return findings
 
 
@@ -126,7 +134,7 @@ def check_spec(path: str, doc: Document, intent: Document | None, full_text: str
     if intent is not None:
         lowered = full_text.lower()
         for number, ticked in open_questions(intent):
-            if not ticked and f"intent question {number}" not in lowered:
+            if not ticked and not re.search(rf"\bintent question {number}\b", lowered):
                 findings.append(Finding(path, "open-questions", f"intent question {number} is neither ticked in the intent nor answered or carried forward here as 'intent question {number}'"))
     return findings
 
@@ -153,7 +161,7 @@ def check_plan(path: str, doc: Document, spec: Document | None) -> list[Finding]
 def check_claude_md(path: str, text: str) -> list[Finding]:
     lines = len(text.splitlines())
     if lines > CLAUDE_MD_MAX_LINES:
-        return [Finding(path, "length", f"{lines} lines; keep it under {CLAUDE_MD_MAX_LINES}, because every session reads all of it")]
+        return [Finding(path, "length", f"{lines} lines; keep it to at most {CLAUDE_MD_MAX_LINES}, because every session reads all of it")]
     return []
 
 
@@ -161,18 +169,28 @@ def check_all(files: Mapping[str, str]) -> list[Finding]:
     """Check every artefact. `files` maps a repository-relative POSIX path to its text."""
     docs = {path: parse(text) for path, text in files.items() if path.endswith(".md")}
 
-    def resolve(path: str, target: str | None) -> Document | None:
-        if target is None:
-            return None
-        resolved = (Path(path).parent / target).as_posix()
+    def normalised(path: str, target: str) -> str:
         parts: list[str] = []
-        for part in resolved.split("/"):
+        for part in (Path(path).parent / target).as_posix().split("/"):
             if part == "..":
                 if parts:
                     parts.pop()
             elif part not in ("", "."):
                 parts.append(part)
-        return docs.get("/".join(parts))
+        return "/".join(parts)
+
+    def resolve(path: str, target: str | None) -> Document | None:
+        return docs.get(normalised(path, target)) if target else None
+
+    # A file in spec/ that a spec links from its header (an evals file, say) supports that
+    # spec; every other file in spec/ is a spec and gets every spec check.
+    supporting = {
+        normalised(path, target)
+        for path, doc in docs.items()
+        if path.startswith("spec/")
+        for value in doc.header.values()
+        if (target := linked(value))
+    } - {path for path in docs if not path.startswith("spec/")}
 
     findings: list[Finding] = []
     for path, doc in sorted(docs.items()):
@@ -180,7 +198,7 @@ def check_all(files: Mapping[str, str]) -> list[Finding]:
         match folder:
             case "intent":
                 findings += check_intent(path, doc)
-            case "spec" if doc.title.startswith("Spec: "):
+            case "spec" if path not in supporting:
                 findings += check_spec(path, doc, resolve(path, linked(doc.header.get("Intent"))), files[path])
             case "plan":
                 findings += check_plan(path, doc, resolve(path, linked(doc.header.get("Spec"))))
@@ -203,7 +221,8 @@ def _read(root: Path) -> dict[str, str]:
 
 def main(argv: list[str]) -> int:
     root = Path(argv[1]) if len(argv) > 1 else Path.cwd()
-    findings = check_all(_read(root))
+    only = {(root / name).resolve().relative_to(root.resolve()).as_posix() for name in argv[2:]}
+    findings = [f for f in check_all(_read(root)) if not only or f.path in only]
     for finding in findings:
         print(finding)
     if not findings:

@@ -19,9 +19,9 @@ Then, in Claude Code:
 | Capture intent | `/asdlc:intent` and the `capture-intent` skill: an interview, an intent in the requester's words, a pull request whose merge accepts it |
 | Plan mode | `/asdlc:plan` and the `plan-change` skill: files, order, risks and proof, citing the spec's requirements, approved by merge |
 | Skills | The `write-policy-skill` skill and a template that names each policy's owner, source and enforcement |
-| Feedback loop | One check command per repository, and a hook that stops a bug fix on a `fix/` branch from editing an existing test |
+| Feedback loop | One check command per repository, and a hook that stops a bug fix on a `fix/` branch from changing an existing test, through the file tools or plain shell writes |
 | Hooks | Every hook decision logged to `.asdlc/hooks.jsonl` |
-| CLAUDE.md | A check that keeps it under 60 lines |
+| CLAUDE.md | A check that keeps it to at most 60 lines |
 
 Templates for intents, specs and plans are in `templates/`, and `scripts/artefacts.py` checks that each artefact has what the next stage needs.
 

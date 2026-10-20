@@ -22,4 +22,4 @@
 
 ## Open questions
 
-- [ ] <What nobody knows yet. The spec answers each one or carries it forward with a reason, citing it as "intent question N".>
+- [ ] <What nobody knows yet, one question per line. The spec answers each one or carries it forward with a reason, citing it as "intent question N". If there are none, replace this line with "None.">

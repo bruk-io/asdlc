@@ -9,14 +9,14 @@ A plan moves design review ahead of the code. Reviewing a plan costs minutes; re
 
 ## Read before writing
 
-Read the approved spec and its intent, and the parts of the codebase the change touches. Plan mode is a good way to do this, since nothing can be edited until the plan is approved. If there is no approved spec, the change is either small enough to do directly or it needs an intent first.
+Read the approved spec and its intent, and the parts of the codebase the change touches. Plan mode is a good way to read, since nothing can be edited there; leave it before writing the plan file. If there is no approved spec, the change is either small enough to do directly or it needs an intent first.
 
 ## Write it
 
 Copy `${CLAUDE_PLUGIN_ROOT}/templates/plan.md` to `plan/<short-slug>.md` and fill it in.
 
 - **Delivers** cites the spec's requirement numbers this change meets.
-- **Files that change** names every file, in backticks, with what changes in it. Later checks compare this list with the files the commits actually touch.
+- **Files that change** names every file, in backticks, with what changes in it. A later version of this plugin will compare this list with the files the commits actually touch, so make it the real list.
 - **Order of work** is numbered, each step small enough to check before the next starts. Start with whatever gives the work a feedback loop.
 - **Risks** are the real ones: what could break, how likely, and what is done about it.
 - **Proof** is checks that show the change works, as commands or observable results, not a description of effort.
@@ -27,7 +27,7 @@ Before asking for approval, ask what could break, which step carries the most ri
 
 ## Check it and open the gate
 
-Run `uv run --script "${CLAUDE_PLUGIN_ROOT}/scripts/artefacts.py" .` and fix what it reports. Commit the plan alone on `plan/<short-slug>`, push it, and open a pull request; merging approves it. Name any decision the approver is making by merging.
+Run `uv run --script "${CLAUDE_PLUGIN_ROOT}/scripts/artefacts.py" . plan/<short-slug>.md` and fix what it reports. It reports on that file only; leave the rest of the repository alone. Commit the plan alone on `plan/<short-slug>`, push it, and open a pull request; merging approves it. Name any decision the approver is making by merging.
 
 ## When the work drifts
 

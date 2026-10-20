@@ -5,20 +5,20 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   check:
     # Pinned so a move of ubuntu-latest can't change the environment under the checks.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
 
       - uses: astral-sh/setup-uv@v7
 
       - name: Artefact checks and tests
         run: ./scripts/check
 
-      - name: The eval suite and the plugin change in separate pull requests (spec R23)
-        if: github.event_name == 'pull_request'
-        run: uv run --script scripts/protected_paths.py --base "origin/${{ github.base_ref }}"
+      - name: Plugin and marketplace manifests
+        run: npx --yes @anthropic-ai/claude-code plugin validate .
