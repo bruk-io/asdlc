@@ -1,0 +1,17 @@
+{
+  "description": "asdlc: keep bug fixes from changing the tests that judge them, and log every hook decision",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v uv >/dev/null 2>&1 || { echo 'asdlc: uv is not installed, so the test-edit guard did not run. Install uv: https://docs.astral.sh/uv/' >&2; exit 1; }; uv run --quiet --script \"${CLAUDE_PLUGIN_ROOT}/hooks/guard_test_edits.py\"; status=$?; if [ \"$status\" -eq 2 ]; then echo 'asdlc: uv could not start the test-edit guard (often no network to fetch Python 3.15), so it did not run' >&2; exit 1; fi; exit \"$status\"",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

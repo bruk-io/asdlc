@@ -1,0 +1,14 @@
+{
+  "name": "asdlc",
+  "description": "The asdlc plugin: Anthropic's AI-native SDLC playbook for Claude Code, built through its own loop.",
+  "owner": {
+    "name": "Bruk Habtu"
+  },
+  "plugins": [
+    {
+      "name": "asdlc",
+      "source": "./",
+      "description": "Anthropic's AI-native SDLC playbook as a Claude Code plugin that builds itself."
+    }
+  ]
+}

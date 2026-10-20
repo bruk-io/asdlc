@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # Pinned so a move of ubuntu-latest can't change the environment under the checks.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Artefact checks and tests
+        run: ./scripts/check
+
+      - name: Plugin and marketplace manifests
+        run: npx --yes @anthropic-ai/claude-code plugin validate .

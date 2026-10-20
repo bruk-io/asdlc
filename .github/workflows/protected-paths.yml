@@ -1,0 +1,33 @@
+name: protected paths
+
+# Spec R23: the eval suite and the plugin change in separate pull requests.
+#
+# This runs on pull_request_target, so the workflow and the script come from the base
+# branch: a pull request can't remove or weaken the check that judges it. The pull
+# request's commits are fetched and compared with git; none of its code is run, and the
+# job holds no secrets.
+
+on:
+  pull_request_target:
+
+permissions:
+  contents: read
+
+jobs:
+  protected-paths:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the base branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Fetch the pull request's commits, without checking them out
+        run: git fetch --no-tags origin "+refs/pull/${{ github.event.pull_request.number }}/head:refs/remotes/pull/head"
+
+      - name: The eval suite and the plugin are not changed together
+        run: uv run --script scripts/protected_paths.py --base "${{ github.event.pull_request.base.sha }}" --head refs/remotes/pull/head

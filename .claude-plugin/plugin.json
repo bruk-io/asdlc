@@ -1,0 +1,10 @@
+{
+  "name": "asdlc",
+  "version": "0.1.0",
+  "description": "Anthropic's AI-native SDLC playbook as a Claude Code plugin that builds itself. Version 0: capture intent, plan mode, policy skills, the feedback loop and build-time hooks.",
+  "author": {
+    "name": "Bruk Habtu"
+  },
+  "homepage": "https://github.com/bruk-io/asdlc",
+  "repository": "https://github.com/bruk-io/asdlc"
+}
