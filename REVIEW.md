@@ -19,3 +19,7 @@ Tag every finding with its pass.
 
 - Anything `./scripts/check` or CI already enforces: artefact shape, tests passing, the Python version, the plugin manifests.
 - Formatting and wording preferences, unless the wording in a skill would make a model do the wrong thing.
+
+## Scope
+
+- `scripts/artefacts.py` is covered by its tests, so leave it out of reviews.

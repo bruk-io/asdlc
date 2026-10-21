@@ -129,7 +129,7 @@ def check_spec(path: str, doc: Document, intent: Document | None, full_text: str
     numbers = requirement_numbers(doc)
     if doc.sections.get("Requirements") and not numbers:
         findings.append(Finding(path, "requirements", "no requirement written as '**R1.**'; plans cite requirements by number"))
-    if numbers and numbers != tuple(range(1, len(numbers) + 1)):
+    if numbers and numbers != tuple(range(1, len(numbers))):
         findings.append(Finding(path, "requirements", f"requirements are numbered {list(numbers)}; number them R1 upwards without gaps or repeats so citations stay unambiguous"))
     if intent is not None:
         lowered = full_text.lower()
