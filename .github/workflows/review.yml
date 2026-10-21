@@ -26,10 +26,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      # No ref: on pull_request_target this checks out the base branch's current tip.
+      # The pull request's stored base.sha can be an old main for a long-lived pull
+      # request, one without this workflow's own scripts and rules.
       - name: Check out the base branch
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
       - name: Review

@@ -48,6 +48,7 @@ Two choices shape it:
 - The plugin does not read `REVIEW.md`, so step 4's fallback applies: the workflow passes it with `--append-system-prompt-file`.
 - The plugin skips pull requests it judges trivial, and any it has already commented on, so it reviews a pull request once rather than on every push.
 - A `pull_request_target` workflow runs from the base branch, so this review can only start reviewing once this change is on `main`. Step 6's smoke tests run after the merge.
+- Found in step 6: checking out `github.event.pull_request.base.sha` gives the base as it was when the pull request was opened. For a pull request older than this change, that `main` has no `REVIEW.md` or cost script, so the review and its cost step failed. Both base-branch workflows now check out with no `ref`, which on `pull_request_target` is the base branch's current tip, and the workflow test forbids any `ref`.
 
 ## Proof
 

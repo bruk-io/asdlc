@@ -31,8 +31,10 @@ class BaseBranchWorkflowTest(unittest.TestCase):
         for name in BASE_BRANCH_WORKFLOWS:
             with self.subTest(workflow=name):
                 text = _text(name)
-                refs = re.findall(r"(?m)^\s+ref:\s*(.+)$", text)
-                self.assertEqual(refs, ["${{ github.event.pull_request.base.sha }}"])
+                # No ref at all: pull_request_target then checks out the base branch's
+                # current tip. Any ref is either the pull request's code or a stale base.
+                self.assertEqual(re.findall(r"(?m)^\s+ref:\s*(.+)$", text), [])
+                self.assertNotIn("pull_request.base.sha", text)
                 self.assertNotIn("github.event.pull_request.head", text)
                 self.assertNotIn("github.head_ref", text)
                 self.assertIn("persist-credentials: false", text)
