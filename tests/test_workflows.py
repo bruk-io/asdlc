@@ -44,7 +44,11 @@ class BaseBranchWorkflowTest(unittest.TestCase):
             with self.subTest(workflow=name):
                 text = _text(name)
                 self.assertIn("contents: read", text)
-                self.assertNotRegex(text, r"(contents|pull-requests|issues|actions):\s*write")
+                self.assertNotRegex(text, r"(contents|issues|actions|id-token):\s*write")
+
+    def test_only_the_review_can_write_and_only_pull_request_comments(self) -> None:
+        self.assertNotRegex(_text("protected-paths.yml"), r":\s*write")
+        self.assertEqual(re.findall(r"(?m)^\s+([\w-]+):\s*write", _text("review.yml")), ["pull-requests"])
 
 
 class ReviewWorkflowTest(unittest.TestCase):
