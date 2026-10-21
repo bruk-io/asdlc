@@ -16,10 +16,12 @@ Two choices shape it:
 | File | New | What it holds | Requirements |
 |---|---|---|---|
 | `REVIEW.md` | yes | The passes (bugs, security, compliance with the spec and the plan the change cites), what counts as Important, a cap of five nits, and what to skip because CI already enforces it | R15 |
-| `.github/workflows/review.yml` | yes | On `pull_request_target`: check out the base branch, put the pull request's files beside it to read, run `claude-code-action@v1` with the `code-review` plugin and `--comment`, tools limited to reading and posting inline comments, a turn cap and a job timeout; then write the run's tokens and duration to the job summary | R15, R18, R29 |
+| `.github/workflows/review.yml` | yes | On `pull_request_target`: check out the base branch only, run `claude-code-action@v1` with the `code-review` plugin, `--comment` and `REVIEW.md` appended to its system prompt, tools limited to reading and posting comments, a turn cap and a job timeout; then write the run's cost to the job summary | R15, R18, R29 |
+| `scripts/review_cost.py` | yes | Turns the action's execution file into the cost summary: total at API prices, duration, turns, and tokens per model | R29 |
+| `tests/test_review_cost.py` | yes | The summary from a recorded result, and a missing file never failing the job | R29 |
 | `CLAUDE.md` | no | One line: reviews come from CI, read their rules from `main`, and never approve | R15 |
 | `README.md` | no | That every pull request is reviewed, and how to ask for another review | R15 |
-| `tests/test_workflows.py` | yes | Static checks on `review.yml`: triggered by `pull_request_target`, never checks out or runs the pull request's code as the working tree, read-only `contents` permission, a turn cap and a timeout | R18 |
+| `tests/test_workflows.py` | yes | Static checks on `review.yml` and `protected-paths.yml`: triggered by `pull_request_target`, check out only the base, read-only permissions; for review, a turn cap, a timeout, `REVIEW.md` from the base, and cost recorded even on failure | R18 |
 
 ## Order of work
 
@@ -40,10 +42,19 @@ Two choices shape it:
 - **Usage.** Each review counts against the subscription. The turn cap and timeout bound one run, and the job summary records each run's tokens (R29) so the cost is visible from the first review.
 - **The token belongs to one person's subscription.** Fine for this repository; another maintainer would need their own token or an API key.
 
+## Found while building
+
+- The `code-review` plugin reads the change through `gh pr diff` and `gh pr view`, so the pull request's files never need to be on disk; the job checks out only the base branch, which also makes `CLAUDE.md` the base branch's.
+- The plugin does not read `REVIEW.md`, so step 4's fallback applies: the workflow passes it with `--append-system-prompt-file`.
+- The plugin skips pull requests it judges trivial, and any it has already commented on, so it reviews a pull request once rather than on every push.
+- A `pull_request_target` workflow runs from the base branch, so this review can only start reviewing once this change is on `main`. Step 6's smoke tests run after the merge.
+- Found in step 6: checking out `github.event.pull_request.base.sha` gives the base as it was when the pull request was opened. For a pull request older than this change, that `main` has no `REVIEW.md` or cost script, so the review and its cost step failed. Both base-branch workflows now check out with no `ref`, which on `pull_request_target` is the base branch's current tip, and the workflow test forbids any `ref`.
+- Found in step 6: the Claude GitHub App's token exchange rejects these runs with `Invalid OIDC token`, even with the app installed on the repository. The review now uses the action's documented alternative, the workflow's own `GITHUB_TOKEN`, with `pull-requests: write` as its only write permission so it can comment. Findings are posted by the Actions bot rather than by Claude's app.
+
 ## Proof
 
 - `./scripts/check` passes, including `tests/test_workflows.py`.
 - On the planted-bug pull request, the review posts an inline finding on the changed numbering logic.
-- On the typo pull request, the review reports no issues.
+- On the typo pull request, the review reports no issues, or skips it as trivial, which the `code-review` plugin does by design.
 - A pull request that edits `REVIEW.md` is still reviewed under `main`'s `REVIEW.md`, shown by a rule that exists only on `main` still applying.
 - Each run's job summary shows its tokens and duration.

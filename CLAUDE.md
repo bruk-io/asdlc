@@ -20,6 +20,8 @@ Nothing changes here except through it. Each stage is a file in git and a pull r
 
 If a change departs from its plan, update the plan in the same commit and say why.
 
+Every pull request is reviewed by Claude in CI (`review.yml`) under the rules in `REVIEW.md`, both read from `main`. A review never approves; the person who merges does.
+
 ## Layout
 
 - `skills/`, `commands/`, `hooks/` - the plugin. `templates/` - the artefact templates the skills copy.
