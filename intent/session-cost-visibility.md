@@ -25,7 +25,6 @@ I want to see where my Claude Code sessions' time and tokens go for work in this
 
 - Every pull request's description ends with this line: Co-authored with the asdlc plugin, version 0.
 - It must not change how a session behaves or slow it noticeably.
-- Nothing about a session's content (prompts, file contents) leaves my machine unless I choose to share it.
 
 ## Open questions
 
