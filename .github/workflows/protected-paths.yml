@@ -17,10 +17,11 @@ jobs:
   protected-paths:
     runs-on: ubuntu-24.04
     steps:
+      # No ref: on pull_request_target this checks out the base branch's current tip, so
+      # the script is always main's latest, not the one the pull request was opened against.
       - name: Check out the base branch
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -30,4 +31,4 @@ jobs:
         run: git fetch --no-tags origin "+refs/pull/${{ github.event.pull_request.number }}/head:refs/remotes/pull/head"
 
       - name: The eval suite and the plugin are not changed together
-        run: uv run --script scripts/protected_paths.py --base "${{ github.event.pull_request.base.sha }}" --head refs/remotes/pull/head
+        run: uv run --script scripts/protected_paths.py --base "${{ github.sha }}" --head refs/remotes/pull/head

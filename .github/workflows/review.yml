@@ -11,11 +11,14 @@ on:
   pull_request_target:
     types: [opened, synchronize, ready_for_review, reopened]
 
+# The review posts with this workflow's own GITHUB_TOKEN, not the Claude GitHub App:
+# the app's OIDC token exchange rejects pull_request_target runs ("Invalid OIDC token").
+# pull-requests: write lets it comment; nothing else is writable, and no step runs the
+# pull request's code.
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
   issues: read
-  id-token: write
 
 concurrency:
   group: review-${{ github.event.pull_request.number }}
@@ -26,10 +29,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      # No ref: on pull_request_target this checks out the base branch's current tip.
+      # The pull request's stored base.sha can be an old main for a long-lived pull
+      # request, one without this workflow's own scripts and rules.
       - name: Check out the base branch
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
       - name: Review
@@ -37,6 +42,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
           plugins: "code-review@claude-code-plugins"
           prompt: "/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
