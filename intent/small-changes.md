@@ -28,8 +28,6 @@ A typo or a one-line fix shouldn't need an intent, a spec and a plan. But this r
 - The loop stays the only way for anything that changes what the plugin does, or how its changes are judged. The exception must not become a route to alter behaviour, checks or tests without review of the intent.
 - A change cannot alter the checks or evals that judge it, and a person merges every change. Neither is relaxed for small changes.
 - The released version must not edit itself (spec R21).
-- Canadian spelling; regular hyphens, never em dashes.
-- Each pull request's description ends with the line: Co-authored with the asdlc plugin, version 0.
 
 ## Open questions
 

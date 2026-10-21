@@ -1,6 +1,6 @@
 # Intent: See where my Claude Code sessions' time and tokens go, tied to the work they were for
 
-- Author: bruk.habtu@gmail.com
+- Author: Bruk Habtu
 - Status: draft. Merging this file accepts it.
 - Date: 2026-10-20
 
@@ -23,7 +23,6 @@ I want to see where my Claude Code sessions' time and tokens go for work in this
 
 ## Constraints
 
-- Every pull request's description ends with this line: Co-authored with the asdlc plugin, version 0.
 - It must not change how a session behaves or slow it noticeably.
 
 ## Open questions
