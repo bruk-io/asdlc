@@ -33,6 +33,19 @@ class SummariseTest(unittest.TestCase):
         earlier = {**RESULT, "total_cost_usd": 9.0}
         self.assertIn("$1.2346", review_cost.summarise([earlier, RESULT]))
 
+    def test_shows_why_a_failed_run_failed(self) -> None:
+        failed = {**RESULT, "is_error": True, "result": "Invalid bearer token", "total_cost_usd": 0, "modelUsage": {}}
+        self.assertIn("The run ended in an error: Invalid bearer token", review_cost.summarise([failed]))
+
+    def test_falls_back_to_the_errors_list_and_shortens_long_text(self) -> None:
+        failed = {**RESULT, "is_error": True, "errors": ["x" * 900]}
+        line = next(l for l in review_cost.summarise([failed]).splitlines() if "ended in an error" in l)
+        self.assertTrue(line.endswith("..."))
+        self.assertLess(len(line), 600)
+
+    def test_a_successful_run_mentions_no_error(self) -> None:
+        self.assertNotIn("error", review_cost.summarise([RESULT]))
+
     def test_says_so_when_there_is_no_result(self) -> None:
         self.assertIn("unknown", review_cost.summarise([{"type": "system"}]))
 

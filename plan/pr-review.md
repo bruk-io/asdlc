@@ -50,6 +50,7 @@ Two choices shape it:
 - A `pull_request_target` workflow runs from the base branch, so this review can only start reviewing once this change is on `main`. Step 6's smoke tests run after the merge.
 - Found in step 6: checking out `github.event.pull_request.base.sha` gives the base as it was when the pull request was opened. For a pull request older than this change, that `main` has no `REVIEW.md` or cost script, so the review and its cost step failed. Both base-branch workflows now check out with no `ref`, which on `pull_request_target` is the base branch's current tip, and the workflow test forbids any `ref`.
 - Found in step 6: the Claude GitHub App's token exchange rejects these runs with `Invalid OIDC token`, even with the app installed on the repository. The review now uses the action's documented alternative, the workflow's own `GITHUB_TOKEN`, with `pull-requests: write` as its only write permission so it can comment. Findings are posted by the Actions bot rather than by Claude's app.
+- Found in step 6: when the token was wrong, every run failed in one turn at no cost, and the action's log hid the reason. The cost summary now also shows a failed run's error text from the execution file.
 
 ## Proof
 

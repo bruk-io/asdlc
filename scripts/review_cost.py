@@ -17,6 +17,23 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 
+ERROR_TEXT_LIMIT = 500
+
+
+def _error_lines(result: Mapping[str, object]) -> list[str]:
+    """Say why a run failed, since the action prints only a sanitised summary."""
+    if not result.get("is_error"):
+        return []
+    errors = result.get("errors")
+    text = str(result.get("result") or "").strip() or (
+        "; ".join(str(e) for e in errors) if isinstance(errors, list) else ""
+    )
+    if not text:
+        return ["- The run ended in an error, and the execution file gives no reason.", ""]
+    shortened = text if len(text) <= ERROR_TEXT_LIMIT else text[:ERROR_TEXT_LIMIT] + "..."
+    return [f"- The run ended in an error: {shortened}", ""]
+
+
 def summarise(messages: Sequence[Mapping[str, object]]) -> str:
     """The cost table for one run, or a line saying why there is none."""
     results = [m for m in messages if m.get("type") == "result"]
@@ -26,6 +43,7 @@ def summarise(messages: Sequence[Mapping[str, object]]) -> str:
     lines = [
         "## Review cost",
         "",
+        *_error_lines(result),
         f"- Cost at API prices: ${float(result.get('total_cost_usd') or 0):.4f}",
         f"- Duration: {int(result.get('duration_ms') or 0) / 1000:.0f}s",
         f"- Turns: {result.get('num_turns', 'unknown')}",
