@@ -862,8 +862,36 @@ def release(board: Board, raw_id: str, worker: str, cwd: Path) -> None:
         print(f"its worktree is left as it was: {path}")
 
 
+SCAFFOLDING = Path(__file__).resolve().parent.parent / "templates" / "board"
+MARKETPLACE_PLACEHOLDER = "{{marketplace}}"
+
+
+def marketplace_name(folder: str) -> str:
+    """The tasks repository's marketplace name: its folder's name, lowercase and hyphenated."""
+    return re.sub(r"[^a-z0-9]+", "-", folder.lower()).strip("-") or "tasks"
+
+
+def missing_scaffolding(templates: Mapping[str, str], existing: Iterable[str], marketplace: str) -> dict[str, str]:
+    """The scaffolding files a board lacks, with their contents. Existing files are never in it."""
+    present = frozenset(existing)
+    return {path: text.replace(MARKETPLACE_PLACEHOLDER, marketplace) for path, text in sorted(templates.items()) if path not in present}
+
+
+def _add_scaffolding(directory: Path) -> list[str]:
+    """Copy the files of `templates/board/` that the board doesn't have yet; return their paths."""
+    templates = {p.relative_to(SCAFFOLDING).as_posix(): p.read_text() for p in SCAFFOLDING.rglob("*") if p.is_file()}
+    existing = [path for path in templates if (directory / path).exists()]
+    added = missing_scaffolding(templates, existing, marketplace_name(directory.name))
+    for path, text in added.items():
+        (directory / path).parent.mkdir(parents=True, exist_ok=True)
+        (directory / path).write_text(text)
+    return list(added)
+
+
 def init_board(directory: Path) -> None:
-    """A board repository at `directory`: git, `backlog init`, this board's config, one commit.
+    """A board repository at `directory`: git, `backlog init`, this board's config, the
+    marketplace and team plugin scaffolding, one commit. Run again on an existing board, it
+    updates the config and adds only the scaffolding files that are missing.
 
     Raises:
         AsdlcError: git or backlog init failed.
@@ -880,10 +908,16 @@ def init_board(directory: Path) -> None:
         if done.returncode != 0 or not config.exists():
             raise AsdlcError(f"backlog init failed in {directory}: {(done.stderr or done.stdout).strip()}")
     config.write_text(board_config(config.read_text(), directory.name))
-    _board_git(board, "add", "backlog")
-    if _board_git(board, "diff", "--cached", "--quiet", check=False).returncode != 0:
-        _board_git(board, "commit", "--quiet", "--no-verify", "-m", "Initialise the asdlc board")
+    added = _add_scaffolding(directory)
+    fresh = _board_git(board, "rev-parse", "--verify", "--quiet", "HEAD", check=False).returncode != 0
+    _board_git(board, "add", "--", "backlog", *added)
+    if _board_git(board, "diff", "--cached", "--quiet", "--", "backlog", *added, check=False).returncode != 0:
+        message = "Initialise the asdlc board" if fresh else "Update the asdlc board's config and add missing scaffolding"
+        _board_git(board, "commit", "--quiet", "--no-verify", "-m", message, "--", "backlog", *added)
+    if added:
+        _say(f"added {len(added)} scaffolding file(s), leaving existing ones as they were: {', '.join(added)}")
     print(f"board ready at {directory}. Add its remote and push it: git -C {directory} remote add origin <url> && git -C {directory} push -u origin {BOARD_BRANCH}")
+    print("Each developer then installs the team plugin from it once, in Claude Code: /plugin install team --marketplace <owner>/<repo>")
 
 
 def _parser() -> argparse.ArgumentParser:
