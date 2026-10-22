@@ -1,6 +1,6 @@
 # asdlc
 
-A Claude Code plugin implementing Anthropic's AI-native SDLC playbook. It builds itself: every change to this repository goes through the plugin's own loop.
+A Claude Code plugin implementing Anthropic's AI-native SDLC playbook. It builds itself: every change to this repository carries an approved plan.
 
 ## Commands
 
@@ -11,12 +11,7 @@ A Claude Code plugin implementing Anthropic's AI-native SDLC playbook. It builds
 
 ## The loop
 
-Nothing changes here except through it. Each stage is a file in git and a pull request; the merge is the gate.
-
-- Intent: `intent/<slug>.md` - the problem, in the requester's words. Merging accepts it.
-- Spec: `spec/<slug>.md` - numbered requirements, design, areas of concern; settles every intent question by number. Merging approves it.
-- Plan: `plan/<slug>.md` - files, order, risks, proof, citing requirement numbers. Merging approves it; implementation starts after.
-- Change: the change itself, in its own pull request, built from the plan.
+Each change carries its plan, `plan/<slug>.md` (files, order, risks, proof, citing requirement numbers from `spec/`), in the same pull request as the change. The owner approves the plan in the session before anything is built; the merge is the gate for both. `intent/` and `spec/` hold the accepted problems and requirements that plans cite.
 
 If a change departs from its plan, update the plan in the same commit and say why.
 

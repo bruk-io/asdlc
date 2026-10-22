@@ -68,11 +68,13 @@ TO_DO, IN_PROGRESS, IN_REVIEW, DONE = "To Do", "In Progress", "In Review", "Done
 STATUSES = (TO_DO, IN_PROGRESS, IN_REVIEW, DONE)
 TYPES = ("intent", "task", "bug", "spike")
 SIZE_LABELS = ("size-1", "size-2", "size-3", "size-4", "size-5", "size-8")
+CHANGES_REQUESTED = "changes-requested"
+REVIEW_PASSED = "review-passed"
 BOARD_SETTINGS = frozendict({
     "statuses": list(STATUSES),
     "default_status": TO_DO,
     "types": list(TYPES),
-    "labels": list(SIZE_LABELS),
+    "labels": [*SIZE_LABELS, CHANGES_REQUESTED, REVIEW_PASSED],
     "auto_commit": True,
     "bypass_git_hooks": True,
     "remote_operations": True,
@@ -88,8 +90,6 @@ LEAD_KEY = "asdlc_lead"  # frontmatter keys asdlc writes itself; Backlog 1.55 ke
 HEARTBEAT_KEY = "asdlc_heartbeat"
 REVIEWER_KEY = "asdlc_reviewer"  # the reviewer holding a review claim; cleared when it finishes
 REVIEW_KIND_KEY = "asdlc_review_kind"  # cross-machine or same-machine, kept after the review for the person who merges
-CHANGES_REQUESTED = "changes-requested"
-REVIEW_PASSED = "review-passed"
 _REVIEWER_LABEL = re.compile(r"^r\d+$")
 DRAFTS = "backlog/drafts/"
 DEFAULT_WORKERS = 3
@@ -1397,6 +1397,19 @@ def _transact[R](board: Board, step: Step[R]) -> R:
         raise AsdlcError(f"gave up after {PUSH_ATTEMPTS} attempts because other agents kept pushing first; nothing was changed, try again")
 
 
+CONFIGURED = "git config asdlc.board"
+
+
+def board_setting(explicit: str | None, environ: Mapping[str, str], configured: str) -> tuple[str, str] | None:
+    """The board as given, and where it came from: `--board`, then $ASDLC_BOARD, then `git
+    config asdlc.board` (explicit, then the environment, then configuration). `asdlc`,
+    `asdlc-plugin` and the rule loader all look it up in this order; None when none is set."""
+    for raw, source in ((explicit or "", "--board"), (environ.get("ASDLC_BOARD", ""), "ASDLC_BOARD"), (configured, CONFIGURED)):
+        if raw.strip():
+            return raw.strip(), source
+    return None
+
+
 def resolve_board(explicit: str | None, cwd: Path) -> Path:
     """The board clone: --board, else $ASDLC_BOARD, else `git config asdlc.board`, else the
     board clone the current directory is in (where an orchestrator session runs).
@@ -1404,22 +1417,18 @@ def resolve_board(explicit: str | None, cwd: Path) -> Path:
     Raises:
         AsdlcError: no board is configured, or the path is not a board.
     """
-    raw = explicit or os.environ.get("ASDLC_BOARD")
-    source = "--board" if explicit else "ASDLC_BOARD"
-    if raw:
+    root = _git(cwd, "rev-parse", "--show-toplevel")
+    top = Path(root.stdout.strip()) if root.returncode == 0 else None
+    configured = _git(cwd, "config", "--get", "asdlc.board")
+    found = board_setting(explicit, os.environ, configured.stdout if configured.returncode == 0 else "")
+    if found is not None:
+        raw, source = found
         path = Path(raw).expanduser()
+        path = path if path.is_absolute() else ((top or cwd) if source == CONFIGURED else cwd) / path
+    elif top is not None and (top / "backlog" / "config.yml").exists():
+        source, path = "the current directory", top
     else:
-        root = _git(cwd, "rev-parse", "--show-toplevel")
-        top = Path(root.stdout.strip()) if root.returncode == 0 else None
-        configured = _git(cwd, "config", "--get", "asdlc.board")
-        if configured.returncode == 0 and configured.stdout.strip():
-            source = "git config asdlc.board"
-            path = Path(configured.stdout.strip()).expanduser()
-            path = path if path.is_absolute() else (top or cwd) / path
-        elif top is not None and (top / "backlog" / "config.yml").exists():
-            source, path = "the current directory", top
-        else:
-            raise AsdlcError("no board: pass --board <path>, set ASDLC_BOARD, run `git config asdlc.board <path>` in this code repository, or work from the board clone")
+        raise AsdlcError("no board: pass --board <path>, set ASDLC_BOARD, run `git config asdlc.board <path>` in this code repository, or work from the board clone")
     path = path.resolve()
     if not (path / "backlog" / "config.yml").exists():
         raise AsdlcError(f"{path} (from {source}) is not a board: it has no backlog/config.yml. Create one with asdlc init-board.")

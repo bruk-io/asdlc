@@ -18,6 +18,10 @@ Denied, each with the reason and the way that works instead:
   marker. Work starts with a claim, so no two agents change the same thing.
 - `git push` to the default branch of such a code repository. Changes reach it through
   review. Pushes to the board itself are how the board works, so they are allowed.
+- Approving, requesting changes on or merging a pull request: `gh pr review --approve` or
+  `--request-changes` (`-a`, `-r`), `gh pr merge`, and the same through `gh api` (a pull
+  request's `/merge`, a review with event APPROVE or REQUEST_CHANGES, or the GraphQL
+  mutations that do either). Approving and merging are a person's; a review comments.
 
 Shell commands are parsed with shlex, through `&&`, `;`, `|`, subshells, `cd`, env
 assignments and `sh -c`. A shell can always do something this doesn't recognise, so it
@@ -72,6 +76,21 @@ class Repo:
 Lookup = Callable[[Path], Repo | None]
 
 ALLOW = Outcome(Verdict.ALLOW, "nothing the board guard covers")
+MERGE_REFUSAL = (
+    "merging a pull request is a person's decision: it is how work reaches the default branch. Leave it to the "
+    "person; a clean review labels the task review-passed for them."
+)
+APPROVAL_REFUSAL = (
+    "approving or requesting changes on a pull request is a person's decision, and an agent's review never approves. "
+    "Post the findings as a comment (gh pr comment <url> --body ..., or gh pr review <url> --comment --body ...) "
+    "and record the verdict with asdlc review-done."
+)
+_GH_REVIEW_VALUES = frozenset({"-b", "--body", "-F", "--body-file", "-R", "--repo"})
+_GH_VERDICTS = frozenset({"-a", "--approve", "-r", "--request-changes"})
+_GH_API_VALUES = frozenset({"-X", "--method", "-f", "--raw-field", "-F", "--field", "-H", "--header", "--input", "-q", "--jq",
+                            "-t", "--template", "--hostname", "-p", "--preview", "--cache"})
+_GH_API_FIELDS = frozenset({"-f", "--raw-field", "-F", "--field"})
+_PERSON_EVENTS = frozenset({"APPROVE", "REQUEST_CHANGES"})
 ACCEPT_REFUSAL = (
     "asdlc accept promotes an intent and its draft children to accepted work, and accepting work is a "
     "person's decision: ask the person to run asdlc accept <intent-id> in their own terminal."
@@ -232,12 +251,85 @@ def _git_call(words: Sequence[str], directory: Path) -> tuple[str, list[str], Pa
     return words[index], list(words[index + 1:]), directory
 
 
+def options(arguments: Sequence[str], takes_value: frozenset[str]) -> tuple[list[str], list[tuple[str, str]]]:
+    """A command's positional words, and its flags with their values: `-f v`, `-fv`, `--flag v`
+    and `--flag=v`. A flag without a value has an empty one."""
+    positional: list[str] = []
+    found: list[tuple[str, str]] = []
+    index = 0
+    while index < len(arguments):
+        word = arguments[index]
+        index += 1
+        if word == "--":
+            positional += arguments[index:]
+            break
+        if word.startswith("--"):
+            flag, equals, value = word.partition("=")
+        elif word.startswith("-") and len(word) > 1:
+            flag, equals, value = word[:2], "", word[2:]
+        else:
+            positional.append(word)
+            continue
+        if not equals and not value and flag in takes_value and index < len(arguments):
+            value = arguments[index]
+            index += 1
+        found.append((flag, value))
+    return positional, found
+
+
+def _gh_api(arguments: Sequence[str]) -> Outcome | None:
+    """A `gh api` call that merges a pull request or submits an approving or changes-requesting review."""
+    positional, found = options(arguments, _GH_API_VALUES)
+    path = re.sub(r"^https?://[^/]+", "", positional[0] if positional else "").partition("?")[0].strip("/")
+    fields = {key.strip().lower(): value for flag, raw in found if flag in _GH_API_FIELDS for key, _, value in [raw.partition("=")]}
+    piped = any(flag == "--input" for flag, _ in found)
+    method = next((value.upper() for flag, value in reversed(found) if flag in ("-X", "--method")), "POST" if fields or piped else "GET")
+    unseen = f"could not see what this gh api call to {path} sends (it reads it from a file or stdin), so it may approve or merge a pull request; allowed"
+    if path == "graphql":
+        query = fields.get("query", "")
+        if piped or query.startswith("@"):
+            return Outcome(Verdict.ERROR, unseen)
+        if re.search(r"\b(mergePullRequest|enablePullRequestAutoMerge)\b", query):
+            return Outcome(Verdict.DENY, MERGE_REFUSAL)
+        if re.search(r"\b(addPullRequestReview|submitPullRequestReview)\b", query) and re.search(r"\b(APPROVE|REQUEST_CHANGES)\b", " ".join(fields.values())):
+            return Outcome(Verdict.DENY, APPROVAL_REFUSAL)
+        return None
+    if method == "GET":
+        return None
+    if re.search(r"(^|/)pulls/[^/]+/merge$", path):
+        return Outcome(Verdict.DENY, MERGE_REFUSAL)
+    if re.search(r"(^|/)pulls/[^/]+/reviews(/[^/]+/events)?$", path):
+        event = fields.get("event", "")
+        if event.strip().upper() in _PERSON_EVENTS:
+            return Outcome(Verdict.DENY, APPROVAL_REFUSAL)
+        if piped or event.startswith("@"):
+            return Outcome(Verdict.ERROR, unseen)
+    return None
+
+
+def gh_outcome(arguments: Sequence[str]) -> Outcome | None:
+    """Why a `gh` command is a person's to run, or None when it isn't one of those."""
+    words = list(arguments)
+    while words and words[0].startswith("-"):
+        words = words[1:]
+    match words[:2]:
+        case ["pr", "merge"]:
+            return Outcome(Verdict.DENY, MERGE_REFUSAL)
+        case ["pr", "review"]:
+            _, found = options(words[2:], _GH_REVIEW_VALUES)
+            if any(flag in _GH_VERDICTS and value.lower() != "false" for flag, value in found):
+                return Outcome(Verdict.DENY, APPROVAL_REFUSAL)
+        case ["api", *_]:
+            return _gh_api(words[1:])
+    return None
+
+
 def decide_command(command: str, cwd: Path, lookup: Lookup) -> Outcome:
     try:
         commands = simple_commands(command)
     except ValueError as error:
-        if re.search(r"\b(backlog|asdlc|git\s+push)\b", command):
-            return Outcome(Verdict.ERROR, f"could not parse a command that may touch the board or push ({error}); allowed")
+        if re.search(r"\b(backlog|asdlc|git\s+push|gh\s+(pr|api))\b", command):
+            return Outcome(Verdict.ERROR, f"could not parse a command that may touch the board, push, approve or merge ({error}); allowed")
         return ALLOW
     directory = cwd
     for words in commands:
@@ -266,6 +358,9 @@ def decide_command(command: str, cwd: Path, lookup: Lookup) -> Outcome:
                 inner = decide_command(shlex.join(rest[rest.index("--") + 1:]), directory, lookup)
                 if inner.verdict is not Verdict.ALLOW:
                     return inner
+        elif name == "gh":
+            if (outcome := gh_outcome(words[1:])) is not None:
+                return outcome
         elif name == "git":
             subcommand, rest, where = _git_call(words, directory)
             if subcommand == "push" and (outcome := _decide_push(rest, where, lookup)).verdict is not Verdict.ALLOW:

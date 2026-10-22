@@ -19,10 +19,10 @@ uncommitted changes and other agents on the machine keep claiming work while one
 `<board>.worktrees/plugin-<slug>`, from `origin/main`; every edit, verification and check
 happens there; `publish` pushes it to `origin/main` and removes it.
 
-For a code repository the board is `--board`, else `git config asdlc.board` in it, else
-$ASDLC_BOARD: the same lookup as the rule loader, so the plugin lands where it is read.
-`check` and `publish` take a slug: with `--repo`, the board is found the same way through that
-repository; without it, `--board`, else $ASDLC_BOARD, else `git config asdlc.board` here, as `asdlc`.
+For a code repository the board is `--board`, else $ASDLC_BOARD, else `git config
+asdlc.board` in it: the one lookup `asdlc` and the rule loader use too, so the plugin lands
+where it is read. `check` and `publish` take a slug: with `--repo`, the board is found the
+same way through that repository; without it, as `asdlc` finds it from here.
 `claude plugin validate` is $ASDLC_CLAUDE, else `claude`, else `npx @anthropic-ai/claude-code`.
 """
 
@@ -518,21 +518,22 @@ def _is_board(path: Path) -> bool:
 
 
 def board_for_repo(explicit: str | None, repo: Path, environ: Mapping[str, str]) -> Path:
-    """--board, else `git config asdlc.board` in the code repository, else $ASDLC_BOARD.
+    """--board, else $ASDLC_BOARD, else `git config asdlc.board` in the code repository: the
+    order `asdlc` and the rule loader use (`asdlc.board_setting`).
 
     Raises:
         PluginError: none is set, or it is not a board.
     """
     configured = _git(repo, "config", "--get", "asdlc.board")
-    for raw, source in ((explicit, "--board"), (configured.stdout.strip() if configured.returncode == 0 else "", "git config asdlc.board"),
-                        (environ.get("ASDLC_BOARD", ""), "ASDLC_BOARD")):
-        if raw:
-            path = Path(raw).expanduser()
-            path = (path if path.is_absolute() else repo / path).resolve()
-            if not _is_board(path):
-                raise PluginError(f"{path} (from {source}) is not a tasks repository: it has no backlog/config.yml")
-            return path
-    raise PluginError(f"no tasks repository for {repo}: run `git config asdlc.board <path to your clone of it>` there, or pass --board")
+    found = asdlc.board_setting(explicit, environ, configured.stdout if configured.returncode == 0 else "")
+    if found is None:
+        raise PluginError(f"no tasks repository for {repo}: run `git config asdlc.board <path to your clone of it>` there, or pass --board")
+    raw, source = found
+    path = Path(raw).expanduser()
+    path = (path if path.is_absolute() else repo / path).resolve()
+    if not _is_board(path):
+        raise PluginError(f"{path} (from {source}) is not a tasks repository: it has no backlog/config.yml")
+    return path
 
 
 def board_for_slug(explicit: str | None, repo: Path | None) -> Path:
@@ -866,7 +867,7 @@ def _publish(explicit: str | None, slug: str, repo: Path | None) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="asdlc-plugin", description="Onboard a code repository: its plugin in the tasks repository.")
-    parser.add_argument("--board", help="the tasks repository clone (else git config asdlc.board, else $ASDLC_BOARD)")
+    parser.add_argument("--board", help="the tasks repository clone (else $ASDLC_BOARD, else git config asdlc.board)")
     after = argparse.ArgumentParser(add_help=False)  # --board is accepted after the subcommand too
     after.add_argument("--board", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="command", required=True)

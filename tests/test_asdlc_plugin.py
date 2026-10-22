@@ -308,6 +308,16 @@ class StatusAndScaffoldTest(unittest.TestCase):
         self.assertEqual(done.returncode, 1)
         self.assertIn("git config asdlc.board", done.stderr)
 
+    def test_the_board_is_the_flag_then_the_environment_then_git_config(self) -> None:
+        _git(self.world.code, "config", "asdlc.board", str(self.world.root / "not-a-board"))
+        refused = _run("status", str(self.world.code), "--json")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("(from git config asdlc.board) is not a tasks repository", refused.stderr)
+        found = _run("status", str(self.world.code), "--json", env={"ASDLC_BOARD": str(self.world.board)})
+        self.assertEqual(json.loads(found.stdout)["board"], str(self.world.board), found.stderr)
+        flagged = _run("--board", str(self.world.board), "status", str(self.world.code), "--json", env={"ASDLC_BOARD": str(self.world.code)})
+        self.assertEqual(json.loads(flagged.stdout)["board"], str(self.world.board), flagged.stderr)
+
     def test_scaffold_opens_a_worktree_and_leaves_the_board_clone_alone(self) -> None:
         self.world.scaffold()
         for name in (".claude-plugin/plugin.json", "layers.toml", "commands.toml"):

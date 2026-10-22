@@ -187,6 +187,78 @@ class PushTest(unittest.TestCase):
         self.assertIn("pull request", reason)
 
 
+class PullRequestTest(unittest.TestCase):
+    """Approving, requesting changes on and merging a pull request are a person's."""
+
+    def reason(self, command: str) -> str:
+        outcome = guard.decide_command(command, PLAIN, lookup)
+        self.assertIs(outcome.verdict, guard.Verdict.DENY, command)
+        return outcome.reason
+
+    def test_denies_approving_or_requesting_changes(self) -> None:
+        for command in (
+            "gh pr review 12 --approve",
+            "gh pr review https://github.com/acme/api/pull/12 -a -b 'Looks good'",
+            "gh pr review 12 --request-changes --body 'x'",
+            "gh pr review -r 12 -b x",
+            "gh pr review 12 --approve=true",
+            "cd /work/app && gh pr review 12 -R acme/api --approve",
+            "sh -c 'gh pr review 12 --approve'",
+        ):
+            with self.subTest(command=command):
+                self.assertIn("gh pr comment", self.reason(command))
+
+    def test_denies_merging(self) -> None:
+        for command in ("gh pr merge 12", "gh pr merge --squash --auto https://github.com/acme/api/pull/12", "env GH_TOKEN=x gh pr merge 12"):
+            with self.subTest(command=command):
+                self.assertIn("merging a pull request is a person's decision", self.reason(command))
+
+    def test_denies_the_same_through_gh_api(self) -> None:
+        cases = {
+            "gh api -X PUT repos/acme/api/pulls/12/merge": "merging",
+            "gh api --method=PUT /repos/{owner}/{repo}/pulls/12/merge -f merge_method=squash": "merging",
+            "gh api repos/acme/api/pulls/12/merge -f commit_title=x": "merging",
+            "gh api https://api.github.com/repos/acme/api/pulls/12/merge -XPUT": "merging",
+            "gh api repos/acme/api/pulls/12/reviews -f event=APPROVE": "approving",
+            "gh api repos/acme/api/pulls/12/reviews -F event=REQUEST_CHANGES -f body=x": "approving",
+            "gh api repos/acme/api/pulls/12/reviews --field=event=approve": "approving",
+            "gh api -X POST repos/acme/api/pulls/12/reviews/99/events -f event=APPROVE": "approving",
+            "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'": "merging",
+            "gh api graphql -f query='mutation { addPullRequestReview(input: {pullRequestId: \"x\", event: APPROVE}) { clientMutationId } }'": "approving",
+        }
+        for command, says in cases.items():
+            with self.subTest(command=command):
+                self.assertIn(says, self.reason(command))
+
+    def test_allows_comments_reads_and_everything_else(self) -> None:
+        for command in (
+            "gh pr review 12 --comment --body 'two findings'",
+            "gh pr review 12 -c -b '-a is not a flag here'",
+            "gh pr comment 12 --body 'Review by @kyle.r1'",
+            "gh pr create --base main --head task-1-x --title t --body b",
+            "gh pr view 12 --json state",
+            "gh api repos/acme/api/pulls/12/merge",
+            "gh api repos/acme/api/pulls/12/reviews",
+            "gh api repos/acme/api/pulls/12/reviews -f event=COMMENT -f body=x",
+            "gh api repos/acme/api/pulls/12/comments -f body=x",
+            "gh api graphql -f query='query { viewer { login } }'",
+            "gh auth status",
+        ):
+            with self.subTest(command=command):
+                self.assertIs(verdict(command), guard.Verdict.ALLOW)
+
+    def test_a_review_or_query_it_cannot_see_is_allowed_and_said(self) -> None:
+        for command in ("gh api repos/acme/api/pulls/12/reviews --input review.json", "gh api graphql -F query=@mutation.graphql"):
+            with self.subTest(command=command):
+                outcome = guard.decide_command(command, PLAIN, lookup)
+                self.assertIs(outcome.verdict, guard.Verdict.ERROR)
+                self.assertIn("could not see", outcome.reason)
+
+    def test_options(self) -> None:
+        self.assertEqual(guard.options(["12", "-a", "-bbody", "--repo", "a/b", "--x=1", "--", "-r"], frozenset({"-b", "--repo"})),
+                         (["12", "-r"], [("-a", ""), ("-b", "body"), ("--repo", "a/b"), ("--x", "1")]))
+
+
 class DecideFileTest(unittest.TestCase):
     def test_board_files(self) -> None:
         board = REPOS[BOARD]
@@ -287,6 +359,14 @@ class GuardHookTest(unittest.TestCase):
         self.assertEqual(self.decision(done), "deny")
         self.assertIn("asdlc accept", json.loads(done.stdout)["hookSpecificOutput"]["permissionDecisionReason"])
         self.assertEqual(self.log(self.board)[-1]["verdict"], "deny")
+
+    def test_denies_approving_and_merging_and_logs_it(self) -> None:
+        for command in ("gh pr review 3 --approve", "gh pr merge 3", "gh api -X PUT repos/a/b/pulls/3/merge"):
+            with self.subTest(command=command):
+                done = self.run_hook(self.worktree, "Bash", command=command)
+                self.assertEqual(self.decision(done), "deny")
+                self.assertIn("a person's decision", json.loads(done.stdout)["hookSpecificOutput"]["permissionDecisionReason"])
+                self.assertEqual(self.log(self.worktree)[-1]["verdict"], "deny")
 
     def test_says_so_when_it_cannot_parse(self) -> None:
         done = self.run_hook(self.code, "Bash", command="backlog task edit 1 -s 'Done")

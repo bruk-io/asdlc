@@ -1,6 +1,6 @@
 # asdlc
 
-An agentic SDLC as a Claude Code plugin, built on Anthropic's AI-native SDLC playbook. It builds itself: every change starts as an intent in `intent/` and runs through the plugin's own loop.
+An agentic SDLC as a Claude Code plugin, built on Anthropic's AI-native SDLC playbook. It builds itself: every change carries a plan, approved before it is built, in the same pull request as the change.
 
 ## Install
 
@@ -75,12 +75,13 @@ The `guard_board` hook refuses, with the reason:
 - `backlog` or `asdlc board` setting To Do or Done, promoting a draft, or creating a task without `--draft` (it would start as accepted To Do work), and `asdlc accept`: accepting and closing work are a person's decisions. `asdlc release` is the way to hand a task back. The command `asdlc record-check` runs is judged like any other.
 - Editing a code repository that has `asdlc.board` set outside a claimed task's worktree, so no two agents change the same work.
 - `git push` to that repository's default branch, so changes arrive through review. Pushes to the board are allowed.
+- `gh pr review --approve` or `--request-changes`, `gh pr merge`, and the same through `gh api`: approving and merging a pull request are a person's.
 
 A claim with no update for `stale_after` (in `asdlc.toml`, default 2h) is released by `asdlc reap`, which any orchestrator runs; `asdlc heartbeat` keeps a live claim fresh. `asdlc release` hands a task back by hand.
 
 ### Cross-machine review
 
-A finished task is In Review with its branch and pull request recorded. Any orchestrator whose engineer didn't write it, with `review: true` in their `devs/<name>.yaml` and the repository registered, may claim its review with `asdlc review-next`; the claim is a compare-and-swap push like any other, recorded on the task as `asdlc_reviewer`. The orchestrator launches the `reviewer` agent (sonnet, medium effort, from the routing table), which reads the task, its plan, its acceptance criteria, its intent's contracts and `REVIEW.md`, reviews the diff in a detached checkout of its own, records the verdict with `asdlc review-done`, and posts the same findings on the pull request as a comment when `gh` can reach it. A review never approves on GitHub; a person merges.
+A finished task is In Review with its branch and pull request recorded. Any orchestrator whose engineer didn't write it, with `review: true` in their `devs/<name>.yaml` and the repository registered, may claim its review with `asdlc review-next`; the claim is a compare-and-swap push like any other, recorded on the task as `asdlc_reviewer`. The orchestrator launches the `reviewer` agent (sonnet, medium effort, from the routing table), which reads the task, its plan, its acceptance criteria, its intent's contracts and `REVIEW.md`, reviews the diff in a detached worktree of the registered repository (so the repository's rules reach it), records the verdict with `asdlc review-done`, and posts the same findings on the pull request as a comment when `gh` can reach it. A review never approves on GitHub; a person merges.
 
 `changes` sends the task back to the worker that built it, which fixes the findings and sets it In Review again. If no other engineer's reviewer claims a task within `review_fallback_after` (in `asdlc.toml`, default 30m) of it entering In Review, its author's own orchestrator may review it with a fresh reviewer agent (`review-next --fallback`), and the task records `asdlc_review_kind: same-machine` so the person who merges knows. Review claims count against the `workers` cap, are kept alive by `heartbeat`, and are released by `reap`.
 

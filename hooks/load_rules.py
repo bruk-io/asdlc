@@ -8,7 +8,8 @@ board), as plugins. Claude Code loads a plugin's skills but not its rules, so th
 delivers them.
 
 - PostToolUse on Read, Edit, Write and NotebookEdit: find the code repository holding the
-  file, then its board (`git config asdlc.board` in that repository, else $ASDLC_BOARD).
+  file, then its board ($ASDLC_BOARD, else `git config asdlc.board` in that repository: the
+  order `asdlc` and `asdlc-plugin` use, after their `--board`).
   Each rule in the board's `plugins/team/rules/*.md`, and in `plugins/<repo-slug>/rules/*.md`
   for this repository, whose frontmatter `paths` match the file (relative to the
   repository's root; no `paths` matches every file) and that this context hasn't had yet,
@@ -313,9 +314,10 @@ def locate(file: Path, environ: Mapping[str, str]) -> Touch | None:
     repo = Path(top.stdout.strip()).resolve()
     if _is_board(repo):
         return None
-    configured = _git(repo, "config", "--get", "asdlc.board")
-    raw = configured.stdout.strip() if configured.returncode == 0 else ""
-    raw = raw or environ.get("ASDLC_BOARD", "")
+    raw = environ.get("ASDLC_BOARD", "").strip()
+    if not raw:
+        configured = _git(repo, "config", "--get", "asdlc.board")
+        raw = configured.stdout.strip() if configured.returncode == 0 else ""
     if not raw:
         return None
     board = Path(raw).expanduser()

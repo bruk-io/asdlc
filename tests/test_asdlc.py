@@ -205,7 +205,7 @@ class SmallPiecesTest(unittest.TestCase):
         self.assertEqual(fields["project_name"], "team-board")
         self.assertEqual(fields["statuses"], ("To Do", "In Progress", "In Review", "Done"))
         self.assertEqual(fields["types"], ("intent", "task", "bug", "spike"))
-        self.assertEqual(fields["labels"], ("size-1", "size-2", "size-3", "size-4", "size-5", "size-8"))
+        self.assertEqual(fields["labels"], ("size-1", "size-2", "size-3", "size-4", "size-5", "size-8", "changes-requested", "review-passed"))
         self.assertEqual(
             [fields[k] for k in ("default_status", "auto_commit", "bypass_git_hooks", "remote_operations", "check_active_branches")],
             ["To Do", "true", "true", "true", "false"],
@@ -558,6 +558,12 @@ class ReviewLogicTest(unittest.TestCase):
         self.assertEqual([r["id"] for r in report["changes_requested"]], ["TASK-3"])
         self.assertEqual(sorted(r["id"] for r in report["tasks"]), ["TASK-2", "TASK-3"])
 
+    def test_board_setting_is_explicit_then_environment_then_configuration(self) -> None:
+        self.assertEqual(asdlc.board_setting("/a", {"ASDLC_BOARD": "/b"}, "/c\n"), ("/a", "--board"))
+        self.assertEqual(asdlc.board_setting(None, {"ASDLC_BOARD": "/b"}, "/c\n"), ("/b", "ASDLC_BOARD"))
+        self.assertEqual(asdlc.board_setting("", {"ASDLC_BOARD": " "}, "/c\n"), ("/c", "git config asdlc.board"))
+        self.assertIsNone(asdlc.board_setting(None, {}, ""))
+
     def test_review_route(self) -> None:
         self.assertEqual((asdlc.REVIEW.model, asdlc.REVIEW.effort), ("sonnet", "medium"))
 
@@ -704,7 +710,7 @@ class InitBoardTest(unittest.TestCase):
             self.assertEqual(fields["statuses"], ("To Do", "In Progress", "In Review", "Done"))
             self.assertEqual(fields["default_status"], "To Do")
             self.assertEqual(fields["types"], ("intent", "task", "bug", "spike"))
-            self.assertEqual(fields["labels"], ("size-1", "size-2", "size-3", "size-4", "size-5", "size-8"))
+            self.assertEqual(fields["labels"], ("size-1", "size-2", "size-3", "size-4", "size-5", "size-8", "changes-requested", "review-passed"))
             self.assertEqual(
                 [fields[k] for k in ("auto_commit", "bypass_git_hooks", "remote_operations", "check_active_branches")],
                 ["true", "true", "true", "false"],
@@ -743,6 +749,19 @@ class BoardCommandTest(unittest.TestCase):
         done = _asdlc("board", "task", "list", "--plain", cwd=code)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("TASK-1", done.stdout)
+
+    def test_the_environment_comes_before_git_config_and_the_flag_before_both(self) -> None:
+        code = self.boards.root / "code"
+        _git(self.boards.root, "init", "--quiet", "-b", "main", str(code))
+        _git(code, "config", "asdlc.board", str(self.boards.root / "not-a-board"))
+        done = _asdlc("board", "task", "list", "--plain", cwd=code, env={"ASDLC_BOARD": str(self.mine)})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("TASK-1", done.stdout)
+        done = _asdlc("--board", str(self.mine), "board", "task", "list", "--plain", cwd=code, env={"ASDLC_BOARD": str(code)})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        refused = _asdlc("board", "task", "list", "--plain", cwd=code)
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("(from git config asdlc.board) is not a board", refused.stderr)
 
     def test_a_rejected_push_is_rebased_and_retried(self) -> None:
         env = _interfering_backlog(self.boards.root, self.theirs, f'"$REAL_BACKLOG" task edit TASK-1 --notes "theirs"')

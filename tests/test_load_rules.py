@@ -289,6 +289,22 @@ class HookTest(unittest.TestCase):
         self.assertIn("src/core/x.py in acme-app", text)
         self.assertIn("`core` layer", text)
 
+    def test_a_detached_review_worktree_gets_the_repositorys_rules(self) -> None:
+        review = self.root / "app.worktrees" / "review-task-1"
+        _git(self.code, "worktree", "add", "-q", "--detach", str(review), "HEAD")
+        text = self.context(self.touch(review / "src" / "core" / "x.py"))
+        self.assertIn("src/core/x.py in acme-app", text)
+        self.assertIn("[asdlc] acme-app rule `core`", text)
+        self.assertIn("`core` layer", text)
+
+    def test_asdlc_board_comes_before_the_repositorys_git_config(self) -> None:
+        other = self.root / "other-board"
+        _write(other / "backlog" / "config.yml", "project_name: other\n")
+        _write(other / "plugins" / "team" / "rules" / "other.md", "# Other\n\nThe other board's rule.\n")
+        text = self.context(self.touch(self.code / "a.py", ASDLC_BOARD=str(other)))
+        self.assertIn("The other board's rule.", text)
+        self.assertNotIn("Team rule for every file.", text)
+
     def test_no_board_no_repository_and_the_board_itself_get_nothing(self) -> None:
         plain = self.root / "plain"
         plain.mkdir()
