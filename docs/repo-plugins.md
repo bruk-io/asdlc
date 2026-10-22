@@ -70,6 +70,7 @@ Rules hold the few lines that must be in front of an agent whenever it works on 
 
 ```markdown
 ---
+layer: core
 paths:
   - "src/core/**"
 ---
@@ -83,7 +84,7 @@ Applies to code in src/core.
 ```
 
 - Frontmatter `paths` is a list of globs relative to the code repository's root: one `- "glob"` per line, or a flow list `["a", "b"]`. `**/` is any number of folders (none included), `**` anything, `*` anything within one folder, `?` one character, `{a,b}` either; a glob ending in `/` is everything under that folder. No `paths` means every file in the repository. An empty `paths` list is refused, since it would never apply.
-- A layer's rule uses that layer's globs from `layers.toml`.
+- A layer's rule says so with `layer: <name>` and uses that layer's globs from `layers.toml`. Each layer has one; the loader names a file's layer only when it delivers one of the repository's rules, so a layer with no rule is never mentioned. Other rules, such as the testing rule, have no `layer`.
 - Start the body with one line saying when it applies, then a few lines of judgement, each with its reason. Name the skill that holds any procedure.
 - `{plugin_root}` in the body becomes this plugin's folder in the reader's clone of the tasks repository, so a rule can point at a skill or template beside it even on a machine where the plugin isn't installed.
 - Each rule is delivered whole the first time it matches in a context (a session, or one subagent), and again after compaction. All rules delivered at once share a 10,000-character cap, so keep each well under it; anything cut says where the full rule is.
@@ -125,8 +126,18 @@ needs = ["a running Android emulator"]
 
 - `build`, `test` and `lint` are required tables. Others (`typecheck`, `format`, `e2e`, ...) are optional, named for what they check.
 - `run`: one shell command that exits non-zero on failure. If a check takes several commands, join them so it is still one.
-- `verified`: the date the command was last run on a clean checkout of the default branch and passed. A table with no `verified` was written down but never seen to pass; an agent using it says so in its evidence.
+- `verified`: the date the command was last run on a clean checkout of the default branch and passed. Only `asdlc-plugin verify-command` writes it, by running the command. A table with no `verified` was written down but never seen to pass; an agent using it says so in its evidence. Every table is verified except one with `needs`, which can't run on every machine.
 - `cwd` (optional): a folder relative to the repository's root to run it from.
 - `needs` (optional): what must be on the machine first, in words: a tool, an emulator, a service.
 - `test` is the full suite. A worker narrows it to what the change touches the way the repository's test runner allows, and records the exact command it ran.
 - Never weaken a verified command to make it pass. A command that stops working is a finding on a task, and its `verified` date stays as it was until someone fixes it and runs it again.
+
+## Making one
+
+The first time work needs a repository that has no plugin, the orchestrator runs the asdlc `onboard-repo` skill. The judgement is the skill's; `scripts/asdlc-plugin` does the rest:
+
+- `asdlc-plugin status <code-repo> [--json]`: the slug, and whether `plugins/<slug>/` is published or being made.
+- `asdlc-plugin scaffold <code-repo>`: opens a detached worktree of the tasks repository at `<tasks clone>.worktrees/plugin-<slug>`, from `origin/main`, and writes the skeleton and the marketplace entry there, never overwriting a file. The tasks clone itself is never edited, so `asdlc` keeps working while a plugin is made. Run on a published plugin, it opens that plugin for changes.
+- `asdlc-plugin verify-command <code-repo> <build|test|lint|...>`: runs one command in a checkout with no uncommitted changes whose `HEAD` is `origin`'s default branch, and on success writes today's date to its `verified`. That is the clone itself when it is one; otherwise a detached worktree beside it, `<code-repo>.worktrees/asdlc-verify`, reset to `origin`'s default branch on every run and kept so that what `build` installs is there for `test`. The clone is never touched. A command that fails, or changes tracked files, leaves `commands.toml` as it was.
+- `asdlc-plugin check <slug> [--repo <code-repo>]`: every rule on this page, plus `claude plugin validate` on the plugin and the marketplace when the CLI is installed. With `--repo`, each layer and rule must match files the repository has, and each layer must own at least one of them.
+- `asdlc-plugin publish <slug> [--repo <code-repo>]`: refuses unless `check` is clean, then commits the plugin's folder and its marketplace entry on top of `origin/main` with every git hook off, pushes, and retries when someone pushed first. It refuses if someone else published the same plugin meanwhile. Then it updates the tasks clone, removes the worktree, and prints a record of what it published for the task's notes.
