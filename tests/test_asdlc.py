@@ -455,6 +455,113 @@ class LeadAndStalenessTest(unittest.TestCase):
         self.assertEqual([r["id"] for r in report["reserved"]], ["TASK-4"])
 
 
+class ReviewLogicTest(unittest.TestCase):
+    NOW = datetime(2026, 10, 22, 15, 0, tzinfo=UTC)
+
+    def reviewing(self, engineer: str = "kyle", **fields: object) -> object:
+        values = {"registered": frozenset({"app"}), "now": self.NOW, "fallback_after": timedelta(minutes=30)} | fields
+        return asdlc.Reviewing(engineer, f"{engineer}.r1", **values)
+
+    def test_reviewer_names(self) -> None:
+        self.assertEqual(asdlc.reviewer_for("@kyle.r2", "kyle"), "kyle.r2")
+        for raw in ("kyle.w1", "ann.r1", "kyle", "kyle.r"):
+            with self.subTest(raw=raw), self.assertRaises(asdlc.AsdlcError):
+                asdlc.reviewer_for(raw, "kyle")
+
+    def test_reads_the_review_keys_and_references(self) -> None:
+        found = asdlc.task_from("x", "---\nid: TASK-1\nreferences:\n  - task-1-x\n  - https://github.com/a/b/pull/3\n"
+                                     "asdlc_reviewer: kyle.r1\nasdlc_review_kind: cross-machine\n---\n")
+        self.assertEqual((found.reviewer, found.review_kind, found.references), ("kyle.r1", "cross-machine", ("task-1-x", "https://github.com/a/b/pull/3")))
+        self.assertEqual(asdlc.review_refs(found.references), ("task-1-x", "https://github.com/a/b/pull/3"))
+        self.assertEqual(asdlc.review_refs(("https://example.com/notes", "b", "https://git.example.com/a/b/-/merge_requests/4")),
+                         ("b", "https://git.example.com/a/b/-/merge_requests/4"))
+        self.assertEqual(asdlc.review_refs(()), (None, None))
+
+    def test_authors_are_the_engineers_of_the_workers(self) -> None:
+        self.assertEqual(asdlc.authors(task("TASK-1", assignees=("@ann", "@ann.w1"))), {"ann"})
+        self.assertEqual(asdlc.authors(task("TASK-1", assignees=("@lee",))), {"lee"})
+        self.assertEqual(asdlc.review_kind(task("TASK-1", assignees=("@ann.w1",)), "ann"), asdlc.ReviewKind.SAME_MACHINE)
+        self.assertEqual(asdlc.review_kind(task("TASK-1", assignees=("@ann.w1",)), "kyle"), asdlc.ReviewKind.CROSS_MACHINE)
+
+    def test_who_may_claim_a_review(self) -> None:
+        ready = task("TASK-1", status="In Review", assignees=("@ann.w1",))
+        entered = self.NOW - timedelta(minutes=5)
+        self.assertIsNone(asdlc.review_refusal(ready, self.reviewing(), entered))
+        cases = {
+            "not In Review": task("TASK-1", status="In Progress", assignees=("@ann.w1",)),
+            "being reviewed by @lee.r1": task("TASK-1", status="In Review", assignees=("@ann.w1",), reviewer="lee.r1"),
+            "passed review": task("TASK-1", status="In Review", assignees=("@ann.w1",), labels=("size-2", "review-passed")),
+            "not registered on this machine": task("TASK-1", status="In Review", assignees=("@ann.w1",), project="elsewhere"),
+            "no project": task("TASK-1", status="In Review", assignees=("@ann.w1",), project=""),
+        }
+        for says, subject in cases.items():
+            with self.subTest(says=says):
+                self.assertIn(says, asdlc.review_refusal(subject, self.reviewing(), entered))
+        self.assertIsNone(asdlc.review_refusal(task("TASK-1", status="In Review", assignees=("@ann.w1",), labels=("changes-requested",)), self.reviewing(), entered))
+
+    def test_the_author_reviews_only_with_fallback_after_the_timeout(self) -> None:
+        own = task("TASK-1", status="In Review", assignees=("@kyle", "@kyle.w1"))
+        thirty_one = self.NOW - timedelta(minutes=31)
+        self.assertIn("--fallback", asdlc.review_refusal(own, self.reviewing(), thirty_one))
+        self.assertIn("waited 29m", asdlc.review_refusal(own, self.reviewing(fallback=True), self.NOW - timedelta(minutes=29)))
+        self.assertIn("waited 30m", asdlc.review_refusal(own, self.reviewing(fallback=True), self.NOW - timedelta(minutes=30)))
+        self.assertIn("waited 0m", asdlc.review_refusal(own, self.reviewing(fallback=True), None))
+        self.assertIsNone(asdlc.review_refusal(own, self.reviewing(fallback=True), thirty_one))
+        self.assertIsNone(asdlc.review_refusal(own, self.reviewing(fallback=True, fallback_after=timedelta(hours=1)), self.NOW - timedelta(minutes=61)))
+        self.assertIn("review_fallback_after (1h 0m)", asdlc.review_refusal(own, self.reviewing(fallback=True, fallback_after=timedelta(hours=1)), thirty_one))
+
+    def test_candidates_oldest_first_and_own_work_last(self) -> None:
+        tasks = (
+            task("TASK-1", status="In Review", assignees=("@ann.w1",), path="a"),
+            task("TASK-2", status="In Review", assignees=("@ann.w2",), path="b"),
+            task("TASK-3", status="In Review", assignees=("@kyle.w1",), path="c"),
+            task("TASK-4", status="In Review", assignees=("@lee.w1",), path="d", reviewer="lee.r1"),
+            task("TASK-5", status="In Progress", assignees=("@ann.w3",), path="e"),
+        )
+        entered = {"a": self.NOW - timedelta(minutes=10), "b": self.NOW - timedelta(minutes=20), "c": self.NOW - timedelta(hours=2)}
+        ready, skipped = asdlc.review_candidates(tasks, self.reviewing(), entered)
+        self.assertEqual([t.id for t in ready], ["TASK-2", "TASK-1"])
+        self.assertEqual({t.id for t, _ in skipped}, {"TASK-3", "TASK-4"})
+        ready, _ = asdlc.review_candidates(tasks, self.reviewing(fallback=True), entered)
+        self.assertEqual([t.id for t in ready], ["TASK-2", "TASK-1", "TASK-3"])
+
+    def test_only_the_claiming_reviewer_finishes(self) -> None:
+        held = task("TASK-1", status="In Review", assignees=("@ann.w1",), reviewer="kyle.r1")
+        self.assertIsNone(asdlc.review_done_refusal(held, "TASK-1", "kyle.r1"))
+        self.assertIn("@kyle.r1 holds its review", asdlc.review_done_refusal(held, "TASK-1", "lee.r1"))
+        self.assertIn("nobody holds its review", asdlc.review_done_refusal(task("TASK-1", status="In Review"), "TASK-1", "kyle.r1"))
+        self.assertIn("not In Review", asdlc.review_done_refusal(task("TASK-1", status="Done", reviewer="kyle.r1"), "TASK-1", "kyle.r1"))
+        self.assertIn("not a task", asdlc.review_done_refusal(None, "TASK-9", "kyle.r1"))
+
+    def test_review_comment(self) -> None:
+        text = asdlc.review_comment("kyle.r1", "same-machine", asdlc.ReviewVerdict.CHANGES, "  [Bugs, Important] x  ")
+        self.assertTrue(text.startswith("Review by @kyle.r1 (same-machine): changes requested."))
+        self.assertTrue(text.endswith("\n\n[Bugs, Important] x"))
+        self.assertIn("stays In Review for a person to merge", asdlc.review_comment("kyle.r1", "", asdlc.ReviewVerdict.CLEAN, "No findings."))
+
+    def test_stale_review_claims_and_the_cap(self) -> None:
+        items = (
+            task("TASK-1", status="In Review", assignees=("@ann.w1",), reviewer="kyle.r1", path="a"),
+            task("TASK-2", status="In Progress", assignees=("@kyle.w1",), path="b"),
+        )
+        old = self.NOW - timedelta(hours=3)
+        found = asdlc.stale_holds(items, {"a": old, "b": self.NOW}, self.NOW, timedelta(hours=2))
+        self.assertEqual([(s.task.id, s.hold, s.holders) for s in found], [("TASK-1", asdlc.Hold.REVIEW, ("@kyle.r1",))])
+        comment = asdlc.reap_comment(found[0], timedelta(hours=2))
+        self.assertIn("the review claim held by @kyle.r1", comment)
+        self.assertIn("Another reviewer may claim it", comment)
+        self.assertEqual(asdlc.busy(items, "kyle"), 2)
+        report = asdlc.mine_report(items + (task("TASK-3", status="In Progress", assignees=("@kyle.w2",), labels=("size-2", "changes-requested")),),
+                                   "kyle", asdlc.Prefs("kyle"))
+        self.assertEqual((report["active"], report["reviewing"]), (2, 1))
+        self.assertEqual([(r["id"], r["reviewer"]) for r in report["reviews"]], [("TASK-1", "kyle.r1")])
+        self.assertEqual([r["id"] for r in report["changes_requested"]], ["TASK-3"])
+        self.assertEqual(sorted(r["id"] for r in report["tasks"]), ["TASK-2", "TASK-3"])
+
+    def test_review_route(self) -> None:
+        self.assertEqual((asdlc.REVIEW.model, asdlc.REVIEW.effort), ("sonnet", "medium"))
+
+
 class CheckNoteTest(unittest.TestCase):
     NOW = datetime(2026, 10, 22, 15, 0, tzinfo=UTC)
 
@@ -1095,6 +1202,157 @@ class MineAndRecordCheckTest(unittest.TestCase):
         self.assertIn("Check FAILED: `sh -c 'echo checked; exit 3'` exited 3", text)
         self.assertIn("checked", text)
         self.assertEqual(self.team.run("record-check", "TASK-1", "true").returncode, 1)
+
+
+@needs_backlog
+class ReviewCommandTest(unittest.TestCase):
+    """Review claims, the same-machine fallback, verdicts and reaping, against real repositories."""
+
+    def setUp(self) -> None:
+        self.team = Team(self, [_sized("Rate limit", "size-2", "--project", "acme-api"), _sized("Second", "size-2", "--project", "acme-api")])
+
+    def submit(self, task_id: str, worker: str = "ann.w1", team: object | None = None) -> None:
+        """A worker claims the task and finishes it: branch and pull request recorded, In Review."""
+        team = team or self.team
+        engineer = asdlc.owner_of(worker)
+        team.ok("claim", task_id, "--as", worker, engineer=engineer)
+        number = task_id.rpartition("-")[2]
+        team.ok("board", "task", "edit", task_id, "--add-ref", f"task-{number}-branch", "--add-ref", f"https://github.com/acme/api/pull/{number}",
+                "-s", "In Review", engineer=engineer)
+
+    def later(self, **delta: float) -> str:
+        return (datetime.now(UTC) + timedelta(**delta)).isoformat()
+
+    def review(self, reviewer: str, *extra: str, team: object | None = None) -> dict[str, object]:
+        done = (team or self.team).ok("review-next", "--as", reviewer, "--json", *extra, engineer=asdlc.owner_of(reviewer))
+        return json.loads(done.stdout)
+
+    def test_claims_the_oldest_review_and_says_where_to_review_it(self) -> None:
+        self.submit("TASK-1")
+        self.submit("TASK-2", "ann.w2")
+        first = self.review("kyle.r1")
+        self.assertEqual(
+            {k: first[k] for k in ("task", "reviewer", "kind", "authors", "repo", "default_branch", "branch", "pull_request", "model", "effort")},
+            {"task": "TASK-1", "reviewer": "kyle.r1", "kind": "cross-machine", "authors": ["ann"], "repo": str(self.team.api), "default_branch": "main",
+             "branch": "task-1-branch", "pull_request": "https://github.com/acme/api/pull/1", "model": "sonnet", "effort": "medium"},
+        )
+        on_board = self.team.task("TASK-1")
+        self.assertEqual((on_board.status, on_board.assignees, on_board.reviewer, on_board.review_kind), ("In Review", ("@ann.w1",), "kyle.r1", "cross-machine"))
+        self.assertIn("@kyle.r1 is reviewing TASK-1: a cross-machine review.", self.team.text("TASK-1"))
+        self.assertEqual(_git(self.team.boards.origin, "log", "-1", "--format=%s", "main"), "Review TASK-1: @kyle.r1 (cross-machine)")
+        self.assertEqual(self.review("kyle.r2")["task"], "TASK-2")
+        none = self.team.ok("review-next", "--as", "kyle.r3")
+        self.assertEqual(none.stdout.strip(), "no review available")
+        self.assertIn("skipped TASK-1 is being reviewed by @kyle.r1", none.stderr)
+        mine = json.loads(self.team.ok("mine", "--as", "kyle", "--json").stdout)
+        self.assertEqual(([r["id"] for r in mine["reviews"]], mine["reviewing"], mine["tasks"]), (["TASK-1", "TASK-2"], 2, []))
+        self.assertIn("review TASK-1\t@kyle.r1\tcross-machine", self.team.ok("mine", "--as", "kyle").stdout)
+
+    def test_the_author_reviews_only_with_fallback_after_the_timeout(self) -> None:
+        self.submit("TASK-1")
+        own = self.team.ok("review-next", "--as", "ann.r1", "--json", engineer="ann")
+        self.assertFalse(json.loads(own.stdout)["claimed"])
+        self.assertIn("TASK-1 is ann's own work: another engineer reviews it, or a fresh reviewer here with --fallback", own.stderr)
+        early = self.team.ok("review-next", "--as", "ann.r1", "--fallback", "--now", self.later(minutes=10), engineer="ann")
+        self.assertEqual(early.stdout.strip(), "no review available")
+        self.assertRegex(early.stderr, r"it has waited (9|10)m for one, not yet longer than review_fallback_after \(30m\)")
+        late = self.review("ann.r1", "--fallback", "--now", self.later(minutes=31))
+        self.assertEqual((late["task"], late["kind"]), ("TASK-1", "same-machine"))
+        self.assertEqual(self.team.task("TASK-1").review_kind, "same-machine")
+        self.assertRegex(self.team.text("TASK-1"), r"@ann\.r1 is reviewing TASK-1: a same-machine review: it waited 3[01]m")
+
+    def test_the_fallback_timeout_comes_from_the_boards_asdlc_toml(self) -> None:
+        team = Team(self, [_sized("Rate limit", "size-2", "--project", "acme-api")], files={"asdlc.toml": 'review_fallback_after = "1h"\n'})
+        self.submit("TASK-1", team=team)
+        early = team.ok("review-next", "--as", "ann.r1", "--fallback", "--now", self.later(minutes=45), engineer="ann")
+        self.assertIn("review_fallback_after (1h 0m)", early.stderr)
+        self.assertEqual(self.review("ann.r1", "--fallback", "--now", self.later(minutes=61), team=team)["kind"], "same-machine")
+
+    def test_changes_go_back_to_the_author_and_a_clean_review_waits_for_a_person(self) -> None:
+        self.submit("TASK-1")
+        self.review("kyle.r1")
+        changes = json.loads(self.team.ok("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "changes", "--json",
+                                          "--notes", "[Bugs, Important] the limit resets on every request").stdout)
+        self.assertEqual((changes["status"], changes["workers"]), ("In Progress", ["ann.w1"]))
+        back = self.team.task("TASK-1")
+        self.assertEqual((back.status, back.assignees, back.reviewer, back.review_kind), ("In Progress", ("@ann.w1",), "", "cross-machine"))
+        self.assertIn("changes-requested", back.labels)
+        text = self.team.text("TASK-1")
+        self.assertIn("Review by @kyle.r1 (cross-machine): changes requested.", text)
+        self.assertIn("[Bugs, Important] the limit resets on every request", text)
+        mine = json.loads(self.team.ok("mine", "--as", "ann", "--json", engineer="ann").stdout)
+        self.assertEqual([r["id"] for r in mine["changes_requested"]], ["TASK-1"])
+        self.team.ok("heartbeat", "TASK-1", "--as", "ann.w1", engineer="ann")
+        self.team.ok("board", "task", "edit", "TASK-1", "--remove-label", "changes-requested", "-s", "In Review", engineer="ann")
+        self.assertEqual(self.review("kyle.r1")["task"], "TASK-1")
+        clean = self.team.ok("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "clean", "--notes", "No findings.")
+        self.assertEqual(clean.stdout.strip(), "TASK-1 passed review by @kyle.r1 (cross-machine); it stays In Review for a person to merge")
+        passed = self.team.task("TASK-1")
+        self.assertEqual((passed.status, passed.reviewer, passed.labels), ("In Review", "", ("size-2", "review-passed")))
+        again = self.team.ok("review-next", "--as", "kyle.r1")
+        self.assertIn("skipped TASK-1 has passed review and waits for a person to merge it", again.stderr)
+
+    def test_only_the_claiming_reviewer_finishes_the_review(self) -> None:
+        self.submit("TASK-1")
+        self.review("kyle.r1")
+        for reviewer, says in (("lee.r1", "@kyle.r1 holds its review, so @lee.r1 can't finish it"), ("kyle.r2", "so @kyle.r2 can't finish it"),
+                               ("kyle.w1", "not a reviewer's name")):
+            with self.subTest(reviewer=reviewer):
+                done = self.team.run("review-done", "TASK-1", "--as", reviewer, "--verdict", "clean", "--notes", "ok", engineer=asdlc.owner_of(reviewer))
+                self.assertEqual(done.returncode, 1)
+                self.assertIn(says, done.stderr)
+        empty = self.team.run("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "clean", "--notes", " ")
+        self.assertIn("say what the review found", empty.stderr)
+        self.assertEqual(self.team.task("TASK-1").reviewer, "kyle.r1")
+        unclaimed = self.team.run("review-done", "TASK-2", "--as", "kyle.r1", "--verdict", "clean", "--notes", "ok")
+        self.assertIn("nobody holds its review", unclaimed.stderr)
+
+    def test_reap_releases_a_stale_review_claim(self) -> None:
+        self.submit("TASK-1")
+        self.review("kyle.r1")
+        self.team.ok("heartbeat", "TASK-1", "--as", "kyle.r1")
+        self.assertIn("nothing stale", self.team.ok("reap", "--now", self.later(hours=1)).stdout)
+        report = json.loads(self.team.ok("reap", "--now", self.later(hours=3), "--json").stdout)
+        self.assertEqual([(r["id"], r["hold"], r["holders"]) for r in report["released"]], [("TASK-1", "review", ["kyle.r1"])])
+        released = self.team.task("TASK-1")
+        self.assertEqual((released.status, released.assignees, released.reviewer, released.review_kind), ("In Review", ("@ann.w1",), "", ""))
+        self.assertIn("Released by asdlc reap: the review claim held by @kyle.r1", self.team.text("TASK-1"))
+        self.assertEqual(self.review("lee.r1")["task"], "TASK-1")
+
+    def test_an_engineer_who_does_not_review_takes_none(self) -> None:
+        team = Team(self, [_sized("Rate limit", "size-2", "--project", "acme-api")], files={"devs/kyle.yaml": "name: kyle\nreview: false\n"})
+        self.submit("TASK-1", team=team)
+        report = json.loads(team.ok("review-next", "--as", "kyle.r1", "--json").stdout)
+        self.assertEqual(report["claimed"], False)
+        self.assertIn("devs/kyle.yaml has review: false", report["reason"])
+
+    def test_losing_a_review_claim_at_the_push(self) -> None:
+        self.submit("TASK-1")
+        theirs = self.team.boards.clone("theirs")
+        other = 'sed -i "s/^type: task$/type: task\\nasdlc_reviewer: lee.r1/" backlog/tasks/task-1*.md && git commit -qam review'
+        done = self.team.run("review-next", "--as", "kyle.r1", "--json", env=_interfering_backlog(self.team.boards.root, theirs, other))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout)["claimed"], False)
+        self.assertIn("Another reviewer claimed the review of TASK-1 first: @lee.r1", done.stderr)
+        self.assertEqual(self.team.task("TASK-1").reviewer, "lee.r1")
+        self.assertEqual(_git(self.team.board, "rev-parse", "HEAD"), _git(self.team.board, "rev-parse", "origin/main"))
+
+    def test_two_reviewers_on_two_clones_at_once(self) -> None:
+        """Both race for the same oldest review: each ends with exactly one review, never the same one."""
+        self.submit("TASK-1")
+        self.submit("TASK-2", "ann.w2")
+        theirs = self.team.boards.clone("theirs")
+        racers = [
+            subprocess.Popen([sys.executable, str(ROOT / "scripts" / "asdlc"), "--board", str(clone), "review-next", "--as", reviewer, "--json"],
+                             cwd=self.team.boards.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             env={**os.environ, **ISOLATED, **self.team.machine, **as_engineer(asdlc.owner_of(reviewer)), "ASDLC_BACKLOG": BACKLOG})
+            for clone, reviewer in ((self.team.board, "kyle.r1"), (theirs, "lee.r1"))
+        ]
+        results = [(racer.wait(timeout=120), *racer.communicate()) for racer in racers]
+        self.assertEqual([code for code, _, _ in results], [0, 0], results)
+        claimed = {json.loads(out)["reviewer"]: json.loads(out)["task"] for _, out, _ in results}
+        self.assertEqual(sorted(claimed.values()), ["TASK-1", "TASK-2"], results)
+        self.assertEqual({tid: self.team.task(tid).reviewer for tid in ("TASK-1", "TASK-2")}, {task_id: r for r, task_id in claimed.items()})
 
 
 @needs_backlog
