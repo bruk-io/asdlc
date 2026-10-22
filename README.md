@@ -49,13 +49,15 @@ Each person clones the board, then points each code repository at their clone: `
 | `asdlc whoami` | The engineer (`git config asdlc.engineer`), the board, their `devs/<name>.yaml` preferences, and the repositories registered on this machine. |
 | `asdlc register [--board <path>]` | Run in a clone of a code repository: sets its `asdlc.board`, records its slug (`owner-repo` from `origin`) and path in `${XDG_CONFIG_HOME:-~/.config}/asdlc/repos.toml`, and adds the slug to the board's `projects`. `asdlc repos` lists what is registered. |
 | `asdlc lead <intent> --as <engineer>.lead` | Claims the lead on an intent, draft or accepted, with the same compare-and-swap push as a claim. `asdlc lead-of <id>` names the lead of a task's intent. |
-| `asdlc heartbeat <id> --as <worker>` | A board commit touching a task the worker holds, or an intent it leads, so `reap` leaves it. |
-| `asdlc reap [--older-than 2h]` | Releases claims and leads whose task file has had no commit for `stale_after` (in the board's `asdlc.toml`, default 2h), keeping a person's reservation, with a comment saying why. Any orchestrator may run it. |
+| `asdlc heartbeat <id> --as <worker>` | A board commit touching a task the worker holds, an intent it leads, or a task whose review it holds, so `reap` leaves it. |
+| `asdlc reap [--older-than 2h]` | Releases claims, leads and review claims whose task file has had no commit for `stale_after` (in the board's `asdlc.toml`, default 2h), keeping a person's reservation, with a comment saying why. Any orchestrator may run it. |
 | `asdlc accept <intent>` | A person's command: promotes an intent draft and all its draft children in one board commit, keeping the children under it and their dependencies on each other. The guard refuses it from agents. |
-| `asdlc mine --as <engineer>` | That engineer's workers' tasks, leads and reserved work, with the workers cap. |
+| `asdlc mine --as <engineer>` | That engineer's workers' tasks (and which came back from review), review claims, leads and reserved work, with the workers cap. |
 | `asdlc record-check <id> -- <command>` | Runs a check, appends the command, exit code and the end of its output to the task's notes, and exits with the check's code. |
+| `asdlc review-next --as <engineer>.r<n> [--fallback]` | Claims the review of the In Review task that has waited longest, in a repository registered here, that nobody reviews and that hasn't passed review, and prints its branch, pull request, the repository's path here, and the review's model and effort. Not your own engineer's work, unless `--fallback` and it has waited longer than `review_fallback_after`. |
+| `asdlc review-done <id> --as <reviewer> --verdict clean\|changes --notes <findings>` | The claiming reviewer's verdict: the findings as a comment; `changes` sends it back In Progress to its worker, labelled `changes-requested`; `clean` labels it `review-passed` and leaves it In Review for a person to merge. |
 
-`claim`, `next`, `lead`, `lead-of`, `mine`, `repos`, `reap`, `accept` and `whoami` take `--json`.
+`claim`, `next`, `lead`, `lead-of`, `mine`, `repos`, `reap`, `accept`, `whoami`, `review-next` and `review-done` take `--json`.
 
 A claimed task's worktree is `<repo>.worktrees/<id>` beside the repository, on a branch named from the task, started from `origin`'s default branch and tracking nothing. Its `.asdlc-task` marker says which task it holds.
 
@@ -75,6 +77,12 @@ The `guard_board` hook refuses, with the reason:
 - `git push` to that repository's default branch, so changes arrive through review. Pushes to the board are allowed.
 
 Stale claims are released by hand for now: `asdlc release`, run as the agent that holds the task.
+
+### Cross-machine review
+
+A finished task is In Review with its branch and pull request recorded. Any orchestrator whose engineer didn't write it, with `review: true` in their `devs/<name>.yaml` and the repository registered, may claim its review with `asdlc review-next`; the claim is a compare-and-swap push like any other, recorded on the task as `asdlc_reviewer`. The orchestrator launches the `reviewer` agent (sonnet, medium effort, from the routing table), which reads the task, its plan, its acceptance criteria, its intent's contracts and `REVIEW.md`, reviews the diff in a detached checkout of its own, records the verdict with `asdlc review-done`, and posts the same findings on the pull request as a comment when `gh` can reach it. A review never approves on GitHub; a person merges.
+
+`changes` sends the task back to the worker that built it, which fixes the findings and sets it In Review again. If no other engineer's reviewer claims a task within `review_fallback_after` (in `asdlc.toml`, default 30m) of it entering In Review, its author's own orchestrator may review it with a fresh reviewer agent (`review-next --fallback`), and the task records `asdlc_review_kind: same-machine` so the person who merges knows. Review claims count against the `workers` cap, are kept alive by `heartbeat`, and are released by `reap`.
 
 ## Review
 

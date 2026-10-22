@@ -1,6 +1,6 @@
 ---
 name: worker
-description: Plans or builds one claimed task from the shared board, in the worktree it is given, and nothing else. Launched by the orchestrator (the orchestrate skill) with the task id, the worker name, the worktree path and the phase; not for work that has no claimed task.
+description: Plans or builds one claimed task from the shared board, or fixes a review's findings on it, in the worktree it is given, and nothing else. Launched by the orchestrator (the orchestrate skill) with the task id, the worker name, the worktree path and the phase; not for work that has no claimed task.
 tools: Read, Edit, Write, Grep, Glob, Bash, Skill
 disallowedTools: Agent
 maxTurns: 200
@@ -52,3 +52,20 @@ asdlc board task edit <task> --add-ref <branch> --add-ref <pull request url> -s 
 ```
 
 Your final message says what was built, the pull request, and the check results.
+
+## Fixing review findings
+
+A reviewer on another machine (or, after the fallback, a fresh one on this machine) sent the task back: it is In Progress again, still yours, labelled `changes-requested`, and the review's findings are the newest "Review by" comment on the task. Your orchestrator hands you the same worktree and the findings.
+
+1. Read the task again and the findings in full. Fix every Important finding; fix a nit when it is cheap. If a finding is wrong, don't fix it: say why in the notes, so the next reviewer reads your answer. If a finding means the plan or the contract must change, update the plan on the task (or ask for a contract change, as above) and say so in the notes.
+2. Commit the fixes on the task's branch, then refresh it against the default branch as in the finish step.
+3. Run the checks again through `asdlc record-check <task> -- <command>`; don't hand it back on a failing check.
+4. Push the same branch. After a rebase its history changed, so push with `git -C <worktree> push --force-with-lease origin HEAD`; never force-push anything else.
+5. Hand it back to review, in one command:
+
+```sh
+asdlc board task edit <task> --remove-label changes-requested -s "In Review" \
+  --append-notes "<each finding and what you did about it, and the checks recorded above>"
+```
+
+The pull request and the branch are already on the task; don't add them again. Your final message lists each finding and what you did about it.

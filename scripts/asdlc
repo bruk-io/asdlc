@@ -28,10 +28,13 @@ Usage:
   asdlc [--board <path>] accept <intent-id> [--json]         (a person's command)
   asdlc [--board <path>] mine --as <engineer> [--json]
   asdlc [--board <path>] record-check <id> -- <command...>
+  asdlc [--board <path>] review-next --as <reviewer> [--fallback] [--json]
+  asdlc [--board <path>] review-done <id> --as <reviewer> --verdict clean|changes --notes <text> [--json]
 
 The board is `--board`, else $ASDLC_BOARD, else `git config asdlc.board`, else the board
 clone the current directory is in. The engineer is `git config asdlc.engineer`; a worker
-is the engineer's name, a dot and a label, such as kyle.w1. The backlog CLI is
+is the engineer's name, a dot and a label, such as kyle.w1; a reviewer's label is r and a
+number, such as kyle.r1. The backlog CLI is
 $ASDLC_BACKLOG, else `backlog` on PATH.
 """
 
@@ -55,6 +58,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
+from typing import assert_never
 
 from repo_slug import slug_of
 
@@ -82,6 +86,11 @@ _WORKER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _ENGINEER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 LEAD_KEY = "asdlc_lead"  # frontmatter keys asdlc writes itself; Backlog 1.55 keeps keys it doesn't know
 HEARTBEAT_KEY = "asdlc_heartbeat"
+REVIEWER_KEY = "asdlc_reviewer"  # the reviewer holding a review claim; cleared when it finishes
+REVIEW_KIND_KEY = "asdlc_review_kind"  # cross-machine or same-machine, kept after the review for the person who merges
+CHANGES_REQUESTED = "changes-requested"
+REVIEW_PASSED = "review-passed"
+_REVIEWER_LABEL = re.compile(r"^r\d+$")
 DRAFTS = "backlog/drafts/"
 DEFAULT_WORKERS = 3
 DEFAULT_STALE_AFTER = timedelta(hours=2)
@@ -123,6 +132,8 @@ SIZE_ROUTES: frozendict[str, Route | Refusal] = frozendict({
     "size-5": Route("sonnet", "medium", "size-5: an ordinary change"),
     "size-8": Refusal("size-8 is too big for one change: split it before it starts"),
 })
+# A review is judgement over one finished task's diff, whatever the task's size.
+REVIEW = Route("sonnet", "medium", "a review: judgement over one task's diff against its plan, its acceptance criteria and REVIEW.md")
 
 
 @dataclass(frozen=True)
@@ -141,6 +152,9 @@ class Task:
     project: str = ""
     lead: str = ""  # the worker leading an intent, from LEAD_KEY
     heartbeat: str = ""
+    reviewer: str = ""  # the reviewer holding the review claim, from REVIEWER_KEY
+    review_kind: str = ""
+    references: tuple[str, ...] = ()
 
 
 def is_draft(task: Task) -> bool:
@@ -251,6 +265,9 @@ def task_from(path: str, text: str) -> Task | None:
         project=text_field("project").lower(),
         lead=text_field(LEAD_KEY).removeprefix("@"),
         heartbeat=text_field(HEARTBEAT_KEY),
+        reviewer=text_field(REVIEWER_KEY).removeprefix("@"),
+        review_kind=text_field(REVIEW_KIND_KEY),
+        references=_as_tuple(fields.get("references")),
     )
 
 
@@ -330,6 +347,18 @@ def worker_for(raw: str, engineer: str) -> str:
             f"'{raw}' is not one of {engineer}'s workers: a worker is named for its engineer, a dot and a label, "
             f"such as {engineer}.w1 (the engineer is git config asdlc.engineer)"
         )
+    return name
+
+
+def reviewer_for(raw: str, engineer: str) -> str:
+    """A reviewer name that belongs to the engineer: `<engineer>.r<n>`.
+
+    Raises:
+        AsdlcError: the name is malformed, belongs to someone else, or isn't a reviewer's.
+    """
+    name = worker_for(raw, engineer)
+    if not _REVIEWER_LABEL.match(name.partition(".")[2]):
+        raise AsdlcError(f"'{raw}' is not a reviewer's name: a reviewer is named for its engineer, a dot, r and a number, such as {engineer}.r1")
     return name
 
 
@@ -506,8 +535,134 @@ def rank(ready: Iterable[Task], picker: Picker) -> tuple[Task, ...]:
 
 
 def active_workers(tasks: Iterable[Task], engineer: str) -> tuple[Task, ...]:
-    """The engineer's workers' In Progress tasks: what counts against the `workers` cap."""
+    """The engineer's workers' In Progress tasks."""
     return tuple(t for t in tasks if is_status(t, IN_PROGRESS) and any(owner_of(w) == engineer for w in workers(t.assignees)))
+
+
+def review_claims(tasks: Iterable[Task], engineer: str) -> tuple[Task, ...]:
+    """The tasks the engineer's reviewers hold review claims on."""
+    return tuple(t for t in tasks if t.reviewer and owner_of(t.reviewer) == engineer)
+
+
+def busy(tasks: Sequence[Task], engineer: str) -> int:
+    """What counts against the `workers` cap: workers building and reviewers reviewing."""
+    return len(active_workers(tasks, engineer)) + len(review_claims(tasks, engineer))
+
+
+# --- review: claims, the fallback and verdicts -------------------------------------------
+
+
+class ReviewKind(StrEnum):
+    CROSS_MACHINE = "cross-machine"
+    SAME_MACHINE = "same-machine"
+
+
+class ReviewVerdict(StrEnum):
+    CLEAN = "clean"
+    CHANGES = "changes"
+
+
+@dataclass(frozen=True)
+class Reviewing:
+    """Who is looking for a review, what this machine has, and the clock."""
+
+    engineer: str
+    reviewer: str
+    registered: frozenset[str]
+    now: datetime
+    fallback_after: timedelta = DEFAULT_REVIEW_FALLBACK_AFTER
+    fallback: bool = False
+
+
+def authors(task: Task) -> frozenset[str]:
+    """The engineers whose work a task is: the owners of its worker assignees, else its people."""
+    if held := workers(task.assignees):
+        return frozenset(owner_of(w) for w in held)
+    return frozenset(p.removeprefix("@") for p in people(task.assignees))
+
+
+def review_kind(task: Task, engineer: str) -> ReviewKind:
+    return ReviewKind.SAME_MACHINE if engineer in authors(task) else ReviewKind.CROSS_MACHINE
+
+
+def _waited(entered: datetime | None, now: datetime) -> timedelta:
+    return max(now - entered, timedelta()) if entered else timedelta()
+
+
+def review_refusal(task: Task, reviewing: Reviewing, entered: datetime | None) -> str | None:
+    """Why this reviewer can't claim the task's review now, or None when it can.
+
+    `entered` is when the task last entered In Review. The author's own engineer may review
+    it only with `fallback`, and only once it has waited longer than `fallback_after`.
+    """
+    if not is_status(task, IN_REVIEW) or is_draft(task):
+        return f"{task.id} is {task.status or 'a draft'}, not {IN_REVIEW}"
+    if task.reviewer:
+        return f"{task.id} is being reviewed by @{task.reviewer}"
+    if REVIEW_PASSED in task.labels:
+        return f"{task.id} has passed review and waits for a person to merge it"
+    if not task.project:
+        return f"{task.id} has no project, so it names no repository to review in"
+    if task.project not in reviewing.registered:
+        return f"{task.id} is in {task.project}, which is not registered on this machine: run asdlc register in a clone of it"
+    if reviewing.engineer in authors(task):
+        mine = f"{task.id} is {reviewing.engineer}'s own work: another engineer reviews it"
+        waited = _waited(entered, reviewing.now)
+        if not reviewing.fallback:
+            return f"{mine}, or a fresh reviewer here with --fallback once it has waited longer than review_fallback_after ({human(reviewing.fallback_after)})"
+        if waited <= reviewing.fallback_after:
+            return f"{mine}; it has waited {human(waited)} for one, not yet longer than review_fallback_after ({human(reviewing.fallback_after)})"
+    return None
+
+
+def review_candidates(tasks: Iterable[Task], reviewing: Reviewing, entered: Mapping[str, datetime]) -> tuple[tuple[Task, ...], tuple[tuple[Task, str], ...]]:
+    """In Review tasks the reviewer may claim, in the order to try them, and the In Review tasks skipped.
+
+    Other engineers' work comes first and the reviewer's own (with --fallback, after the
+    timeout) last; within each, the task waiting longest first.
+    """
+    ready: list[Task] = []
+    skipped: list[tuple[Task, str]] = []
+    for task in tasks:
+        if not is_status(task, IN_REVIEW) or is_draft(task):
+            continue
+        if reason := review_refusal(task, reviewing, entered.get(task.path)):
+            skipped.append((task, reason))
+        else:
+            ready.append(task)
+
+    def order(task: Task) -> tuple[bool, timedelta, tuple[str, tuple[int, ...]]]:
+        return (reviewing.engineer in authors(task), -_waited(entered.get(task.path), reviewing.now), id_key(task.id))
+
+    return tuple(sorted(ready, key=order)), tuple(skipped)
+
+
+def review_refs(references: Iterable[str]) -> tuple[str | None, str | None]:
+    """The task's branch and pull request among its references: the branch is the first one
+    that isn't a URL, the pull request the first URL (one with /pull/ preferred)."""
+    urls = [r for r in references if "://" in r]
+    branch = next((r for r in references if "://" not in r), None)
+    pull = next((u for u in urls if re.search(r"/pull/\d+|/merge_requests/\d+", u)), urls[0] if urls else None)
+    return branch, pull
+
+
+def review_done_refusal(task: Task | None, task_id: str, reviewer: str) -> str | None:
+    """Why the reviewer can't record a verdict on the task, or None when it can."""
+    if task is None:
+        return f"{task_id} is not a task on the board"
+    if task.reviewer != reviewer:
+        held = f"@{task.reviewer} holds its review" if task.reviewer else "nobody holds its review"
+        return f"{task_id}: {held}, so @{reviewer} can't finish it. Only the reviewer who claimed it with asdlc review-next records the verdict; a released claim is claimed again first"
+    if not is_status(task, IN_REVIEW):
+        return f"{task_id} is {task.status}, not {IN_REVIEW}: someone moved it while it was being reviewed, so the verdict was not recorded"
+    return None
+
+
+def review_comment(reviewer: str, kind: str, verdict: ReviewVerdict, notes: str) -> str:
+    what = "changes requested" if verdict is ReviewVerdict.CHANGES else "clean"
+    then = (" Back to In Progress for the author's worker." if verdict is ReviewVerdict.CHANGES
+            else " It stays In Review for a person to merge.")
+    return f"Review by @{reviewer} ({kind or ReviewKind.CROSS_MACHINE}): {what}.{then}\n\n{notes.strip()}"
 
 
 # --- preferences, settings and the machine's registry: text in, data out ---------------
@@ -711,6 +866,7 @@ def lead_of(items: Sequence[Task], task_id: str) -> LeadOf:
 class Hold(StrEnum):
     CLAIM = "claim"
     LEAD = "lead"
+    REVIEW = "review"
 
 
 @dataclass(frozen=True)
@@ -732,13 +888,19 @@ def stale_holds(items: Iterable[Task], touched: Mapping[str, datetime], now: dat
             found.append(Stale(task, Hold.CLAIM, held, idle))
         if task.lead:
             found.append(Stale(task, Hold.LEAD, (f"@{task.lead}",), idle))
+        if task.reviewer:
+            found.append(Stale(task, Hold.REVIEW, (f"@{task.reviewer}",), idle))
     return tuple(found)
 
 
+_HOLD_WORDS = frozendict({Hold.CLAIM: "claim", Hold.LEAD: "lead", Hold.REVIEW: "review claim"})
+
+
 def reap_comment(stale: Stale, after: timedelta) -> str:
-    what = "claim" if stale.hold is Hold.CLAIM else "lead"
+    what = _HOLD_WORDS[stale.hold]
     kept = people(stale.task.assignees)
     keeping = f" It stays reserved for {', '.join(kept)}." if stale.hold is Hold.CLAIM and kept else ""
+    keeping += " Another reviewer may claim it with asdlc review-next." if stale.hold is Hold.REVIEW else ""
     return (
         f"Released by asdlc reap: the {what} held by {', '.join(stale.holders)} had no board update for "
         f"{human(stale.idle)}, longer than stale_after ({human(after)}).{keeping} Anyone may pick it up; "
@@ -752,14 +914,20 @@ def mine_report(items: Sequence[Task], engineer: str, prefs: Prefs) -> dict[str,
         return {"id": task.id, "title": task.title, "status": task.status, "project": task.project, "parent": task.parent, **extra}
 
     held = [
-        row(t, workers=[w.removeprefix("@") for w in workers(t.assignees) if owner_of(w) == engineer])
+        row(t, workers=[w.removeprefix("@") for w in workers(t.assignees) if owner_of(w) == engineer],
+            changes_requested=CHANGES_REQUESTED in t.labels and is_status(t, IN_PROGRESS))
         for t in items if any(owner_of(w) == engineer for w in workers(t.assignees)) and not is_status(t, DONE)
     ]
+    reviews = review_claims(items, engineer)
     return {
         "engineer": engineer,
         "workers_cap": prefs.workers,
         "active": len(active_workers(items, engineer)),
+        "reviewing": len(reviews),
+        "review": prefs.review,
         "tasks": sorted(held, key=lambda r: id_key(str(r["id"]))),
+        "changes_requested": [r for r in sorted(held, key=lambda r: id_key(str(r["id"]))) if r["changes_requested"]],
+        "reviews": [row(t, reviewer=t.reviewer, kind=t.review_kind) for t in sorted(reviews, key=lambda t: id_key(t.id))],
         "leads": [row(t, lead=t.lead) for t in items if t.lead and owner_of(t.lead) == engineer],
         "reserved": [row(t) for t in items if is_status(t, TO_DO) and reserved_for(t, engineer) and not workers(t.assignees)],
     }
@@ -1441,8 +1609,8 @@ def heartbeat(board: Board, raw_id: str, worker: str, now: datetime) -> str:
 
     def step(attempt: int) -> tuple[str | None, str]:
         task = _find(_items(board), task_id)
-        if task is None or not (task.lead == worker or (f"@{worker}" in task.assignees and is_status(task, IN_PROGRESS))):
-            held = "is not on the board" if task is None else f"is {task.status}, assigned to {', '.join(task.assignees) or 'nobody'}, led by {'@' + task.lead if task.lead else 'nobody'}"
+        if task is None or not (task.lead == worker or task.reviewer == worker or (f"@{worker}" in task.assignees and is_status(task, IN_PROGRESS))):
+            held = "is not on the board" if task is None else f"is {task.status}, assigned to {', '.join(task.assignees) or 'nobody'}, led by {'@' + task.lead if task.lead else 'nobody'}, reviewed by {'@' + task.reviewer if task.reviewer else 'nobody'}"
             raise AsdlcError(f"{task_id} {held}, so @{worker} holds nothing to keep alive; it may have been reaped. asdlc mine --as {owner_of(worker)} shows what your workers hold")
         stamp = now.astimezone(UTC).isoformat(timespec="seconds")
         _write_key(board, task, HEARTBEAT_KEY, yaml_quoted(stamp))
@@ -1463,14 +1631,21 @@ def _reap_one(board: Board, found: Stale, now: datetime, after: timedelta) -> St
         if current is None:
             return None, None
         text = reap_comment(current, after)
-        if current.hold is Hold.CLAIM:
-            done = _board_backlog(board, ["task", "edit", current.task.id, "-s", TO_DO, "-a", ",".join(people(current.task.assignees)),
-                                          "--comment", text, "--comment-author", REAPER])
-            if done.returncode != 0:
-                raise AsdlcError(f"backlog could not release {current.task.id}: {(done.stderr or done.stdout).strip()}")
-        else:
-            _write_key(board, current.task, LEAD_KEY, None)
-            _comment(board, current.task, text, REAPER)
+        match current.hold:
+            case Hold.CLAIM:
+                done = _board_backlog(board, ["task", "edit", current.task.id, "-s", TO_DO, "-a", ",".join(people(current.task.assignees)),
+                                              "--comment", text, "--comment-author", REAPER])
+                if done.returncode != 0:
+                    raise AsdlcError(f"backlog could not release {current.task.id}: {(done.stderr or done.stdout).strip()}")
+            case Hold.LEAD:
+                _write_key(board, current.task, LEAD_KEY, None)
+                _comment(board, current.task, text, REAPER)
+            case Hold.REVIEW:
+                _write_key(board, current.task, REVIEWER_KEY, None)
+                _write_key(board, current.task, REVIEW_KIND_KEY, None)
+                _comment(board, current.task, text, REAPER)
+            case _ as unreachable:
+                assert_never(unreachable)
         return f"Reap the {current.hold} on {current.task.id}: idle {human(current.idle)}", current
 
     return _transact(board, step)
@@ -1625,8 +1800,9 @@ def whoami(explicit_board: str | None, cwd: Path, as_json: bool) -> int:
 
 def mine(board: Board, engineer: str, as_json: bool) -> int:
     report = mine_report(_items(board, _refresh(board)), engineer, _prefs(board, engineer))
-    lines = [f"{engineer}: {report['active']} of {report['workers_cap']} workers busy"]
-    lines += [f"  {r['id']}\t{r['status']}\t@{', @'.join(r['workers'])}\t{r['project'] or '-'}\t{r['title']}" for r in report["tasks"]]
+    lines = [f"{engineer}: {report['active']} of {report['workers_cap']} workers busy building, {report['reviewing']} reviewing (the cap counts both)"]
+    lines += [f"  {r['id']}\t{r['status']}{' (changes requested)' if r['changes_requested'] else ''}\t@{', @'.join(r['workers'])}\t{r['project'] or '-'}\t{r['title']}" for r in report["tasks"]]
+    lines += [f"  review {r['id']}\t@{r['reviewer']}\t{r['kind']}\t{r['project'] or '-'}\t{r['title']}" for r in report["reviews"]]
     lines += [f"  lead {r['id']}\t{r['status']}\t@{r['lead']}\t{r['title']}" for r in report["leads"]]
     lines += [f"  reserved {r['id']}\t{r['project'] or '-'}\t{r['title']}" for r in report["reserved"]]
     _emit(report, as_json, lines)
@@ -1767,8 +1943,8 @@ def next_task(board: Board, worker: str, engineer: str, cwd: Path, as_json: bool
         if not remaining:
             _emit({"claimed": False, "reason": "no work available", "skipped": reported}, as_json, ["no work available"])
             return 0
-        if len(active := active_workers(tasks, engineer)) >= prefs.workers:
-            reason = f"{engineer}'s workers hold {len(active)} task(s) in progress, the cap in devs/{engineer}.yaml ({prefs.workers})"
+        if (held := busy(tasks, engineer)) >= prefs.workers:
+            reason = f"{engineer}'s workers and reviewers hold {held} task(s), the cap in devs/{engineer}.yaml ({prefs.workers})"
             _emit({"claimed": False, "reason": reason, "skipped": reported}, as_json, [f"no work available: {reason}"])
             return 0
         tried.add(remaining[0].id)
@@ -1812,6 +1988,148 @@ def release(board: Board, raw_id: str, worker: str, cwd: Path) -> None:
     repo = entry.path if entry else code_repo(cwd, board.path)
     if isinstance(repo, Path) and (path := worktree_path(repo, task_id)).exists():
         print(f"its worktree is left as it was: {path}")
+
+
+# --- review --------------------------------------------------------------------------------
+
+
+def _entered_review(board: Board, ref: str, tasks: Iterable[Task]) -> dict[str, datetime]:
+    """When each task last entered In Review: the newest commit on `ref` whose diff adds or
+    removes its `status: In Review` line. The task is In Review now, so that commit added it."""
+    entered: dict[str, datetime] = {}
+    for task in tasks:
+        found = _board_git(board, "-c", "core.quotePath=false", "log", "-1", "--format=%ct", "-G", f"^status: ['\"]?{IN_REVIEW}['\"]?$",
+                           ref, "--", task.path, check=False).stdout.strip()
+        if found.isdigit():
+            entered[task.path] = datetime.fromtimestamp(int(found), UTC)
+    return entered
+
+
+@dataclass(frozen=True)
+class ReviewClaimed:
+    task: Task
+    waited: timedelta
+
+
+def _claim_review(board: Board, task_id: str, reviewing: Reviewing) -> ReviewClaimed | Taken:
+    """Claim one task's review: the reviewer and the kind of review written on the task, and a comment, pushed.
+
+    Raises:
+        AsdlcError: backlog failed, or the claim could not be pushed. A claim that isn't pushed is undone.
+    """
+    def step(attempt: int) -> tuple[str | None, ReviewClaimed | Taken]:
+        task = _find(_tasks(board), task_id)
+        if task is None:
+            return None, Taken(f"{task_id} is no longer on the board")
+        entered = _entered_review(board, "HEAD", (task,)).get(task.path)
+        waited = _waited(entered, reviewing.now)
+        if task.reviewer == reviewing.reviewer:
+            return None, ReviewClaimed(task, waited)
+        if refusal := review_refusal(task, reviewing, entered):
+            lost = attempt > 1 and task.reviewer
+            return None, Taken(f"Another reviewer claimed the review of {task_id} first: @{task.reviewer}" if lost else refusal)
+        kind = review_kind(task, reviewing.engineer)
+        _write_key(board, task, REVIEWER_KEY, reviewing.reviewer)
+        _write_key(board, task, REVIEW_KIND_KEY, str(kind))
+        why = (f"a same-machine review: it waited {human(waited)} with no other engineer's reviewer, longer than review_fallback_after "
+               f"({human(reviewing.fallback_after)}), so a fresh reviewer on its author's machine takes it" if kind is ReviewKind.SAME_MACHINE
+               else "a cross-machine review")
+        _comment(board, task, f"@{reviewing.reviewer} is reviewing {task_id}: {why}.", f"@{reviewing.reviewer}")
+        claimed = replace(task, reviewer=reviewing.reviewer, review_kind=str(kind))
+        return f"Review {task_id}: @{reviewing.reviewer} ({kind})", ReviewClaimed(claimed, waited)
+
+    return _transact(board, step)
+
+
+def _review_report(claimed: ReviewClaimed, registry: Mapping[str, Registered]) -> dict[str, object]:
+    task = claimed.task
+    branch, pull = review_refs(task.references)
+    entry = registry.get(task.project)
+    return {
+        "claimed": True, "task": task.id, "title": task.title, "reviewer": task.reviewer, "kind": task.review_kind,
+        "authors": sorted(authors(task)), "project": task.project, "parent": task.parent or None,
+        "repo": str(entry.path) if entry else None, "default_branch": default_branch(entry.path) if entry else None,
+        "branch": branch, "pull_request": pull, "references": list(task.references), "waited": human(claimed.waited),
+        "model": REVIEW.model, "effort": REVIEW.effort, "route": REVIEW.reason,
+    }
+
+
+def review_next(board: Board, reviewer: str, engineer: str, now: datetime, fallback: bool, as_json: bool) -> int:
+    """Claim the review that has waited longest among those this reviewer may take."""
+    origin = _refresh(board)
+    prefs, settings, registry = _prefs(board, engineer), _settings(board), _registry()
+    if not prefs.review:
+        reason = f"devs/{engineer}.yaml has review: false, so {engineer}'s orchestrator takes no reviews"
+        _emit({"claimed": False, "reason": reason, "skipped": []}, as_json, [f"no review available: {reason}"])
+        return 0
+    reviewing = Reviewing(engineer, reviewer, frozenset(registry), now, settings.review_fallback_after, fallback)
+    tried: set[str] = set()
+    reported: list[str] = []
+    while True:
+        tasks = _tasks(board, origin)
+        waiting = [t for t in tasks if is_status(t, IN_REVIEW) and not t.reviewer]
+        ready, skipped = review_candidates(tasks, reviewing, _entered_review(board, origin, waiting))
+        if not tried:
+            reported = [why for _, why in skipped]
+            for why in reported:
+                _say(f"skipped {why}")
+        remaining = [task for task in ready if task.id not in tried]
+        if not remaining:
+            _emit({"claimed": False, "reason": "no review available", "skipped": reported}, as_json, ["no review available"])
+            return 0
+        if (held := busy(tasks, engineer)) >= prefs.workers:
+            reason = f"{engineer}'s workers and reviewers hold {held} task(s), the cap in devs/{engineer}.yaml ({prefs.workers})"
+            _emit({"claimed": False, "reason": reason, "skipped": reported}, as_json, [f"no review available: {reason}"])
+            return 0
+        tried.add(remaining[0].id)
+        match _claim_review(board, remaining[0].id, reviewing):
+            case ReviewClaimed() as claimed:
+                report = _review_report(claimed, registry)
+                _emit(report, as_json, [
+                    f"claimed the review of {report['task']} for @{reviewer} ({report['kind']}; {REVIEW.model}, {REVIEW.effort})",
+                    f"branch {report['branch'] or '-'}, pull request {report['pull_request'] or '-'}",
+                    str(report["repo"]),
+                ])
+                return 0
+            case Taken(reason=reason):
+                _say(reason)
+
+
+def review_done(board: Board, raw_id: str, reviewer: str, verdict: ReviewVerdict, notes: str) -> dict[str, object]:
+    """Record a review's findings on the task and act on the verdict: changes send it back to
+    In Progress for the author's worker, clean leaves it In Review for a person to merge.
+
+    Raises:
+        AsdlcError: no notes, the reviewer doesn't hold the review, backlog failed, or the change could not be pushed.
+    """
+    if not notes.strip():
+        raise AsdlcError("say what the review found in --notes, even when it is 'No findings'")
+    task_id = normalise_id(raw_id, _prefix(board))
+
+    def step(attempt: int) -> tuple[str | None, dict[str, object]]:
+        task = _find(_tasks(board), task_id)
+        if refusal := review_done_refusal(task, task_id, reviewer):
+            raise AsdlcError(refusal)
+        assert task is not None
+        edit = ["task", "edit", task_id, "--comment", review_comment(reviewer, task.review_kind, verdict, notes), "--comment-author", f"@{reviewer}"]
+        match verdict:
+            case ReviewVerdict.CHANGES:
+                edit += ["-s", IN_PROGRESS, "--add-label", CHANGES_REQUESTED, *(["--remove-label", REVIEW_PASSED] if REVIEW_PASSED in task.labels else [])]
+            case ReviewVerdict.CLEAN:
+                edit += ["--add-label", REVIEW_PASSED, *(["--remove-label", CHANGES_REQUESTED] if CHANGES_REQUESTED in task.labels else [])]
+            case _ as unreachable:
+                assert_never(unreachable)
+        done = _board_backlog(board, edit)
+        if done.returncode != 0:
+            raise AsdlcError(f"backlog could not record the review of {task_id}: {(done.stderr or done.stdout).strip()}")
+        after = _find(_tasks(board), task_id) or task
+        _write_key(board, after, REVIEWER_KEY, None)
+        result = {"task": task_id, "verdict": str(verdict), "reviewer": reviewer, "kind": task.review_kind,
+                  "status": IN_PROGRESS if verdict is ReviewVerdict.CHANGES else IN_REVIEW,
+                  "workers": [w.removeprefix("@") for w in workers(task.assignees)]}
+        return f"Review {task_id} by @{reviewer}: {verdict}", result
+
+    return _transact(board, step)
 
 
 def init_board(directory: Path) -> None:
@@ -1873,6 +2191,14 @@ def _parser() -> argparse.ArgumentParser:
     add("accept", "a person's command: accept an intent and its draft children", task="the intent", json_output=True)
     add("mine", "an engineer's workers' tasks, leads and reservations", who="the engineer, such as kyle", json_output=True)
     commands.add_parser("record-check", help="run a check and record its command, exit code and output on the task: record-check <id> -- <command...>")
+    reviewer = "the reviewer: your engineer name, a dot, r and a number, such as kyle.r1"
+    reviewing = add("review-next", "claim the review that has waited longest among those this reviewer may take", who=reviewer, json_output=True)
+    reviewing.add_argument("--fallback", action="store_true",
+                           help="also take this engineer's own work once it has waited longer than review_fallback_after (a same-machine review)")
+    reviewing.add_argument("--now", help="the time to judge the wait at, as ISO 8601 (for tests and demonstrations)")
+    finishing = add("review-done", "record a review's findings and verdict on the task", task="the task", who=reviewer, json_output=True)
+    finishing.add_argument("--verdict", required=True, choices=[str(v) for v in ReviewVerdict], help="clean, or changes to send it back to its author")
+    finishing.add_argument("--notes", required=True, help="the findings, as they go on the task")
     return parser
 
 
@@ -1978,6 +2304,18 @@ def main(argv: Sequence[str]) -> int:
                 _emit(result, as_json, lines)
             case "mine":
                 return mine(board, engineer_name(arguments.worker), as_json)
+            case "review-next":
+                _check_backlog()
+                reviewer = reviewer_for(arguments.worker, _engineer(cwd))
+                return review_next(board, reviewer, owner_of(reviewer), _when(arguments.now), arguments.fallback, as_json)
+            case "review-done":
+                _check_backlog()
+                reviewer = reviewer_for(arguments.worker, _engineer(cwd))
+                result = review_done(board, arguments.id, reviewer, ReviewVerdict(arguments.verdict), arguments.notes)
+                line = (f"{result['task']}: changes requested by @{reviewer}; it is In Progress for @{', @'.join(result['workers']) or 'its author'} again"
+                        if result["verdict"] == ReviewVerdict.CHANGES else
+                        f"{result['task']} passed review by @{reviewer} ({result['kind']}); it stays In Review for a person to merge")
+                _emit(result, as_json, [line])
             case "record-check":
                 if len(passthrough) < 3 or passthrough[1] != "--":
                     raise AsdlcError("say which task and which check: asdlc record-check TASK-1 -- ./scripts/check")
