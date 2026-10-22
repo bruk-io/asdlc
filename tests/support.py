@@ -68,10 +68,13 @@ def hook_payload(cwd: Path, tool: str, **tool_input: str) -> str:
 
 def load(relative: str):
     """Import one of this repository's scripts as a module, by path."""
+    import importlib.machinery
     import importlib.util
 
     path = ROOT / relative
-    spec = importlib.util.spec_from_file_location(path.stem, path)
+    # A script without a .py suffix, such as scripts/asdlc, needs its loader named.
+    loader = None if path.suffix == ".py" else importlib.machinery.SourceFileLoader(path.stem, str(path))
+    spec = importlib.util.spec_from_file_location(path.stem, path, loader=loader)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[path.stem] = module
