@@ -76,13 +76,40 @@ The `guard_board` hook refuses, with the reason:
 - Editing a code repository that has `asdlc.board` set outside a claimed task's worktree, so no two agents change the same work.
 - `git push` to that repository's default branch, so changes arrive through review. Pushes to the board are allowed.
 
-Stale claims are released by hand for now: `asdlc release`, run as the agent that holds the task.
+A claim with no update for `stale_after` (in `asdlc.toml`, default 2h) is released by `asdlc reap`, which any orchestrator runs; `asdlc heartbeat` keeps a live claim fresh. `asdlc release` hands a task back by hand.
 
 ### Cross-machine review
 
 A finished task is In Review with its branch and pull request recorded. Any orchestrator whose engineer didn't write it, with `review: true` in their `devs/<name>.yaml` and the repository registered, may claim its review with `asdlc review-next`; the claim is a compare-and-swap push like any other, recorded on the task as `asdlc_reviewer`. The orchestrator launches the `reviewer` agent (sonnet, medium effort, from the routing table), which reads the task, its plan, its acceptance criteria, its intent's contracts and `REVIEW.md`, reviews the diff in a detached checkout of its own, records the verdict with `asdlc review-done`, and posts the same findings on the pull request as a comment when `gh` can reach it. A review never approves on GitHub; a person merges.
 
 `changes` sends the task back to the worker that built it, which fixes the findings and sets it In Review again. If no other engineer's reviewer claims a task within `review_fallback_after` (in `asdlc.toml`, default 30m) of it entering In Review, its author's own orchestrator may review it with a fresh reviewer agent (`review-next --fallback`), and the task records `asdlc_review_kind: same-machine` so the person who merges knows. Review claims count against the `workers` cap, are kept alive by `heartbeat`, and are released by `reap`.
+
+## Tasks repository as a marketplace
+
+The board's repository is also a Claude Code plugin marketplace, so the team's conventions reach every engineer's agents without any setup in the code repositories. `asdlc init-board` adds, and on an existing board adds only what is missing, never overwriting:
+
+- `.claude-plugin/marketplace.json`, listing the `team` plugin (and later one plugin per code repository).
+- `plugins/team/`: the team's testing skill and rules, and the contract a lead writes for a large feature. Its README says where a new team skill or rule goes and how rules are scoped.
+- `asdlc.toml`: how long a claim lives without a heartbeat, and how long a review waits for another machine.
+- `devs/`: each engineer's preferences, `devs/<name>.yaml`.
+
+Each developer installs the team plugin once: `/plugin install team --marketplace <owner>/<tasks repo>`. Its skills then load like any plugin's.
+
+Claude Code doesn't load a plugin's rules, so asdlc's `load_rules` hook does. When an agent reads or edits a file in a code repository that has a board, it injects each team rule (`plugins/team/rules/`) and each of that repository's rules (`plugins/<owner-repo>/rules/`) whose `paths` match the file, once per session and per subagent, and again after compaction, naming the file's layer for a repository rule. Rules come from the local board clone, capped at 10,000 characters per injection. The per-repository plugin's format (layers, rules, skills, verified commands) is [`docs/repo-plugins.md`](docs/repo-plugins.md).
+
+## Onboarding a repository
+
+A code repository gets its plugin in the tasks repository the first time work needs it. The orchestrator runs the `onboard-repo` skill, which reads the repository and decides its commands, layers and rules; `scripts/asdlc-plugin` (link it onto your `PATH` beside `asdlc`) does the rest:
+
+| Command | What it does |
+|---|---|
+| `asdlc-plugin status <repo> [--json]` | The repository's slug, and whether its plugin is published or being made. |
+| `asdlc-plugin scaffold <repo>` | Opens a worktree of the tasks repository beside your clone, `<tasks>.worktrees/plugin-<slug>`, with the plugin's skeleton and marketplace entry. Never overwrites a file, and never edits the clone itself, so claims keep working meanwhile. |
+| `asdlc-plugin verify-command <repo> <name>` | Runs one command from `commands.toml` on a clean checkout of the default branch (a worktree beside your clone when the clone isn't one); dates it `verified` only if it passes without changing tracked files. |
+| `asdlc-plugin check <slug> [--repo <repo>]` | Checks the plugin against [`docs/repo-plugins.md`](docs/repo-plugins.md), its layers and rules against the repository's files, and runs `claude plugin validate` when it can. |
+| `asdlc-plugin publish <slug> [--repo <repo>]` | Refuses unless the check is clean, then pushes the plugin to the tasks repository's `main` with hooks off, retrying when someone pushed first, updates your clone, and prints a record for the task's notes. |
+
+The skill uses the owner's authoring kit (`authoring-kit`) when the session has it, to choose between a rule, a skill and a check and to audit the result, and says on the task when it doesn't.
 
 ## Review
 
