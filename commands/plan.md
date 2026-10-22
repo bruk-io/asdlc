@@ -1,8 +1,8 @@
 ---
-description: Plan one change from an approved spec and open the plan for approval
-argument-hint: <the spec or the change to plan>
+description: Plan one claimed task into its plan section on the board, before any file is edited
+argument-hint: <the task id>
 ---
 
 Use the plan-change skill for: $ARGUMENTS
 
-If nothing was named, list the approved specs under `spec/` and ask which change to plan.
+If no task was named, run `asdlc mine --as <engineer>` (the engineer is `git config asdlc.engineer`) and ask which claimed task to plan.

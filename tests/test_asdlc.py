@@ -1,16 +1,19 @@
 import json
 import os
 import random
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from tests.support import ROOT, git, load, run_script
 
+load("scripts/repo_slug.py")  # scripts/asdlc imports it from beside itself
 asdlc = load("scripts/asdlc")
 
 BACKLOG = os.environ.get("ASDLC_BACKLOG") or shutil.which("backlog")
@@ -33,9 +36,12 @@ ISOLATED = {
 def task(task_id: str, **fields: object) -> object:
     values = {
         "title": "A task", "status": "To Do", "assignees": (), "labels": ("size-2",), "priority": "",
-        "type": "task", "parent": "", "ordinal": None, "dependencies": (), "path": "",
+        "type": "task", "parent": "", "ordinal": None, "dependencies": (), "path": "", "project": "app",
     } | fields
     return asdlc.Task(id=task_id, **values)
+
+
+PICKER = asdlc.Picker(engineer="kyle", worker="kyle.w1", registered=frozenset({"app"}))
 
 
 # --- the logic -------------------------------------------------------------------------
@@ -123,7 +129,7 @@ class CandidatesTest(unittest.TestCase):
             task("TASK-1.10", priority="medium"),
             task("TASK-1.2", priority="medium"),
         )
-        ready, _ = asdlc.candidates(tasks)
+        ready, _ = asdlc.candidates(tasks, PICKER)
         self.assertEqual([t.id for t in ready], ["TASK-3", "TASK-9", "TASK-1.2", "TASK-1.10", "TASK-4", "TASK-10", "TASK-2"])
 
     def test_skips_claimed_started_parent_waiting_and_unroutable_tasks(self) -> None:
@@ -138,7 +144,7 @@ class CandidatesTest(unittest.TestCase):
             task("TASK-7", labels=("size-8",)),
             task("TASK-8", labels=()),
         )
-        ready, skipped = asdlc.candidates(tasks)
+        ready, skipped = asdlc.candidates(tasks, PICKER)
         self.assertEqual([t.id for t in ready], ["TASK-3.1", "TASK-5"])
         self.assertEqual({t.id for t, _ in skipped}, {"TASK-4", "TASK-7", "TASK-8"})
 
@@ -146,14 +152,14 @@ class CandidatesTest(unittest.TestCase):
 class ClaimDecisionsTest(unittest.TestCase):
     def test_claim_refusal(self) -> None:
         open_task = task("TASK-1")
-        self.assertIsNone(asdlc.claim_refusal(open_task, "TASK-1", (open_task,)))
-        self.assertIn("not a task", asdlc.claim_refusal(None, "TASK-9", ()))
+        self.assertIsNone(asdlc.claim_refusal(open_task, "TASK-1", (open_task,), "kyle.w1"))
+        self.assertIn("not a task", asdlc.claim_refusal(None, "TASK-9", (), "kyle.w1"))
         held = task("TASK-1", status="In Progress", assignees=("@a",))
-        self.assertIn("assigned to @a", asdlc.claim_refusal(held, "TASK-1", (held,)))
+        self.assertIn("assigned to @a", asdlc.claim_refusal(held, "TASK-1", (held,), "kyle.w1"))
         done = task("TASK-1", status="Done")
-        self.assertIn("not To Do", asdlc.claim_refusal(done, "TASK-1", (done,)))
+        self.assertIn("not To Do", asdlc.claim_refusal(done, "TASK-1", (done,), "kyle.w1"))
         big = task("TASK-1", labels=("size-8",))
-        self.assertIn("split it", asdlc.claim_refusal(big, "TASK-1", (big,)))
+        self.assertIn("split it", asdlc.claim_refusal(big, "TASK-1", (big,), "kyle.w1"))
 
     def test_race_result(self) -> None:
         self.assertIs(asdlc.race_result(task("TASK-1"), "a"), asdlc.Race.OPEN)
@@ -223,11 +229,276 @@ class SmallPiecesTest(unittest.TestCase):
         self.assertEqual(asdlc.worker_name("@agent-1"), "agent-1")
 
 
+class IdentityTest(unittest.TestCase):
+    def test_engineers_and_their_workers(self) -> None:
+        self.assertEqual(asdlc.engineer_name("@kyle"), "kyle")
+        for bad in ("kyle.w1", "", "a b"):
+            with self.subTest(name=bad), self.assertRaises(asdlc.AsdlcError):
+                asdlc.engineer_name(bad)
+        self.assertEqual(asdlc.worker_for("@kyle.w1", "kyle"), "kyle.w1")
+        for bad in ("kyle", "kyle.", "ann.w1", "kyleb.w1"):
+            with self.subTest(worker=bad), self.assertRaisesRegex(asdlc.AsdlcError, "not one of kyle's workers"):
+                asdlc.worker_for(bad, "kyle")
+        self.assertEqual(asdlc.owner_of("@kyle.w1"), "kyle")
+
+    def test_people_and_workers_in_the_assignee_list(self) -> None:
+        assignees = ("@kyle", "@kyle.w1", "@ann")
+        self.assertEqual(asdlc.people(assignees), ("@kyle", "@ann"))
+        self.assertEqual(asdlc.workers(assignees), ("@kyle.w1",))
+        self.assertTrue(asdlc.reserved_for(task("TASK-1", assignees=("@kyle",)), "kyle"))
+        self.assertFalse(asdlc.reserved_for(task("TASK-1", assignees=("@kyle.w1",)), "kyle"))
+
+
+class ReservationTest(unittest.TestCase):
+    def test_reserved_work_goes_only_to_its_owners_workers(self) -> None:
+        reserved = task("TASK-1", assignees=("@kyle",))
+        self.assertIsNone(asdlc.claim_refusal(reserved, "TASK-1", (reserved,), "kyle.w2"))
+        self.assertIn("reserved for @kyle", asdlc.claim_refusal(reserved, "TASK-1", (reserved,), "ann.w1"))
+        claimed = task("TASK-1", assignees=("@kyle", "@kyle.w1"))
+        self.assertIn("assigned to @kyle, @kyle.w1", asdlc.claim_refusal(claimed, "TASK-1", (claimed,), "kyle.w2"))
+
+    def test_race_result_with_a_reservation(self) -> None:
+        self.assertIs(asdlc.race_result(task("TASK-1", assignees=("@kyle",)), "kyle.w1"), asdlc.Race.OPEN)
+        self.assertIs(asdlc.race_result(task("TASK-1", assignees=("@kyle",)), "ann.w1"), asdlc.Race.LOST)
+        won = task("TASK-1", status="In Progress", assignees=("@kyle", "@kyle.w1"))
+        self.assertIs(asdlc.race_result(won, "kyle.w1"), asdlc.Race.WON)
+
+
+class PickingTest(unittest.TestCase):
+    def picker(self, worker: str = "kyle.w1", **fields: object) -> object:
+        values = {"engineer": asdlc.owner_of(worker), "worker": worker, "registered": frozenset({"acme-api", "acme-web", "acme-docs"})} | fields
+        return asdlc.Picker(**values)
+
+    def test_eligible_only_in_registered_repositories(self) -> None:
+        tasks = (task("TASK-1", project="acme-api"), task("TASK-2", project="acme-ios"), task("TASK-3", project=""))
+        ready, skipped = asdlc.candidates(tasks, self.picker())
+        self.assertEqual([t.id for t in ready], ["TASK-1"])
+        reasons = dict((t.id, why) for t, why in skipped)
+        self.assertIn("acme-ios, which is not registered on this machine", reasons["TASK-2"])
+        self.assertIn("has no project", reasons["TASK-3"])
+
+    def test_reserved_work_is_eligible_only_for_its_owner_and_comes_first(self) -> None:
+        tasks = (
+            task("TASK-1", project="acme-api", priority="high"),
+            task("TASK-2", project="acme-api", priority="low", assignees=("@kyle",)),
+            task("TASK-3", project="acme-api", priority="high", assignees=("@ann",)),
+        )
+        self.assertEqual([t.id for t in asdlc.candidates(tasks, self.picker("kyle.w1"))[0]], ["TASK-2", "TASK-1"])
+        self.assertEqual([t.id for t in asdlc.candidates(tasks, self.picker("ann.w1"))[0]], ["TASK-3", "TASK-1"])
+        self.assertEqual([t.id for t in asdlc.candidates(tasks, self.picker("bo.w1"))[0]], ["TASK-1"])
+
+    def test_preferences_then_priority(self) -> None:
+        tasks = (
+            task("TASK-1", project="acme-api", priority="high"),
+            task("TASK-2", project="acme-web", priority="low"),
+            task("TASK-3", project="acme-docs", priority="high"),
+        )
+        plain = asdlc.rank(tasks, self.picker())
+        self.assertEqual([t.id for t in plain], ["TASK-1", "TASK-3", "TASK-2"])
+        preferring = asdlc.rank(tasks, self.picker(prefer=("acme-web", "acme-docs")))
+        self.assertEqual([t.id for t in preferring], ["TASK-2", "TASK-3", "TASK-1"])
+
+    def test_avoided_repositories_only_for_reserved_work(self) -> None:
+        tasks = (task("TASK-1", project="acme-api"), task("TASK-2", project="acme-api", assignees=("@kyle",)), task("TASK-3", project="acme-web"))
+        ready, skipped = asdlc.candidates(tasks, self.picker(avoid=("acme-api",)))
+        self.assertEqual([t.id for t in ready], ["TASK-2", "TASK-3"])
+        self.assertIn("which devs/kyle.yaml avoids", dict((t.id, why) for t, why in skipped)["TASK-1"])
+
+    def test_workers_start_at_different_places_in_the_best_tier(self) -> None:
+        tasks = tuple(task(f"TASK-{n}", project="acme-api", priority="medium") for n in range(1, 5)) + (task("TASK-9", project="acme-api", priority="low"),)
+        firsts = [asdlc.rank(tasks, self.picker(f"kyle.w{n}"))[0].id for n in range(1, 5)]
+        self.assertEqual(firsts, ["TASK-1", "TASK-2", "TASK-3", "TASK-4"])
+        self.assertEqual(asdlc.rank(tasks, self.picker("kyle.w5"))[0].id, "TASK-1")
+        for n in range(1, 6):
+            self.assertEqual(asdlc.rank(tasks, self.picker(f"kyle.w{n}"))[-1].id, "TASK-9", "only the best tier rotates")
+        self.assertEqual(asdlc.spread("kyle.helper"), asdlc.spread("kyle.helper"))
+
+    def test_active_workers_count_against_the_cap(self) -> None:
+        tasks = (
+            task("TASK-1", status="In Progress", assignees=("@kyle.w1",)),
+            task("TASK-2", status="In Progress", assignees=("@kyle", "@kyle.w2")),
+            task("TASK-3", status="In Review", assignees=("@kyle.w3",)),
+            task("TASK-4", status="In Progress", assignees=("@ann.w1",)),
+        )
+        self.assertEqual([t.id for t in asdlc.active_workers(tasks, "kyle")], ["TASK-1", "TASK-2"])
+
+
+class PrefsTest(unittest.TestCase):
+    def test_reads_the_flat_subset(self) -> None:
+        text = "# kyle's preferences\nname: kyle\nprefer: [Acme-API, 'acme-web']\navoid: [acme-docs]\nworkers: 4  # at most\nreview: false\n"
+        self.assertEqual(asdlc.parse_prefs(text, "kyle"), asdlc.Prefs("kyle", ("acme-api", "acme-web"), ("acme-docs",), 4, False))
+        self.assertEqual(asdlc.parse_prefs("name: kyle\n", "kyle"), asdlc.Prefs("kyle", (), (), 3, True))
+
+    def test_refuses_anything_else(self) -> None:
+        cases = {
+            "name: kyle\nteams:\n  a: b\n": "unknown key 'teams'",
+            "name: kyle\nprefer:\n  - acme-api\n": "in brackets, on one line",
+            "prefer: [a]\n  nested: x\n": "not 'key: value'",
+            "workers: 2\n": "name is required",
+            "workers: 0\n": "at least 1",
+            "workers: many\n": "whole number",
+            "review: yes\n": "true or false",
+            "name: ann\n": "must match",
+            "prefer: [a, [b]]\n": "in brackets",
+            "prefer: acme-api\n": "in brackets",
+            "prefer: [a]\navoid: [a]\n": "both preferred and avoided",
+            "workers: 2\nworkers: 3\n": "given twice",
+            "workers: &anchor 2\n": "plain value",
+        }
+        for text, says in cases.items():
+            named = text if text.startswith("name:") or says == "name is required" else f"name: kyle\n{text}"
+            with self.subTest(text=named), self.assertRaisesRegex(asdlc.AsdlcError, re.escape(says)):
+                asdlc.parse_prefs(named, "kyle")
+
+
+class SettingsTest(unittest.TestCase):
+    def test_durations(self) -> None:
+        self.assertEqual(asdlc.parse_duration("2h"), timedelta(hours=2))
+        self.assertEqual(asdlc.parse_duration("1h30m"), timedelta(minutes=90))
+        self.assertEqual(asdlc.parse_duration("1d"), timedelta(days=1))
+        for bad in ("", "2 hours", "h", "-1h"):
+            with self.subTest(raw=bad), self.assertRaises(asdlc.AsdlcError):
+                asdlc.parse_duration(bad)
+        self.assertEqual(asdlc.human(timedelta(hours=3, minutes=5)), "3h 5m")
+
+    def test_the_boards_asdlc_toml(self) -> None:
+        self.assertEqual(asdlc.parse_settings(""), asdlc.Settings(timedelta(hours=2), timedelta(minutes=30)))
+        self.assertEqual(asdlc.parse_settings('stale_after = "45m"\nother = 1\n').stale_after, timedelta(minutes=45))
+        self.assertEqual(asdlc.parse_settings('review_fallback_after = "1h"\n').review_fallback_after, timedelta(hours=1))
+        with self.assertRaisesRegex(asdlc.AsdlcError, "in quotes"):
+            asdlc.parse_settings("stale_after = 2\n")
+        with self.assertRaisesRegex(asdlc.AsdlcError, "not valid TOML"):
+            asdlc.parse_settings("stale_after = \n")
+
+
+class RegistryTest(unittest.TestCase):
+    def test_round_trip(self) -> None:
+        entries = (asdlc.Registered("acme-web", Path('/src/we "b"'), Path("/src/board")), asdlc.Registered("acme-api", Path("/src/api"), Path("/src/board")))
+        parsed = asdlc.parse_registry(asdlc.registry_text(entries))
+        self.assertEqual(list(parsed), ["acme-api", "acme-web"])
+        self.assertEqual(parsed["acme-web"].path, Path('/src/we "b"'))
+
+    def test_board_projects(self) -> None:
+        config = 'project_name: "b"\nprojects:\n  - acme-api\ntask_prefix: "task"\n'
+        updated = asdlc.with_project(config, "acme-web")
+        fields = asdlc.frontmatter(f"---\n{updated}---\n")
+        self.assertEqual(fields["projects"], ("acme-api", "acme-web"))
+        self.assertEqual(fields["task_prefix"], "task")
+        self.assertIsNone(asdlc.with_project(updated, "acme-web"))
+        self.assertEqual(asdlc.frontmatter(f"---\n{asdlc.with_project('a: 1', 'x')}---\n")["projects"], ("x",))
+
+
+class FrontmatterKeyTest(unittest.TestCase):
+    TEXT = "---\nid: TASK-1\nlabels:\n  - a\nstatus: To Do\n---\n\n## Description\nlabels: not this\n"
+
+    def test_sets_replaces_and_removes_a_key(self) -> None:
+        added = asdlc.with_key(self.TEXT, "asdlc_lead", "kyle.lead")
+        self.assertEqual(asdlc.task_from("x", added).lead, "kyle.lead")
+        replaced = asdlc.with_key(asdlc.with_key(added, "labels", "[b]"), "asdlc_lead", "ann.lead")
+        self.assertEqual(asdlc.task_from("x", replaced).labels, ("b",))
+        self.assertEqual(asdlc.task_from("x", replaced).lead, "ann.lead")
+        self.assertIn("labels: not this", replaced)
+        self.assertEqual(asdlc.with_key(added, "asdlc_lead", None), self.TEXT)
+        stamped = asdlc.with_key(self.TEXT, "asdlc_heartbeat", asdlc.yaml_quoted("2026-10-22T10:00:00+00:00"))
+        self.assertEqual(asdlc.task_from("x", stamped).heartbeat, "2026-10-22T10:00:00+00:00")
+        with self.assertRaises(asdlc.AsdlcError):
+            asdlc.with_key("no frontmatter", "a", "b")
+
+    def test_reads_project_lead_and_heartbeat(self) -> None:
+        found = asdlc.task_from("backlog/drafts/draft-1 - x.md", "---\nid: DRAFT-1\nproject: Acme-API\nasdlc_lead: '@kyle.lead'\n---\n")
+        self.assertEqual((found.project, found.lead), ("acme-api", "kyle.lead"))
+        self.assertTrue(asdlc.is_draft(found))
+
+
+class LeadAndStalenessTest(unittest.TestCase):
+    NOW = datetime(2026, 10, 22, 15, 0, tzinfo=UTC)
+
+    def test_lead_of(self) -> None:
+        items = (task("TASK-1", type="intent", lead="kyle.lead"), task("TASK-1.1", parent="TASK-1"), task("TASK-2"), task("TASK-3.1", parent="TASK-3"))
+        self.assertEqual(asdlc.lead_of(items, "TASK-1.1"), asdlc.LeadOf("TASK-1.1", "TASK-1", "kyle.lead"))
+        self.assertEqual(asdlc.lead_of(items, "TASK-1"), asdlc.LeadOf("TASK-1", "TASK-1", "kyle.lead"))
+        self.assertEqual(asdlc.lead_of(items, "TASK-2"), asdlc.LeadOf("TASK-2", None, None))
+        self.assertEqual(asdlc.lead_of(items, "TASK-3.1"), asdlc.LeadOf("TASK-3.1", None, None))
+        with self.assertRaises(asdlc.AsdlcError):
+            asdlc.lead_of(items, "TASK-9")
+
+    def test_stale_holds(self) -> None:
+        items = (
+            task("TASK-1", status="In Progress", assignees=("@kyle", "@kyle.w1"), path="a"),
+            task("TASK-2", status="In Progress", assignees=("@kyle.w2",), path="b"),
+            task("TASK-3", status="In Progress", assignees=("@kyle",), path="c"),
+            task("TASK-4", type="intent", lead="ann.lead", path="d"),
+            task("TASK-5", status="In Review", assignees=("@kyle.w3",), path="e"),
+        )
+        old, fresh = self.NOW - timedelta(hours=3), self.NOW - timedelta(minutes=10)
+        touched = {"a": old, "b": fresh, "c": old, "d": old, "e": old}
+        found = asdlc.stale_holds(items, touched, self.NOW, timedelta(hours=2))
+        self.assertEqual([(s.task.id, s.hold, s.holders) for s in found],
+                         [("TASK-1", asdlc.Hold.CLAIM, ("@kyle.w1",)), ("TASK-4", asdlc.Hold.LEAD, ("@ann.lead",))])
+        comment = asdlc.reap_comment(found[0], timedelta(hours=2))
+        self.assertIn("no board update for 3h 0m, longer than stale_after (2h 0m)", comment)
+        self.assertIn("stays reserved for @kyle", comment)
+
+    def test_mine_report(self) -> None:
+        items = (
+            task("TASK-1", status="In Progress", assignees=("@kyle", "@kyle.w1")),
+            task("TASK-2", status="In Review", assignees=("@kyle.w2",)),
+            task("TASK-3", status="Done", assignees=("@kyle.w3",)),
+            task("TASK-4", assignees=("@kyle",)),
+            task("TASK-5", type="intent", lead="kyle.lead"),
+            task("TASK-6", status="In Progress", assignees=("@ann.w1",)),
+        )
+        report = asdlc.mine_report(items, "kyle", asdlc.Prefs("kyle", workers=3))
+        self.assertEqual((report["active"], report["workers_cap"]), (1, 3))
+        self.assertEqual([(r["id"], r["workers"]) for r in report["tasks"]], [("TASK-1", ["kyle.w1"]), ("TASK-2", ["kyle.w2"])])
+        self.assertEqual([r["id"] for r in report["leads"]], ["TASK-5"])
+        self.assertEqual([r["id"] for r in report["reserved"]], ["TASK-4"])
+
+
+class CheckNoteTest(unittest.TestCase):
+    NOW = datetime(2026, 10, 22, 15, 0, tzinfo=UTC)
+
+    def test_records_command_code_and_the_tail(self) -> None:
+        output = "".join(f"line {n}\n" for n in range(1, 51))
+        note = asdlc.check_note(["./scripts/check", "--all"], 1, output, self.NOW, tail=3)
+        self.assertTrue(note.startswith("Check FAILED: `./scripts/check --all` exited 1 at 2026-10-22T15:00:00+00:00, last 3 of 50 lines:"))
+        self.assertIn("line 48\nline 49\nline 50\n```", note)
+        self.assertNotIn("line 47", note)
+        self.assertIn("Check passed", asdlc.check_note(["true"], 0, "", self.NOW))
+
+    def test_output_with_a_fence_gets_a_longer_one(self) -> None:
+        note = asdlc.check_note(["cat"], 0, "```python\nx\n```\n", self.NOW)
+        self.assertIn("````text\n```python", note)
+
+
+class DraftParentTest(unittest.TestCase):
+    def test_a_draft_parent_is_taken_out_for_asdlc_to_record(self) -> None:
+        self.assertEqual(asdlc.draft_parent(["task", "create", "A", "--draft", "-p", "draft-2", "-l", "size-1"]),
+                         (("task", "create", "A", "--draft", "-l", "size-1"), "DRAFT-2"))
+        self.assertEqual(asdlc.draft_parent(["draft", "create", "A", "--parent=DRAFT-3"]), (("draft", "create", "A"), "DRAFT-3"))
+
+    def test_anything_else_is_left_to_backlog(self) -> None:
+        self.assertIsNone(asdlc.draft_parent(["task", "create", "A", "--draft", "-p", "TASK-2"]))
+        self.assertIsNone(asdlc.draft_parent(["task", "create", "A", "-p", "DRAFT-2"]))
+        self.assertIsNone(asdlc.draft_parent(["task", "edit", "TASK-1", "-p", "DRAFT-2"]))
+
+
 # --- the script, against real git repositories and the backlog CLI --------------------
 
 
-def _asdlc(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return run_script("scripts/asdlc", *args, cwd=cwd, env={**ISOLATED, "ASDLC_BACKLOG": BACKLOG or "backlog", **(env or {})})
+def as_engineer(name: str) -> dict[str, str]:
+    """`git config asdlc.engineer <name>` through the environment, the way one machine sets it once."""
+    return {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "asdlc.engineer", "GIT_CONFIG_VALUE_0": name}
+
+
+# A machine with nothing registered: tests that register pass their own XDG_CONFIG_HOME.
+NO_MACHINE_CONFIG = {"XDG_CONFIG_HOME": "/nonexistent/asdlc-tests"}
+
+
+def _asdlc(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None, engineer: str = "agent") -> subprocess.CompletedProcess[str]:
+    return run_script("scripts/asdlc", *args, cwd=cwd, env={
+        **ISOLATED, **NO_MACHINE_CONFIG, **as_engineer(engineer), "ASDLC_BACKLOG": BACKLOG or "backlog", **(env or {}),
+    })
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -240,7 +511,7 @@ def _git(repo: Path, *args: str) -> str:
 class Boards:
     """A bare board origin with tasks on it, and clones of it, in a temporary folder."""
 
-    def __init__(self, test: unittest.TestCase, tasks: list[list[str]]) -> None:
+    def __init__(self, test: unittest.TestCase, tasks: list[list[str]], projects: tuple[str, ...] = (), files: dict[str, str] | None = None) -> None:
         handle = tempfile.TemporaryDirectory()
         test.addCleanup(handle.cleanup)
         self.root = Path(handle.name).resolve()
@@ -249,6 +520,15 @@ class Boards:
         seed = self.root / "seed"
         done = _asdlc("init-board", str(seed))
         test.assertEqual(done.returncode, 0, done.stderr)
+        config = seed / "backlog" / "config.yml"
+        for project in projects:
+            config.write_text(asdlc.with_project(config.read_text(), project) or config.read_text())
+        for relative, text in (files or {}).items():
+            (seed / relative).parent.mkdir(parents=True, exist_ok=True)
+            (seed / relative).write_text(text)
+        if projects or files:
+            _git(seed, "add", ".")
+            _git(seed, "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "Projects and settings")
         env = {**os.environ, **ISOLATED, **asdlc.hooks_off({})}
         for arguments in tasks:
             created = subprocess.run([BACKLOG, "task", "create", *arguments], cwd=seed, capture_output=True, text=True, env=env)
@@ -400,36 +680,36 @@ class ClaimTest(unittest.TestCase):
         self.theirs = self.boards.clone("theirs")
 
     def test_claims_on_the_board_only_outside_a_code_repository(self) -> None:
-        done = _asdlc("--board", str(self.mine), "claim", "1", "--as", "agent-1", cwd=self.boards.root)
+        done = _asdlc("--board", str(self.mine), "claim", "1", "--as", "agent.1", cwd=self.boards.root)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("on the board only", done.stdout)
         claimed = self.boards.on_origin()["TASK-1"][0]
-        self.assertEqual((claimed.status, claimed.assignees), ("In Progress", ("@agent-1",)))
+        self.assertEqual((claimed.status, claimed.assignees), ("In Progress", ("@agent.1",)))
 
     def test_refuses_a_claimed_task_and_one_that_cant_start(self) -> None:
-        self.assertEqual(_asdlc("--board", str(self.mine), "claim", "TASK-1", "--as", "agent-1").returncode, 0)
-        again = _asdlc("--board", str(self.theirs), "claim", "TASK-1", "--as", "agent-2")
+        self.assertEqual(_asdlc("--board", str(self.mine), "claim", "TASK-1", "--as", "agent.1").returncode, 0)
+        again = _asdlc("--board", str(self.theirs), "claim", "TASK-1", "--as", "agent.2")
         self.assertEqual(again.returncode, 1)
-        self.assertIn("assigned to @agent-1", again.stderr)
-        big = _asdlc("--board", str(self.theirs), "claim", "TASK-3", "--as", "agent-2")
+        self.assertIn("assigned to @agent.1", again.stderr)
+        big = _asdlc("--board", str(self.theirs), "claim", "TASK-3", "--as", "agent.2")
         self.assertEqual(big.returncode, 1)
         self.assertIn("split it before it starts", big.stderr)
 
     def test_losing_at_the_push_undoes_the_claim(self) -> None:
-        env = _interfering_backlog(self.boards.root, self.theirs, '"$REAL_BACKLOG" task edit TASK-1 -s "In Progress" -a @agent-2')
-        done = _asdlc("--board", str(self.mine), "claim", "TASK-1", "--as", "agent-1", env=env)
+        env = _interfering_backlog(self.boards.root, self.theirs, '"$REAL_BACKLOG" task edit TASK-1 -s "In Progress" -a @agent.2')
+        done = _asdlc("--board", str(self.mine), "claim", "TASK-1", "--as", "agent.1", env=env)
         self.assertEqual(done.returncode, 1)
         self.assertIn("Another agent claimed TASK-1 first. Run asdlc next for another task.", done.stderr)
-        self.assertEqual(self.boards.on_origin()["TASK-1"][0].assignees, ("@agent-2",))
+        self.assertEqual(self.boards.on_origin()["TASK-1"][0].assignees, ("@agent.2",))
         self.assertEqual(_git(self.mine, "rev-parse", "HEAD"), _git(self.mine, "rev-parse", "origin/main"))
 
     def test_a_push_rejected_for_another_task_is_retried(self) -> None:
-        env = _interfering_backlog(self.boards.root, self.theirs, '"$REAL_BACKLOG" task edit TASK-2 -s "In Progress" -a @agent-2')
-        done = _asdlc("--board", str(self.mine), "claim", "TASK-1", "--as", "agent-1", env=env)
+        env = _interfering_backlog(self.boards.root, self.theirs, '"$REAL_BACKLOG" task edit TASK-2 -s "In Progress" -a @agent.2')
+        done = _asdlc("--board", str(self.mine), "claim", "TASK-1", "--as", "agent.1", env=env)
         self.assertEqual(done.returncode, 0, done.stderr)
         on_origin = self.boards.on_origin()
-        self.assertEqual(on_origin["TASK-1"][0].assignees, ("@agent-1",))
-        self.assertEqual(on_origin["TASK-2"][0].assignees, ("@agent-2",))
+        self.assertEqual(on_origin["TASK-1"][0].assignees, ("@agent.1",))
+        self.assertEqual(on_origin["TASK-2"][0].assignees, ("@agent.2",))
 
     def test_the_race(self) -> None:
         """Two clones claim the same task at once, ten times: exactly one wins each time."""
@@ -437,17 +717,17 @@ class ClaimTest(unittest.TestCase):
         first, second = boards.clone("first"), boards.clone("second")
         lost_at_push = 0
         for number in range(1, 11):
-            env = {**os.environ, **ISOLATED, "ASDLC_BACKLOG": BACKLOG}
+            env = {**os.environ, **ISOLATED, **NO_MACHINE_CONFIG, **as_engineer("agent"), "ASDLC_BACKLOG": BACKLOG}
             racers = [
                 subprocess.Popen([sys.executable, str(ROOT / "scripts" / "asdlc"), "--board", str(clone), "claim", f"TASK-{number}", "--as", worker],
                                  cwd=boards.root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                for clone, worker in ((first, "agent-1"), (second, "agent-2"))
+                for clone, worker in ((first, "agent.1"), (second, "agent.2"))
             ]
             results = [(racer.wait(timeout=120), *racer.communicate()) for racer in racers]
             codes = sorted(code for code, _, _ in results)
             self.assertEqual(codes, [0, 1], results)
             loser = next(err for code, _, err in results if code == 1)
-            self.assertRegex(loser, r"Another agent claimed TASK-\d+ first|assigned to @agent-")
+            self.assertRegex(loser, r"Another agent claimed TASK-\d+ first|assigned to @agent\.")
             lost_at_push += "first" in loser
             claimed = boards.on_origin()[f"TASK-{number}"]
             self.assertEqual(len(claimed), 1)
@@ -459,26 +739,39 @@ class ClaimTest(unittest.TestCase):
 
 
 @needs_backlog
+def _code_repo(root: Path, owner: str, name: str, clone: Path) -> Path:
+    """A code repository with one commit on origin's main, its origin at <root>/origins/<owner>/<name>.git."""
+    origin = root / "origins" / owner / f"{name}.git"
+    origin.parent.mkdir(parents=True, exist_ok=True)
+    if not origin.exists():
+        _git(root, "init", "--quiet", "--bare", "-b", "main", str(origin))
+        seed = root / "origins" / f"{owner}-{name}-seed"
+        _git(root, "clone", "--quiet", str(origin), str(seed))
+        (seed / "README.md").write_text(f"{name}\n")
+        _git(seed, "add", ".")
+        _git(seed, "commit", "--quiet", "-m", "start")
+        _git(seed, "push", "--quiet", "origin", "main")
+    _git(root, "clone", "--quiet", str(origin), str(clone))
+    return clone
+
+
+@needs_backlog
 class WorktreeTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.boards = Boards(self, [_sized("Add the login page", "size-2", "--priority", "low"), _sized("Second", "size-1", "--priority", "high")])
+        self.boards = Boards(self, [_sized("Add the login page", "size-2", "--priority", "low", "--project", "acme-app"),
+                                    _sized("Second", "size-1", "--priority", "high", "--project", "acme-app")], projects=("acme-app",))
         self.board = self.boards.clone("board")
-        origin = self.boards.root / "app-origin.git"
-        _git(self.boards.root, "init", "--quiet", "--bare", "-b", "main", str(origin))
-        self.code = self.boards.root / "app"
-        _git(self.boards.root, "clone", "--quiet", str(origin), str(self.code))
-        (self.code / "README.md").write_text("app\n")
-        _git(self.code, "add", ".")
-        _git(self.code, "commit", "--quiet", "-m", "start")
-        _git(self.code, "push", "--quiet", "origin", "main")
-        _git(self.code, "config", "asdlc.board", str(self.board))
+        self.code = _code_repo(self.boards.root, "acme", "app", self.boards.root / "app")
+        self.machine = {"XDG_CONFIG_HOME": str(self.boards.root / "config")}
+        done = _asdlc("register", "--board", str(self.board), cwd=self.code, env=self.machine)
+        self.assertEqual(done.returncode, 0, done.stderr)
 
     def test_a_claim_makes_a_worktree_with_its_marker(self) -> None:
-        done = _asdlc("claim", "TASK-1", "--as", "agent-1", cwd=self.code)
+        done = _asdlc("claim", "TASK-1", "--as", "agent.1", cwd=self.code, env=self.machine)
         self.assertEqual(done.returncode, 0, done.stderr)
         path = self.boards.root / "app.worktrees" / "task-1"
         self.assertEqual(done.stdout.strip().splitlines()[-1], str(path))
-        self.assertEqual(json.loads((path / ".asdlc-task").read_text()), {"task": "TASK-1", "worker": "agent-1", "board": str(self.board)})
+        self.assertEqual(json.loads((path / ".asdlc-task").read_text()), {"task": "TASK-1", "worker": "agent.1", "board": str(self.board)})
         self.assertEqual(_git(path, "branch", "--show-current"), "task-1-add-the-login-page")
         self.assertEqual(_git(path, "rev-parse", "HEAD"), _git(self.code, "rev-parse", "origin/main"))
         self.assertIn(".asdlc-task", (self.code / ".git" / "info" / "exclude").read_text().splitlines())
@@ -487,29 +780,29 @@ class WorktreeTest(unittest.TestCase):
         self.assertNotEqual(no_upstream.returncode, 0, "the task branch must not track main, or a bare git push could reach it")
 
     def test_next_takes_the_highest_priority_and_skips_claimed_tasks(self) -> None:
-        first = _asdlc("next", "--as", "agent-1", cwd=self.code)
+        first = _asdlc("next", "--as", "agent.1", cwd=self.code, env=self.machine)
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertIn("claimed TASK-2", first.stdout)
-        second = _asdlc("next", "--as", "agent-2", cwd=self.code)
+        second = _asdlc("next", "--as", "agent.2", cwd=self.code, env=self.machine)
         self.assertIn("claimed TASK-1", second.stdout)
-        third = _asdlc("next", "--as", "agent-3", cwd=self.code)
+        third = _asdlc("next", "--as", "agent.3", cwd=self.code, env=self.machine)
         self.assertEqual((third.returncode, third.stdout.strip()), (0, "no work available"))
 
     def test_release_puts_the_task_back_and_leaves_the_worktree(self) -> None:
-        self.assertEqual(_asdlc("claim", "TASK-1", "--as", "agent-1", cwd=self.code).returncode, 0)
-        refused = _asdlc("release", "TASK-1", "--as", "agent-2", cwd=self.code)
+        self.assertEqual(_asdlc("claim", "TASK-1", "--as", "agent.1", cwd=self.code, env=self.machine).returncode, 0)
+        refused = _asdlc("release", "TASK-1", "--as", "agent.2", cwd=self.code, env=self.machine)
         self.assertEqual(refused.returncode, 1)
-        self.assertIn("only @agent-2's own", refused.stderr)
-        done = _asdlc("release", "TASK-1", "--as", "agent-1", cwd=self.code)
+        self.assertIn("only @agent.2's own", refused.stderr)
+        done = _asdlc("release", "TASK-1", "--as", "agent.1", cwd=self.code, env=self.machine)
         self.assertEqual(done.returncode, 0, done.stderr)
         released = self.boards.on_origin()["TASK-1"][0]
         self.assertEqual((released.status, released.assignees), ("To Do", ()))
         path = self.boards.root / "app.worktrees" / "task-1"
         self.assertIn(str(path), done.stdout)
         self.assertTrue((path / ".asdlc-task").exists())
-        again = _asdlc("claim", "TASK-1", "--as", "agent-2", cwd=self.code)
+        again = _asdlc("claim", "TASK-1", "--as", "agent.2", cwd=self.code, env=self.machine)
         self.assertEqual(again.returncode, 0, again.stderr)
-        self.assertEqual(json.loads((path / ".asdlc-task").read_text())["worker"], "agent-2")
+        self.assertEqual(json.loads((path / ".asdlc-task").read_text())["worker"], "agent.2")
 
     def test_the_default_branch_comes_from_origin_head(self) -> None:
         _git(self.code, "push", "--quiet", "origin", "main:trunk")
@@ -517,6 +810,291 @@ class WorktreeTest(unittest.TestCase):
         self.assertEqual(asdlc.default_branch(self.code), "trunk")
         _git(self.code, "remote", "set-head", "origin", "--delete")
         self.assertEqual(asdlc.default_branch(self.code), "main")
+
+
+class Team:
+    """A board with two projects, and one machine with clones of both code repositories registered."""
+
+    def __init__(self, test: unittest.TestCase, tasks: list[list[str]], files: dict[str, str] | None = None) -> None:
+        self.test = test
+        self.boards = Boards(test, tasks, projects=("acme-api", "acme-web", "acme-ios"), files=files)  # acme-ios: registered on another machine only
+        root = self.boards.root
+        self.board = self.boards.clone("board")
+        self.machine = {"XDG_CONFIG_HOME": str(root / "config")}
+        self.api = _code_repo(root, "acme", "api", root / "api")
+        self.web = _code_repo(root, "acme", "web", root / "web")
+        for repo in (self.api, self.web):
+            done = _asdlc("register", "--board", str(self.board), cwd=repo, env=self.machine)
+            test.assertEqual(done.returncode, 0, done.stderr)
+
+    def run(self, *args: str, engineer: str = "kyle", cwd: Path | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        return _asdlc("--board", str(self.board), *args, cwd=cwd or self.boards.root, env={**self.machine, **(env or {})}, engineer=engineer)
+
+    def ok(self, *args: str, **options: object) -> subprocess.CompletedProcess[str]:
+        done = self.run(*args, **options)
+        self.test.assertEqual(done.returncode, 0, done.stderr)
+        return done
+
+    def task(self, task_id: str) -> object:
+        return self.boards.on_origin()[task_id][0]
+
+    def text(self, task_id: str) -> str:
+        """A task or draft file's text as it is on origin/main."""
+        fresh = Path(tempfile.mkdtemp(dir=self.boards.root))
+        _git(fresh, "clone", "--quiet", str(self.boards.origin), str(fresh / "c"))
+        for path in (fresh / "c" / "backlog").glob("*/*.md"):
+            if path.name.lower().startswith(f"{task_id.lower()} - "):
+                return path.read_text()
+        raise AssertionError(f"{task_id} is not on origin")
+
+
+@needs_backlog
+class IdentityAndRegisterTest(unittest.TestCase):
+    def test_whoami_needs_the_engineer_and_says_how_to_set_it(self) -> None:
+        done = run_script("scripts/asdlc", "whoami", env={**ISOLATED, **NO_MACHINE_CONFIG})
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("git config --global asdlc.engineer <name>", done.stderr)
+        claimed = run_script("scripts/asdlc", "--board", "/nowhere", "claim", "1", "--as", "kyle.w1", env={**ISOLATED, **NO_MACHINE_CONFIG})
+        self.assertEqual(claimed.returncode, 1)
+
+    def test_register_records_the_repository_on_the_machine_and_the_board(self) -> None:
+        team = Team(self, [])
+        registry = asdlc.parse_registry((team.boards.root / "config" / "asdlc" / "repos.toml").read_text())
+        self.assertEqual({slug: e.path for slug, e in registry.items()}, {"acme-api": team.api.resolve(), "acme-web": team.web.resolve()})
+        self.assertEqual(_git(team.api, "config", "asdlc.board"), str(team.board))
+        fresh = team.boards.clone("check")
+        self.assertEqual(asdlc.frontmatter(f"---\n{(fresh / 'backlog' / 'config.yml').read_text()}---\n")["projects"], ("acme-api", "acme-web", "acme-ios"))
+        again = _asdlc("register", "--json", cwd=team.api, env=team.machine)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(json.loads(again.stdout)["added_to_board"], False)
+        listed = _asdlc("repos", "--json", env=team.machine)
+        self.assertEqual([r["slug"] for r in json.loads(listed.stdout)["repos"]], ["acme-api", "acme-web"])
+
+    def test_a_new_project_is_added_to_the_boards_projects(self) -> None:
+        team = Team(self, [])
+        docs = _code_repo(team.boards.root, "acme", "docs", team.boards.root / "docs")
+        done = _asdlc("register", "--board", str(team.board), cwd=docs, env=team.machine)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("acme-docs added to the board's projects", done.stdout)
+        self.assertEqual(_git(team.boards.origin, "log", "-1", "--format=%s", "main"), "Register project acme-docs")
+
+    def test_register_needs_an_origin(self) -> None:
+        team = Team(self, [])
+        lonely = team.boards.root / "lonely"
+        _git(team.boards.root, "init", "--quiet", "-b", "main", str(lonely))
+        done = _asdlc("register", "--board", str(team.board), cwd=lonely, env=team.machine)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("has no origin remote", done.stderr)
+
+    def test_whoami_reports_preferences_and_repositories(self) -> None:
+        team = Team(self, [], files={"devs/kyle.yaml": "name: kyle\nprefer: [acme-web]\nworkers: 2\n"})
+        report = json.loads(team.ok("whoami", "--json").stdout)
+        self.assertEqual(report["engineer"], "kyle")
+        self.assertEqual(report["board"], str(team.board))
+        self.assertEqual((report["preferences"]["prefer"], report["preferences"]["workers"]), (["acme-web"], 2))
+        self.assertEqual(sorted(report["repos"]), ["acme-api", "acme-web"])
+
+
+@needs_backlog
+class ReservedClaimTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.team = Team(self, [
+            _sized("Reserved", "size-2", "--project", "acme-api", "-a", "@kyle"),
+            _sized("Open", "size-2", "--project", "acme-web"),
+            _sized("Elsewhere", "size-2", "--project", "acme-ios"),
+        ])
+
+    def test_only_the_owners_workers_claim_reserved_work_and_the_person_stays(self) -> None:
+        refused = self.team.run("claim", "1", "--as", "ann.w1", engineer="ann")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("reserved for @kyle", refused.stderr)
+        done = self.team.ok("claim", "1", "--as", "kyle.w1", "--json")
+        report = json.loads(done.stdout)
+        self.assertEqual(self.team.task("TASK-1").assignees, ("@kyle", "@kyle.w1"))
+        self.assertEqual(report["worktree"], str(self.team.boards.root / "api.worktrees" / "task-1"))
+        self.assertEqual((report["project"], report["model"], report["branch"]), ("acme-api", "sonnet", "task-1-reserved"))
+        released = self.team.ok("release", "1", "--as", "kyle.w1")
+        self.assertIn("reserved for @kyle", released.stdout)
+        self.assertEqual((self.team.task("TASK-1").status, self.team.task("TASK-1").assignees), ("To Do", ("@kyle",)))
+
+    def test_the_worktree_is_made_in_the_registered_repository_not_the_current_directory(self) -> None:
+        done = self.team.ok("claim", "2", "--as", "kyle.w1", cwd=self.team.api)
+        path = self.team.boards.root / "web.worktrees" / "task-2"
+        self.assertEqual(done.stdout.strip().splitlines()[-1], str(path))
+        self.assertEqual(_git(path, "rev-parse", "HEAD"), _git(self.team.web, "rev-parse", "origin/main"))
+
+    def test_a_worker_must_belong_to_the_engineer(self) -> None:
+        done = self.team.run("claim", "2", "--as", "ann.w1")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("not one of kyle's workers", done.stderr)
+
+    def test_a_task_in_an_unregistered_repository_is_refused_before_it_is_claimed(self) -> None:
+        done = self.team.run("claim", "3", "--as", "kyle.w1")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("acme-ios, which is not registered on this machine", done.stderr)
+        self.assertEqual(self.team.task("TASK-3").status, "To Do")
+
+
+@needs_backlog
+class NextTest(unittest.TestCase):
+    def test_preferences_rank_work_and_the_cap_holds(self) -> None:
+        team = Team(self, [
+            _sized("Api", "size-2", "--project", "acme-api", "--priority", "high"),
+            _sized("Web", "size-2", "--project", "acme-web", "--priority", "low"),
+            _sized("Elsewhere", "size-2", "--project", "acme-ios"),
+        ], files={"devs/kyle.yaml": "name: kyle\nprefer: [acme-web]\nworkers: 1\n"})
+        first = team.ok("next", "--as", "kyle.w1", "--json")
+        report = json.loads(first.stdout)
+        self.assertEqual((report["task"], report["worker"]), ("TASK-2", "kyle.w1"))
+        self.assertIn("skipped TASK-3 is in acme-ios", first.stderr)
+        capped = team.ok("next", "--as", "kyle.w2", "--json")
+        self.assertIn("the cap in devs/kyle.yaml (1)", json.loads(capped.stdout)["reason"])
+        self.assertEqual(team.task("TASK-1").status, "To Do")
+        other = json.loads(team.ok("next", "--as", "ann.w1", "--json", engineer="ann").stdout)
+        self.assertEqual(other["task"], "TASK-1")
+        none = team.ok("next", "--as", "ann.w2", engineer="ann")
+        self.assertEqual(none.stdout.strip(), "no work available")
+
+
+@needs_backlog
+class LeadTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.team = Team(self, [["Big thing", "--draft", "--type", "intent"], _sized("Plain", "size-1", "--project", "acme-api")])
+        self.theirs = self.team.boards.clone("theirs")
+
+    def test_the_first_orchestrator_leads_and_the_second_sees_it(self) -> None:
+        led = json.loads(self.team.ok("lead", "draft-1", "--as", "kyle.lead", "--json").stdout)
+        self.assertEqual((led["intent"], led["lead"], led["mine"]), ("DRAFT-1", "kyle.lead", True))
+        self.assertIn("asdlc_lead: kyle.lead", self.team.text("DRAFT-1"))
+        self.assertIn("@kyle.lead leads DRAFT-1", self.team.text("DRAFT-1"))
+        other = self.team.run("lead", "DRAFT-1", "--as", "ann.lead", "--json", engineer="ann")
+        self.assertEqual(other.returncode, 1)
+        self.assertEqual(json.loads(other.stdout)["lead"], "kyle.lead")
+        self.assertEqual(self.team.ok("lead", "DRAFT-1", "--as", "kyle.lead").stdout.strip(), "@kyle.lead already leads DRAFT-1")
+        child = self.team.ok("board", "task", "create", "Child", "--draft", "-p", "DRAFT-1", "--project", "acme-api", "-l", "size-2")
+        self.assertIn("DRAFT-2", child.stdout)
+        self.assertEqual(json.loads(self.team.ok("lead-of", "DRAFT-2", "--json").stdout), {"task": "DRAFT-2", "intent": "DRAFT-1", "lead": "kyle.lead"})
+        self.assertIn("has no parent intent", self.team.ok("lead-of", "TASK-1").stdout)
+
+    def test_losing_the_lead_at_the_push(self) -> None:
+        other = f'sed -i "s/^type: intent$/type: intent\\nasdlc_lead: ann.lead/" backlog/drafts/draft-1*.md && git commit -qam lead'
+        env = _interfering_backlog(self.team.boards.root, self.theirs, other)
+        done = self.team.run("lead", "DRAFT-1", "--as", "kyle.lead", env=env)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("Another orchestrator claimed the lead on DRAFT-1 first: @ann.lead", done.stdout)
+        self.assertEqual(asdlc.task_from("x", self.team.text("DRAFT-1")).lead, "ann.lead")
+
+    def test_only_an_intent_has_a_lead_and_a_lead_can_be_given_up(self) -> None:
+        refused = self.team.run("lead", "TASK-1", "--as", "kyle.lead")
+        self.assertIn("not an intent", refused.stderr)
+        self.team.ok("lead", "DRAFT-1", "--as", "kyle.lead")
+        self.assertIn("released the lead on DRAFT-1", self.team.ok("release", "DRAFT-1", "--as", "kyle.lead").stdout)
+        self.assertEqual(asdlc.task_from("x", self.team.text("DRAFT-1")).lead, "")
+
+    def test_the_board_refuses_a_draft_parent_that_isnt_a_draft(self) -> None:
+        done = self.team.run("board", "task", "create", "Child", "--draft", "-p", "DRAFT-7")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("DRAFT-7 is not a draft on the board", done.stderr)
+
+
+@needs_backlog
+class HeartbeatAndReapTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.team = Team(self, [
+            _sized("Reserved", "size-2", "--project", "acme-api", "-a", "@kyle"),
+            _sized("Open", "size-2", "--project", "acme-web"),
+            ["Big thing", "--type", "intent"],
+        ])
+        self.team.ok("claim", "1", "--as", "kyle.w1")
+        self.team.ok("claim", "2", "--as", "kyle.w2")
+        self.team.ok("lead", "3", "--as", "kyle.lead")
+
+    def later(self, **delta: float) -> str:
+        return (datetime.now(UTC) + timedelta(**delta)).isoformat()
+
+    def test_a_heartbeat_is_a_board_commit_only_the_holder_makes(self) -> None:
+        self.team.ok("heartbeat", "1", "--as", "kyle.w1")
+        self.assertTrue(self.team.task("TASK-1").heartbeat)
+        self.assertEqual(_git(self.team.boards.origin, "log", "-1", "--format=%s", "main"), "Heartbeat TASK-1 from @kyle.w1")
+        self.team.ok("heartbeat", "3", "--as", "kyle.lead")
+        refused = self.team.run("heartbeat", "1", "--as", "kyle.w2")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("holds nothing to keep alive", refused.stderr)
+
+    def test_reap_releases_stale_claims_and_leads_and_keeps_the_reservation(self) -> None:
+        self.assertIn("nothing stale", self.team.ok("reap", "--now", self.later(hours=1)).stdout)
+        report = json.loads(self.team.ok("reap", "--now", self.later(hours=3), "--json").stdout)
+        self.assertEqual(sorted((r["id"], r["hold"]) for r in report["released"]), [("TASK-1", "claim"), ("TASK-2", "claim"), ("TASK-3", "lead")])
+        first = self.team.task("TASK-1")
+        self.assertEqual((first.status, first.assignees), ("To Do", ("@kyle",)))
+        self.assertEqual(self.team.task("TASK-2").assignees, ())
+        self.assertEqual(self.team.task("TASK-3").lead, "")
+        self.assertIn("Released by asdlc reap: the claim held by @kyle.w1 had no board update for", self.team.text("TASK-1"))
+        self.assertIn("It stays reserved for @kyle", self.team.text("TASK-1"))
+
+    def test_the_timeout_comes_from_the_flag_or_the_boards_asdlc_toml(self) -> None:
+        report = json.loads(self.team.ok("reap", "--older-than", "30m", "--now", self.later(hours=1), "--json").stdout)
+        self.assertEqual(len(report["released"]), 3)
+        team = Team(self, [_sized("Open", "size-2", "--project", "acme-web")], files={"asdlc.toml": 'stale_after = "4h"\n'})
+        team.ok("claim", "1", "--as", "kyle.w1")
+        self.assertIn("nothing stale (stale_after 4h 0m)", team.ok("reap", "--now", self.later(hours=3)).stdout)
+
+
+@needs_backlog
+class AcceptTest(unittest.TestCase):
+    def test_accepts_an_intent_and_its_draft_children_in_one_commit(self) -> None:
+        team = Team(self, [_sized("Already here", "size-1", "--project", "acme-api"), ["Big thing", "--draft", "--type", "intent", "--ac", "It works"]])
+        team.ok("lead", "DRAFT-1", "--as", "kyle.lead")
+        team.ok("board", "task", "create", "Api part", "--draft", "-p", "DRAFT-1", "--project", "acme-api", "-l", "size-2")
+        team.ok("board", "task", "create", "Web part", "--draft", "-p", "DRAFT-1", "--project", "acme-web", "-l", "size-1", "--dep", "DRAFT-2", "-a", "@kyle")
+        before = int(_git(team.boards.origin, "rev-list", "--count", "main"))
+        report = json.loads(team.ok("accept", "DRAFT-1", "--json").stdout)
+        self.assertEqual(int(_git(team.boards.origin, "rev-list", "--count", "main")), before + 1)
+        self.assertEqual(report["accepted"], {"DRAFT-1": "TASK-2", "DRAFT-2": "TASK-2.1", "DRAFT-3": "TASK-2.2"})
+        on_origin = team.boards.on_origin()
+        intent, api, web = on_origin["TASK-2"][0], on_origin["TASK-2.1"][0], on_origin["TASK-2.2"][0]
+        self.assertEqual((intent.status, intent.type, intent.lead), ("To Do", "intent", "kyle.lead"))
+        self.assertEqual((api.parent, api.project, web.parent, web.dependencies, web.assignees), ("TASK-2", "acme-api", "TASK-2", ("TASK-2.1",), ("@kyle",)))
+        fresh = team.boards.clone("after")
+        self.assertEqual(list((fresh / "backlog" / "drafts").glob("*.md")), [])
+        self.assertEqual(json.loads(team.ok("lead-of", "TASK-2.2", "--json").stdout)["lead"], "kyle.lead")
+        later = team.ok("board", "task", "create", "Docs part", "--draft", "-p", "TASK-2", "--project", "acme-api", "-l", "size-1")
+        self.assertIn("DRAFT-1", later.stdout)
+        self.assertEqual(json.loads(team.ok("accept", "TASK-2", "--json").stdout)["accepted"], {"DRAFT-1": "TASK-2.3"})
+        self.assertIn("nothing to accept", team.ok("accept", "TASK-2").stdout)
+        refused = team.run("accept", "TASK-1")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("not an intent", refused.stderr)
+
+
+@needs_backlog
+class MineAndRecordCheckTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.team = Team(self, [
+            _sized("Mine", "size-2", "--project", "acme-api"),
+            _sized("Reserved", "size-2", "--project", "acme-web", "-a", "@kyle"),
+            ["Big thing", "--type", "intent"],
+        ])
+        self.team.ok("claim", "1", "--as", "kyle.w1")
+        self.team.ok("lead", "3", "--as", "kyle.lead")
+
+    def test_mine(self) -> None:
+        report = json.loads(self.team.ok("mine", "--as", "kyle", "--json").stdout)
+        self.assertEqual((report["active"], report["workers_cap"]), (1, 3))
+        self.assertEqual([(t["id"], t["workers"]) for t in report["tasks"]], [("TASK-1", ["kyle.w1"])])
+        self.assertEqual([(t["id"], t["lead"]) for t in report["leads"]], [("TASK-3", "kyle.lead")])
+        self.assertEqual([t["id"] for t in report["reserved"]], ["TASK-2"])
+        self.assertIn("1 of 3 workers busy", self.team.ok("mine", "--as", "kyle").stdout)
+
+    def test_record_check_notes_the_command_and_keeps_its_exit_code(self) -> None:
+        worktree = self.team.boards.root / "api.worktrees" / "task-1"
+        done = _asdlc("record-check", "TASK-1", "--", "sh", "-c", "echo checked; exit 3", cwd=worktree, env=self.team.machine, engineer="kyle")
+        self.assertEqual(done.returncode, 3, done.stderr)
+        self.assertEqual(done.stdout, "checked\n")
+        text = self.team.text("TASK-1")
+        self.assertIn("Check FAILED: `sh -c 'echo checked; exit 3'` exited 3", text)
+        self.assertIn("checked", text)
+        self.assertEqual(self.team.run("record-check", "TASK-1", "true").returncode, 1)
 
 
 @needs_backlog

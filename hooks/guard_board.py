@@ -8,9 +8,11 @@ Denied, each with the reason and the way that works instead:
 - Editing a file in a board's `backlog/` folder by hand. The board changes through
   `asdlc board`, so each change is committed and pushed where every agent sees it.
 - Setting a task to To Do or Done, promoting a draft, or creating a task without
-  `--draft` (it would start as accepted To Do work), with `backlog` or `asdlc board`.
-  Accepting work and closing it are a person's decisions. `asdlc release`, the tool's own
-  way of handing a claimed task back, is allowed.
+  `--draft` (it would start as accepted To Do work), with `backlog` or `asdlc board`, and
+  running `asdlc accept`, which promotes an intent and its draft children. Accepting work
+  and closing it are a person's decisions. `asdlc release` and `asdlc reap`, the tool's own
+  ways of handing a claimed task back, are allowed. The command `asdlc record-check` runs is
+  judged like any other.
 - Editing a file in a code repository that takes its work from a board (`git config
   asdlc.board` is set) outside a claimed task's worktree, the one with a `.asdlc-task`
   marker. Work starts with a claim, so no two agents change the same thing.
@@ -70,6 +72,10 @@ class Repo:
 Lookup = Callable[[Path], Repo | None]
 
 ALLOW = Outcome(Verdict.ALLOW, "nothing the board guard covers")
+ACCEPT_REFUSAL = (
+    "asdlc accept promotes an intent and its draft children to accepted work, and accepting work is a "
+    "person's decision: ask the person to run asdlc accept <intent-id> in their own terminal."
+)
 
 
 # --- the logic -----------------------------------------------------------------------
@@ -254,6 +260,12 @@ def decide_command(command: str, cwd: Path, lookup: Lookup) -> Outcome:
             subcommand, rest = _asdlc_subcommand(words[1:])
             if subcommand == "board" and (reason := backlog_refusal(rest)):
                 return Outcome(Verdict.DENY, reason)
+            if subcommand == "accept":
+                return Outcome(Verdict.DENY, ACCEPT_REFUSAL)
+            if subcommand == "record-check" and "--" in rest:
+                inner = decide_command(shlex.join(rest[rest.index("--") + 1:]), directory, lookup)
+                if inner.verdict is not Verdict.ALLOW:
+                    return inner
         elif name == "git":
             subcommand, rest, where = _git_call(words, directory)
             if subcommand == "push" and (outcome := _decide_push(rest, where, lookup)).verdict is not Verdict.ALLOW:

@@ -1,5 +1,5 @@
 ---
-description: Capture new work as an intent and open it for acceptance
+description: Capture new work as an intent on the board, for a person to accept
 argument-hint: <the problem, in your words>
 ---
 
