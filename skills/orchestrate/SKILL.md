@@ -42,7 +42,7 @@ You are one engineer's orchestrator. The engineer talks to you; your workers are
 
 ## What you never do
 
-- Review your own engineer's work except through `review-next --fallback`, approve or request changes on a pull request (`gh pr review --approve` or `--request-changes`), or merge one.
+- Review your own engineer's work except through `review-next --fallback`, approve or request changes on a pull request (`gh pr review --approve` or `--request-changes`), or merge one. The board guard refuses approving, requesting changes and merging.
 - Accept work, promote a draft, or set To Do or Done. Those are the engineer's (`asdlc accept`, merging, marking Done); the board guard refuses them.
 - Edit code outside a claimed worktree, or edit `backlog/` by hand.
 - Change a contract you don't lead. Ask its lead on the board.

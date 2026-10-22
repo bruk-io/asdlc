@@ -12,6 +12,8 @@ Then, in Claude Code:
 /plugin install asdlc --marketplace bruk-io/asdlc
 ```
 
+Joining the team pilot? Start with [the guide](docs/guide.md): install, set up, a day with it, and how to remove it.
+
 ## What version 0 does
 
 | Play | What you get |
@@ -32,12 +34,12 @@ For a team whose engineers each run several agents. Work is tracked on a [Backlo
 Set up once:
 
 ```sh
-asdlc init-board ~/src/team-board            # git init, backlog init, this board's statuses, types and size labels
+asdlc init-board ~/src/team-board            # git init, backlog init, this board's statuses, types, size and review labels
 git -C ~/src/team-board remote add origin <the board repository's url>
 git -C ~/src/team-board push -u origin main
 ```
 
-Each person clones the board, then points each code repository at their clone: `git config asdlc.board ~/src/team-board`. `--board <path>` or `ASDLC_BOARD` override it.
+Each person clones the board, then points each code repository at their clone: `git config asdlc.board ~/src/team-board` (`asdlc register` does it). `asdlc`, `asdlc-plugin` and the rule loader all look the board up in one order: `--board <path>`, then `ASDLC_BOARD`, then `git config asdlc.board`.
 
 | Command | What it does |
 |---|---|
@@ -57,7 +59,10 @@ Each person clones the board, then points each code repository at their clone: `
 | `asdlc review-next --as <engineer>.r<n> [--fallback]` | Claims the review of the In Review task that has waited longest, in a repository registered here, that nobody reviews and that hasn't passed review, and prints its branch, pull request, the repository's path here, and the review's model and effort. Not your own engineer's work, unless `--fallback` and it has waited longer than `review_fallback_after`. |
 | `asdlc review-done <id> --as <reviewer> --verdict clean\|changes --notes <findings>` | The claiming reviewer's verdict: the findings as a comment; `changes` sends it back In Progress to its worker, labelled `changes-requested`; `clean` labels it `review-passed` and leaves it In Review for a person to merge. |
 
-`claim`, `next`, `lead`, `lead-of`, `mine`, `repos`, `reap`, `accept`, `whoami`, `review-next` and `review-done` take `--json`.
+| `asdlc doctor` | Checks that this machine is ready, each line pass, warn or FAIL with what to do: git, uv and Python 3.15, Backlog.md 1.55.1 or later, `asdlc` and `asdlc-plugin` on `PATH`, `gh` and `claude` (warnings only); your `asdlc.engineer` and `devs/<name>.yaml`; the board clean, on `main` and its `origin` reachable without a prompt; `asdlc.toml`; each registered repository; the tasks repository's marketplace, the team plugin, auto-update and the authoring kit (through `claude plugin list` when `claude` is installed); leftover onboarding, verification and review worktrees; and `asdlc-plugin check` on every published repository plugin. Exits 1 on any FAIL. |
+| `asdlc stats [--since <date>]` | The pilot's numbers from the board's history: tasks claimed, in review and done; claim to In Review and In Review to Done (median and p90); review wait; changes-requested round trips; the share of same-machine reviews; onboardings and how long they took; size-1 tasks that skipped plan approval; and lost races per claim from this machine's event log. Reads only; changes nothing. |
+
+`claim`, `next`, `lead`, `lead-of`, `mine`, `repos`, `reap`, `accept`, `whoami`, `review-next`, `review-done`, `doctor` and `stats` take `--json`. `claim`, `next`, `review-next` and `lead` append one line per attempt (claimed, lost race, or refused, with the reason) to `${XDG_STATE_HOME:-~/.local/state}/asdlc/events.jsonl` on the machine.
 
 A claimed task's worktree is `<repo>.worktrees/<id>` beside the repository, on a branch named from the task, started from `origin`'s default branch and tracking nothing. Its `.asdlc-task` marker says which task it holds.
 
