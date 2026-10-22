@@ -170,7 +170,7 @@ class PilotReadinessTest(review.CrossMachineReviewTest):
         self.assertEqual((numbers["races"]["claimed"], numbers["races"]["lost"]), (2, 0))
         self.assertEqual([o["plugin"] for o in numbers["onboardings"]], ["acme-api"])
         self.assertEqual(numbers["onboardings"][0]["task"], "TASK-1")
-        self.say(f"\n$ asdlc stats             # on ann's machine, after the story (seconds apart, so most spans are 0m)\n{stats.stdout.rstrip()}")
+        self.say(f"\n$ asdlc stats             # on ann's machine, after the story, which runs in seconds\n{stats.stdout.rstrip()}")
 
 
 if __name__ == "__main__":
