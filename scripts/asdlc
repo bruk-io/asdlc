@@ -1,0 +1,972 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.15"
+# ///
+"""A shared Backlog.md board for a team of agents: claims, worktrees and routing.
+
+The board lives in its own repository, a clone of it sits on each machine, and every
+change goes straight to the board's `main` with every git hook off. A claim is a commit
+that sets a task In Progress with one assignee; git accepts only one of two racing
+pushes, so the loser learns from `origin/main` that someone else won and backs out.
+Each claimed task gets its own worktree in the code repository.
+
+Usage:
+  asdlc [--board <path>] init-board <dir>
+  asdlc [--board <path>] board <backlog arguments...>
+  asdlc [--board <path>] claim <id> --as <worker>
+  asdlc [--board <path>] next --as <worker>
+  asdlc [--board <path>] release <id> --as <worker>
+  asdlc [--board <path>] route <id>
+
+The board is `--board`, else $ASDLC_BOARD, else `git config asdlc.board` in the current
+code repository. The backlog CLI is $ASDLC_BACKLOG, else `backlog` on PATH.
+"""
+
+import argparse
+import fcntl
+import json
+import math
+import os
+import random
+import re
+import subprocess
+import sys
+import time
+from collections import Counter
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
+
+MIN_BACKLOG = (1, 55, 1)  # 1.54 drops frontmatter keys it doesn't know on every edit
+BOARD_BRANCH = "main"
+TO_DO, IN_PROGRESS, IN_REVIEW, DONE = "To Do", "In Progress", "In Review", "Done"
+STATUSES = (TO_DO, IN_PROGRESS, IN_REVIEW, DONE)
+TYPES = ("intent", "task", "bug", "spike")
+SIZE_LABELS = ("size-1", "size-2", "size-3", "size-4", "size-5", "size-8")
+BOARD_SETTINGS = frozendict({
+    "statuses": list(STATUSES),
+    "default_status": TO_DO,
+    "types": list(TYPES),
+    "labels": list(SIZE_LABELS),
+    "auto_commit": True,
+    "bypass_git_hooks": True,
+    "remote_operations": True,
+    "check_active_branches": False,
+})
+PUSH_ATTEMPTS = 5
+LOCK_WAIT_SECONDS = 120
+MARKER = ".asdlc-task"
+PRIORITY_ORDER = frozendict({"high": 0, "medium": 1, "low": 2})
+_WORKER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+# --- the logic: data in, data out ------------------------------------------------------
+
+
+class AsdlcError(Exception):
+    """A refusal or failure the person can act on; its message says what to do."""
+
+
+@dataclass(frozen=True)
+class Route:
+    model: str
+    effort: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class Refusal:
+    reason: str
+
+
+# The routing table: the one place that says which model and effort a task gets.
+PLANNING_TYPES = frozendict({
+    "intent": "an intent: it is planned and split before anything is built",
+    "spike": "a spike: it answers an open question, which takes judgement",
+})
+PLANNING = Route("opus", "high", "")
+SIZE_ROUTES: frozendict[str, Route | Refusal] = frozendict({
+    "size-1": Route("haiku", "default", "size-1: a small, mechanical change; its plan needs numbered steps, because haiku follows steps, not intent"),
+    "size-2": Route("sonnet", "medium", "size-2: an ordinary change"),
+    "size-3": Route("sonnet", "medium", "size-3: an ordinary change"),
+    "size-4": Route("sonnet", "medium", "size-4: an ordinary change"),
+    "size-5": Route("sonnet", "medium", "size-5: an ordinary change"),
+    "size-8": Refusal("size-8 is too big for one change: split it before it starts"),
+})
+
+
+@dataclass(frozen=True)
+class Task:
+    id: str
+    title: str
+    status: str
+    assignees: tuple[str, ...]
+    labels: tuple[str, ...]
+    priority: str
+    type: str
+    parent: str
+    ordinal: float | None
+    dependencies: tuple[str, ...]
+    path: str
+
+
+def _scalar(raw: str) -> str:
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] == "'":
+        return raw[1:-1].replace("''", "'")
+    if len(raw) >= 2 and raw[0] == raw[-1] == '"':
+        try:
+            return str(json.loads(raw))
+        except ValueError:
+            return raw[1:-1]
+    return "" if raw in ("~", "null") else raw
+
+
+def _flow_list(raw: str) -> tuple[str, ...]:
+    items, current, quote = [], "", ""
+    for char in raw.strip()[1:-1]:
+        if quote:
+            quote = "" if char == quote else quote
+        elif char in "'\"":
+            quote = char
+        elif char == ",":
+            items.append(current)
+            current = ""
+            continue
+        current += char
+    items.append(current)
+    return tuple(value for item in items if (value := _scalar(item)))
+
+
+def _value(raw: str, block: Sequence[str]) -> str | tuple[str, ...]:
+    lines = [line.strip() for line in block]
+    if raw[:1] in (">", "|"):
+        if raw[0] == "|":
+            return "\n".join(lines).strip()
+        return " ".join(line if line else "\n" for line in lines).replace(" \n ", "\n").strip()
+    if raw.startswith("["):
+        return _flow_list(" ".join([raw, *lines]))
+    if not raw and any(line.startswith("-") for line in lines):
+        return tuple(_scalar(line[1:]) for line in lines if line.startswith("-"))
+    return _scalar(" ".join(part for part in [raw, *lines] if part))
+
+
+def frontmatter(text: str) -> frozendict[str, str | tuple[str, ...]]:
+    """The subset of YAML that Backlog.md writes: scalars, lists and folded scalars."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return frozendict()
+    try:
+        end = next(n for n, line in enumerate(lines[1:], start=1) if line.rstrip() == "---")
+    except StopIteration:
+        return frozendict()
+    body, fields, index = lines[1:end], {}, 0
+    while index < len(body):
+        key, separator, raw = body[index].partition(":")
+        index += 1
+        if not separator or not key.strip() or key[0].isspace() or key.startswith(("#", "-")):
+            continue
+        block = []
+        while index < len(body) and (body[index][:1] in (" ", "\t", "-") or not body[index].strip()):
+            block.append(body[index])
+            index += 1
+        fields[key.strip()] = _value(raw.strip(), block)
+    return frozendict(fields)
+
+
+def _as_tuple(value: str | tuple[str, ...] | None) -> tuple[str, ...]:
+    match value:
+        case tuple():
+            return value
+        case str() if value:
+            return (value,)
+        case _:
+            return ()
+
+
+def task_from(path: str, text: str) -> Task | None:
+    fields = frontmatter(text)
+    task_id = fields.get("id")
+    if not isinstance(task_id, str) or not task_id:
+        return None
+    ordinal = fields.get("ordinal")
+    try:
+        number = float(ordinal) if isinstance(ordinal, str) and ordinal else None
+    except ValueError:
+        number = None
+
+    def text_field(name: str) -> str:
+        value = fields.get(name, "")
+        return value if isinstance(value, str) else " ".join(value)
+
+    return Task(
+        id=task_id.upper(),
+        title=text_field("title"),
+        status=text_field("status"),
+        assignees=_as_tuple(fields.get("assignee")),
+        labels=_as_tuple(fields.get("labels")),
+        priority=text_field("priority").lower(),
+        type=text_field("type").lower(),
+        parent=text_field("parent_task_id").upper(),
+        ordinal=number,
+        dependencies=tuple(d.upper() for d in _as_tuple(fields.get("dependencies"))),
+        path=path,
+    )
+
+
+def normalise_id(raw: str, prefix: str) -> str:
+    """`3` and `task-3` both mean `TASK-3`."""
+    raw = raw.strip()
+    if re.fullmatch(r"\d+(\.\d+)*", raw):
+        return f"{prefix.upper()}-{raw}"
+    return raw.upper()
+
+
+def id_key(task_id: str) -> tuple[str, tuple[int, ...]]:
+    prefix, _, number = task_id.rpartition("-")
+    parts = tuple(int(part) for part in number.split(".") if part.isdigit())
+    return (prefix, parts)
+
+
+def worker_name(raw: str) -> str:
+    name = raw.removeprefix("@")
+    if not _WORKER.match(name):
+        raise AsdlcError(f"'{raw}' is not a worker name: use letters, digits, '.', '_' and '-', such as agent-1")
+    return name
+
+
+def is_status(task: Task, status: str) -> bool:
+    return task.status.casefold() == status.casefold()
+
+
+def children_of(task_id: str, tasks: Iterable[Task]) -> tuple[Task, ...]:
+    return tuple(task for task in tasks if task.parent == task_id)
+
+
+def route(task: Task, tasks: Iterable[Task]) -> Route | Refusal:
+    """Which model and effort a task gets, from the table above, or why it can't start."""
+    if task.type in PLANNING_TYPES:
+        return Route(PLANNING.model, PLANNING.effort, f"{task.id} is {PLANNING_TYPES[task.type]}")
+    if children := children_of(task.id, tasks):
+        return Route(PLANNING.model, PLANNING.effort, f"{task.id} has {len(children)} child tasks to plan and coordinate")
+    sizes = [label for label in task.labels if label.startswith("size-")]
+    if len(sizes) != 1:
+        found = "no size label" if not sizes else f"{len(sizes)} size labels ({', '.join(sizes)})"
+        return Refusal(f"{task.id} has {found}; exactly one size label is needed: one of {', '.join(SIZE_LABELS)}")
+    match SIZE_ROUTES.get(sizes[0]):
+        case Route() as chosen:
+            return Route(chosen.model, chosen.effort, f"{task.id} is {chosen.reason}")
+        case Refusal(reason=reason):
+            return Refusal(f"{task.id}: {reason}")
+        case _:
+            return Refusal(f"{task.id} is labelled {sizes[0]}, which isn't a size this board routes: use one of {', '.join(SIZE_LABELS)}")
+
+
+def route_json(task_id: str, chosen: Route) -> str:
+    return json.dumps({"task": task_id, "model": chosen.model, "effort": chosen.effort, "reason": chosen.reason})
+
+
+def claim_refusal(task: Task | None, task_id: str, tasks: Iterable[Task]) -> str | None:
+    """Why a task can't be claimed now, or None when it can."""
+    if task is None:
+        return f"{task_id} is not a task on the board (drafts are accepted before they are claimed)"
+    if task.assignees:
+        return f"{task_id} is {task.status} and assigned to {', '.join(task.assignees)}. Run asdlc next for another task."
+    if not is_status(task, TO_DO):
+        return f"{task_id} is {task.status}, not {TO_DO}, so it can't be claimed"
+    if isinstance(chosen := route(task, tasks), Refusal):
+        return chosen.reason
+    return None
+
+
+class Race(StrEnum):
+    WON = "won"
+    LOST = "lost"
+    OPEN = "open"
+
+
+def race_result(on_origin: Task | None, worker: str) -> Race:
+    """After a rejected push: did someone else claim the task, or is it still open?"""
+    if on_origin is None:
+        return Race.LOST
+    if on_origin.assignees == (f"@{worker}",) and is_status(on_origin, IN_PROGRESS):
+        return Race.WON
+    if on_origin.assignees or not is_status(on_origin, TO_DO):
+        return Race.LOST
+    return Race.OPEN
+
+
+@dataclass(frozen=True)
+class Claimed:
+    task: Task
+
+
+@dataclass(frozen=True)
+class Taken:
+    """Another agent holds the task; `next` moves on to the next one."""
+
+    reason: str
+
+
+def candidates(tasks: Sequence[Task]) -> tuple[tuple[Task, ...], tuple[tuple[Task, str], ...]]:
+    """Unassigned To Do leaf tasks that can start, in the order to try them, and the skipped."""
+    by_id = {task.id: task for task in tasks}
+    parents = {task.parent for task in tasks if task.parent}
+    ready: list[Task] = []
+    skipped: list[tuple[Task, str]] = []
+    for task in tasks:
+        if task.assignees or not is_status(task, TO_DO) or task.id in parents:
+            continue
+        waiting = [d for d in task.dependencies if d in by_id and not is_status(by_id[d], DONE)]
+        if waiting:
+            skipped.append((task, f"{task.id} waits on {', '.join(waiting)}"))
+        elif isinstance(chosen := route(task, tasks), Refusal):
+            skipped.append((task, chosen.reason))
+        else:
+            ready.append(task)
+    ready.sort(key=lambda t: (PRIORITY_ORDER.get(t.priority, len(PRIORITY_ORDER)), t.ordinal if t.ordinal is not None else math.inf, id_key(t.id)))
+    return tuple(ready), tuple(skipped)
+
+
+def duplicate_ids(tasks: Iterable[Task]) -> frozenset[str]:
+    counts = Counter(task.id for task in tasks)
+    return frozenset(task_id for task_id, count in counts.items() if count > 1)
+
+
+class Push(StrEnum):
+    PUSHED = "pushed"
+    RETRY = "retry"
+    FAILED = "failed"
+
+
+_CONTENTION = ("[rejected]", "non-fast-forward", "fetch first", "cannot lock ref", "failed to update ref", "stale info", "incorrect old value")
+
+
+def push_outcome(returncode: int, stderr: str) -> Push:
+    """A rejected push means someone else pushed first, so it is retried; anything else fails."""
+    if returncode == 0:
+        return Push.PUSHED
+    return Push.RETRY if any(marker in stderr for marker in _CONTENTION) else Push.FAILED
+
+
+def backoff(attempt: int, rng: random.Random) -> float:
+    return rng.uniform(0.05, 0.25) * attempt
+
+
+def hooks_off(env: Mapping[str, str]) -> dict[str, str]:
+    """The environment with every git hook disabled, appended to any config already passed."""
+    try:
+        count = int(env.get("GIT_CONFIG_COUNT", "0") or "0")
+    except ValueError:
+        count = 0
+    return {
+        **env,
+        "GIT_CONFIG_COUNT": str(count + 1),
+        f"GIT_CONFIG_KEY_{count}": "core.hooksPath",
+        f"GIT_CONFIG_VALUE_{count}": "/dev/null",
+    }
+
+
+def backlog_version(text: str) -> tuple[int, ...] | None:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def board_config(existing: str, project: str) -> str:
+    """Backlog's config with this board's settings, keeping every other key as it was."""
+    wanted = {"project_name": project, **BOARD_SETTINGS}
+    lines: list[str] = []
+    written: set[str] = set()
+    skipping = False
+    for line in existing.splitlines():
+        if line[:1] not in (" ", "\t", "-") and line.strip():
+            key = line.partition(":")[0].strip()
+            skipping = key in wanted
+            if skipping and key not in written:
+                lines.append(f"{key}: {json.dumps(wanted[key])}")
+                written.add(key)
+        if not skipping:
+            lines.append(line)
+    lines += [f"{key}: {json.dumps(value)}" for key, value in wanted.items() if key not in written]
+    return "\n".join(lines) + "\n"
+
+
+def slug(title: str, limit: int = 40) -> str:
+    words = re.sub(r"[^a-z0-9]+", " ", title.lower()).split()
+    out = ""
+    for word in words:
+        if len(out) + len(word) + 1 > limit:
+            break
+        out = f"{out}-{word}" if out else word
+    return out or (words[0][:limit] if words else "task")
+
+
+def branch_name(task: Task) -> str:
+    return f"{task.id.lower()}-{slug(task.title)}"
+
+
+def worktree_path(repo_root: Path, task_id: str) -> Path:
+    return repo_root.parent / f"{repo_root.name}.worktrees" / task_id.lower()
+
+
+def with_exclude(existing: str, entry: str) -> str | None:
+    """`info/exclude` with the entry added, or None when it is already there."""
+    if entry in (line.strip() for line in existing.splitlines()):
+        return None
+    return existing + ("" if not existing or existing.endswith("\n") else "\n") + entry + "\n"
+
+
+# --- the shell: git, files and the backlog CLI ----------------------------------------
+
+
+def _run(command: Sequence[str], cwd: Path, env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(list(command), cwd=cwd, env=dict(env) if env else None, capture_output=True, text=True)
+
+
+def _say(message: str) -> None:
+    print(f"asdlc: {message}", file=sys.stderr, flush=True)
+
+
+def _git(directory: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Git in a code repository, where the repository's own hooks still run."""
+    return _run(["git", *args], directory)
+
+
+def _backlog_binary() -> str:
+    return os.environ.get("ASDLC_BACKLOG") or "backlog"
+
+
+def _check_backlog() -> None:
+    """Refuse a backlog CLI that is missing or older than MIN_BACKLOG.
+
+    Raises:
+        AsdlcError: backlog is not installed, or is too old.
+    """
+    binary = _backlog_binary()
+    try:
+        done = _run([binary, "--version"], Path.cwd())
+    except FileNotFoundError:
+        raise AsdlcError(f"the backlog CLI ({binary}) is not installed: npm i -g backlog.md@1.55.2") from None
+    version = backlog_version(done.stdout)
+    if version is None or version < MIN_BACKLOG:
+        found = ".".join(map(str, version)) if version else done.stdout.strip() or "unknown"
+        raise AsdlcError(
+            f"backlog {found} is too old: asdlc needs {'.'.join(map(str, MIN_BACKLOG))} or later, because older "
+            "versions drop frontmatter keys they don't know when a task is edited. Upgrade: npm i -g backlog.md@1.55.2"
+        )
+
+
+@dataclass(frozen=True)
+class Board:
+    """One clone of the board repository. Every git and backlog call in it runs with hooks off."""
+
+    path: Path
+    env: frozendict[str, str]
+
+
+def open_board(path: Path) -> Board:
+    return Board(path, frozendict(hooks_off(os.environ)))
+
+
+def _board_git(board: Board, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    """Raises: AsdlcError: the command failed and `check` is set."""
+    done = _run(["git", *args], board.path, board.env)
+    if check and done.returncode != 0:
+        raise AsdlcError(f"git {' '.join(args)} failed in the board at {board.path}: {done.stderr.strip()}")
+    return done
+
+
+def _board_backlog(board: Board, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    return _run([_backlog_binary(), *args], board.path, board.env)
+
+
+@contextmanager
+def _locked(board: Board) -> Iterator[None]:
+    """One asdlc change at a time in this clone, since several agents may share it.
+
+    Raises:
+        AsdlcError: another asdlc command held the clone for LOCK_WAIT_SECONDS.
+    """
+    git_dir = Path(_board_git(board, "rev-parse", "--absolute-git-dir").stdout.strip())
+    with (git_dir / "asdlc.lock").open("a") as handle:
+        deadline = time.monotonic() + LOCK_WAIT_SECONDS
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    raise AsdlcError(f"another asdlc command has held the board at {board.path} for {LOCK_WAIT_SECONDS}s; try again") from None
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _prefix(board: Board) -> str:
+    config = board.path / "backlog" / "config.yml"
+    value = frontmatter(f"---\n{config.read_text()}\n---\n").get("task_prefix", "task")
+    return value if isinstance(value, str) and value else "task"
+
+
+def _fetch(board: Board) -> None:
+    _board_git(board, "fetch", "--quiet", "origin", BOARD_BRANCH)
+
+
+def _ahead(board: Board) -> int:
+    return int(_board_git(board, "rev-list", "--count", f"origin/{BOARD_BRANCH}..HEAD").stdout.strip() or "0")
+
+
+def _batch_bodies(output: bytes) -> list[str]:
+    """Split `git cat-file --batch` output into the objects' contents, in order."""
+    bodies, position = [], 0
+    while position < len(output):
+        end = output.index(b"\n", position)
+        parts = output[position:end].split()
+        if len(parts) < 3:
+            break
+        start = end + 1
+        size = int(parts[2])
+        bodies.append(output[start:start + size].decode())
+        position = start + size + 1
+    return bodies
+
+
+def _tasks(board: Board, ref: str | None = None) -> tuple[Task, ...]:
+    """Every task in `backlog/tasks`, from the working tree or from a ref such as origin/main."""
+    if ref is None:
+        folder = board.path / "backlog" / "tasks"
+        files = {p.relative_to(board.path).as_posix(): p.read_text() for p in sorted(folder.glob("*.md"))}
+    else:
+        listed = _board_git(board, "ls-tree", "-r", "--name-only", ref, "--", "backlog/tasks").stdout.splitlines()
+        names = [name for name in listed if name.endswith(".md")]
+        batch = subprocess.run(
+            ["git", "cat-file", "--batch"], cwd=board.path, env=dict(board.env), capture_output=True,
+            input="".join(f"{ref}:{name}\n" for name in names).encode(),
+        ) if names else None
+        files = dict(zip(names, _batch_bodies(batch.stdout))) if batch else {}
+    return tuple(task for path, text in files.items() if (task := task_from(path, text)))
+
+
+def _find(tasks: Iterable[Task], task_id: str) -> Task | None:
+    return next((task for task in tasks if task.id == task_id), None)
+
+
+def _require_ready(board: Board) -> None:
+    """Raises: AsdlcError: the clone is off main, or has uncommitted changes to tracked files."""
+    branch = _board_git(board, "branch", "--show-current").stdout.strip()
+    if branch != BOARD_BRANCH:
+        raise AsdlcError(f"the board at {board.path} is on '{branch or 'a detached HEAD'}'; asdlc works on {BOARD_BRANCH} only")
+    dirty = _board_git(board, "status", "--porcelain", "--untracked-files=no").stdout.strip()
+    if dirty:
+        raise AsdlcError(f"the board at {board.path} has uncommitted changes asdlc won't overwrite:\n{dirty}\nCommit or remove them first.")
+
+
+def _rebase(board: Board) -> str | None:
+    """Rebase onto origin/main; on a conflict, abort it and return the conflicting files."""
+    if _board_git(board, "rebase", f"origin/{BOARD_BRANCH}", check=False).returncode == 0:
+        return None
+    files = _board_git(board, "diff", "--name-only", "--diff-filter=U", check=False).stdout.splitlines()
+    _board_git(board, "rebase", "--abort", check=False)
+    return ", ".join(files) or "the board"
+
+
+def _drop_own(board: Board) -> None:
+    """Drop this command's unpushed commits. Every asdlc change starts level with
+    origin/main, so they are the only commits not on it; nobody else's change is lost."""
+    _board_git(board, "reset", "--quiet", "--hard", f"origin/{BOARD_BRANCH}")
+
+
+def _push(board: Board) -> tuple[Push, str]:
+    done = _board_git(board, "push", "--no-verify", "--quiet", "origin", f"HEAD:{BOARD_BRANCH}", check=False)
+    return push_outcome(done.returncode, done.stderr), done.stderr.strip()
+
+
+class Published(StrEnum):
+    DONE = "done"
+    REPLAY = "replay"
+
+
+def _publish(board: Board, own: bool) -> Published:
+    """Push to origin/main, rebasing and retrying when someone else pushed first.
+
+    `own` says the unpushed commits are this command's, so they may be dropped: a rebase
+    that conflicts drops them and fails, and one that leaves two tasks sharing an id (two
+    clones creating a task at once) drops them and asks for the command to run again.
+    Earlier unpushed commits (`own` false) are never dropped.
+
+    Raises:
+        AsdlcError: the push failed, a rebase conflicted, or other agents kept pushing first.
+    """
+    rng = random.Random()
+    for attempt in range(1, PUSH_ATTEMPTS + 1):
+        if not _ahead(board):
+            return Published.DONE
+        outcome, error = _push(board)
+        match outcome:
+            case Push.PUSHED:
+                return Published.DONE
+            case Push.FAILED:
+                raise AsdlcError(f"the push to origin/{BOARD_BRANCH} failed; the change is committed in {board.path} and the next asdlc command pushes it:\n{error}")
+            case Push.RETRY:
+                time.sleep(backoff(attempt, rng))
+                _fetch(board)
+                if conflict := _rebase(board):
+                    if not own:
+                        raise AsdlcError(f"an earlier unpushed board change to {conflict} conflicts with origin/{BOARD_BRANCH}; resolve it in {board.path} by hand")
+                    _drop_own(board)
+                    raise AsdlcError(f"your change to {conflict} conflicts with a change another agent pushed first, so it was not applied. The board is now at origin/{BOARD_BRANCH}: check the task and run the command again.")
+                if duplicate_ids(_tasks(board)) - duplicate_ids(_tasks(board, f"origin/{BOARD_BRANCH}")):
+                    if not own:
+                        raise AsdlcError(f"two tasks now share an id in {board.path}; fix it by hand before pushing")
+                    _drop_own(board)
+                    return Published.REPLAY
+    if own:
+        _drop_own(board)
+        raise AsdlcError(f"gave up after {PUSH_ATTEMPTS} attempts because other agents kept pushing first; nothing was changed, try again")
+    raise AsdlcError(f"gave up pushing after {PUSH_ATTEMPTS} attempts; the change stays committed in {board.path}")
+
+
+def _catch_up(board: Board) -> None:
+    """Fetch, rebase anything left unpushed and push it, so local main equals origin/main.
+
+    Raises:
+        AsdlcError: the fetch failed, or earlier unpushed changes can't be pushed.
+    """
+    _fetch(board)
+    if conflict := _rebase(board):
+        raise AsdlcError(f"an earlier unpushed board change to {conflict} conflicts with origin/{BOARD_BRANCH}; resolve it in {board.path} by hand")
+    if pending := _ahead(board):
+        _say(f"pushing {pending} earlier board change(s) first")
+        _publish(board, own=False)
+
+
+def _backlog_committed(board: Board, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """Run one backlog command. Raises: AsdlcError: it changed the board without committing."""
+    done = _board_backlog(board, args)
+    loose = _board_git(board, "status", "--porcelain", "--", "backlog").stdout.strip()
+    if done.returncode == 0 and loose:
+        raise AsdlcError(f"backlog changed the board without committing it (is auto_commit on, and git's user set?):\n{loose}")
+    return done
+
+
+def board_command(board: Board, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """Run a backlog command on the board and push what it commits.
+
+    Raises:
+        AsdlcError: the board isn't ready, or the change can't be pushed.
+    """
+    with _locked(board):
+        _require_ready(board)
+        _catch_up(board)
+        for _ in range(PUSH_ATTEMPTS):
+            done = _backlog_committed(board, args)
+            if done.returncode != 0 or _publish(board, own=True) is Published.DONE:
+                return done
+            _say("another agent created a task with the same id first; running the command again")
+    raise AsdlcError(f"gave up after {PUSH_ATTEMPTS} attempts because other agents kept creating tasks with the same id; nothing was changed")
+
+
+def resolve_board(explicit: str | None, cwd: Path) -> Path:
+    """The board clone: --board, else $ASDLC_BOARD, else `git config asdlc.board`.
+
+    Raises:
+        AsdlcError: no board is configured, or the path is not a board.
+    """
+    raw = explicit or os.environ.get("ASDLC_BOARD")
+    source = "--board" if explicit else "ASDLC_BOARD"
+    if raw:
+        path = Path(raw).expanduser()
+    else:
+        root = _git(cwd, "rev-parse", "--show-toplevel")
+        configured = _git(cwd, "config", "--get", "asdlc.board") if root.returncode == 0 else None
+        if configured is None or configured.returncode != 0 or not configured.stdout.strip():
+            raise AsdlcError("no board: pass --board <path>, set ASDLC_BOARD, or run `git config asdlc.board <path>` in this code repository")
+        source = "git config asdlc.board"
+        path = Path(configured.stdout.strip()).expanduser()
+        path = path if path.is_absolute() else Path(root.stdout.strip()) / path
+    path = path.resolve()
+    if not (path / "backlog" / "config.yml").exists():
+        raise AsdlcError(f"{path} (from {source}) is not a board: it has no backlog/config.yml. Create one with asdlc init-board.")
+    return path
+
+
+def code_repo(cwd: Path, board: Path) -> Path | str:
+    """The root of the code repository the current directory is in, or why there is none."""
+    common = _git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if common.returncode != 0:
+        return "the current directory is not in a git repository"
+    git_dir = Path(common.stdout.strip())
+    root = git_dir.parent if git_dir.name == ".git" else git_dir
+    if root.resolve() == board.resolve():
+        return "the current directory is the board itself"
+    if _git(cwd, "config", "--get", "asdlc.board").returncode != 0:
+        return f"{root} has no asdlc.board configured"
+    return root
+
+
+def default_branch(repo: Path) -> str:
+    head = _git(repo, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    return head.stdout.strip().removeprefix("origin/") if head.returncode == 0 and head.stdout.strip() else "main"
+
+
+def make_worktree(repo: Path, task: Task, worker: str, board: Path) -> Path:
+    """The task's worktree, made from origin's default branch, with its marker.
+
+    Raises:
+        AsdlcError: the path holds another task, or git could not add the worktree.
+    """
+    path = worktree_path(repo, task.id)
+    marker = path / MARKER
+    if marker.exists():
+        recorded = json.loads(marker.read_text()).get("task")
+        if recorded != task.id:
+            raise AsdlcError(f"{path} already holds {recorded}; move it before claiming {task.id}")
+    else:
+        base = default_branch(repo)
+        if _git(repo, "fetch", "--quiet", "origin", base).returncode != 0:
+            _say(f"could not fetch origin/{base}; branching from the last fetched copy")
+        branch = branch_name(task)
+        if _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
+            added = _git(repo, "worktree", "add", str(path), branch)
+        elif _git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{base}").returncode == 0:
+            added = _git(repo, "worktree", "add", "--no-track", "-b", branch, str(path), f"origin/{base}")
+        else:
+            raise AsdlcError(f"claimed {task.id}, but {repo} has no origin/{base} to branch from, so no worktree was made")
+        if not path.is_dir():
+            raise AsdlcError(f"claimed {task.id}, but git could not add its worktree: {added.stderr.strip()}")
+    marker.write_text(json.dumps({"task": task.id, "worker": worker, "board": str(board)}, indent=2) + "\n")
+    exclude = Path(_git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()) / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    if (updated := with_exclude(exclude.read_text() if exclude.exists() else "", MARKER)) is not None:
+        exclude.write_text(updated)
+    return path
+
+
+def _claim_on_board(board: Board, task_id: str, worker: str) -> Claimed | Taken:
+    """Claim a task: one commit setting it In Progress for the worker, pushed to origin/main.
+
+    Raises:
+        AsdlcError: the task can't be claimed for a reason other than another agent holding it,
+        or the claim could not be pushed. A claim that isn't pushed is always undone.
+    """
+    with _locked(board):
+        _require_ready(board)
+        _catch_up(board)
+        tasks = _tasks(board)
+        task = _find(tasks, task_id)
+        if refusal := claim_refusal(task, task_id, tasks):
+            if task is not None and task.assignees:
+                return Taken(refusal)
+            raise AsdlcError(refusal)
+        done = _board_backlog(board, ["task", "edit", task_id, "-s", IN_PROGRESS, "-a", f"@{worker}"])
+        if done.returncode != 0 or _ahead(board) != 1:
+            _drop_own(board)
+            raise AsdlcError(f"backlog did not commit the claim on {task_id}: {(done.stderr or done.stdout).strip()}")
+        rng = random.Random()
+        for attempt in range(1, PUSH_ATTEMPTS + 1):
+            outcome, error = _push(board)
+            match outcome:
+                case Push.PUSHED:
+                    return Claimed(_find(_tasks(board), task_id) or task)
+                case Push.FAILED:
+                    _drop_own(board)
+                    raise AsdlcError(f"the claim on {task_id} could not be pushed, so it was undone:\n{error}")
+                case Push.RETRY:
+                    _fetch(board)
+                    on_origin = _find(_tasks(board, f"origin/{BOARD_BRANCH}"), task_id)
+                    match race_result(on_origin, worker):
+                        case Race.LOST:
+                            _drop_own(board)
+                            return Taken(f"Another agent claimed {task_id} first. Run asdlc next for another task.")
+                        case Race.WON:
+                            _drop_own(board)
+                            return Claimed(on_origin or task)
+                        case Race.OPEN:
+                            if conflict := _rebase(board):
+                                _drop_own(board)
+                                raise AsdlcError(f"the claim on {task_id} conflicts with another change to {conflict}, so it was undone; check the task and try again")
+                            time.sleep(backoff(attempt, rng))
+        _drop_own(board)
+        raise AsdlcError(f"gave up claiming {task_id} after {PUSH_ATTEMPTS} attempts because other agents kept pushing first; nothing was changed, try again")
+
+
+def _announce(board: Board, task: Task, worker: str, cwd: Path) -> None:
+    """Make the claimed task's worktree when there is a code repository, and say what happened."""
+    chosen = route(task, _tasks(board))
+    model = f" ({chosen.model}, {chosen.effort})" if isinstance(chosen, Route) else ""
+    match code_repo(cwd, board.path):
+        case Path() as repo:
+            path = make_worktree(repo, task, worker, board.path)
+            print(f"claimed {task.id} for @{worker}{model}")
+            print(path)
+        case str() as why:
+            print(f"claimed {task.id} for @{worker}{model} on the board only: {why}, so no worktree was made")
+
+
+def claim(board: Board, raw_id: str, worker: str, cwd: Path) -> int:
+    match _claim_on_board(board, normalise_id(raw_id, _prefix(board)), worker):
+        case Claimed(task=task):
+            _announce(board, task, worker, cwd)
+            return 0
+        case Taken(reason=reason):
+            _say(reason)
+            return 1
+
+
+def next_task(board: Board, worker: str, cwd: Path) -> int:
+    with _locked(board):
+        _require_ready(board)
+        _catch_up(board)
+    tried: set[str] = set()
+    while True:
+        ready, skipped = candidates(_tasks(board, f"origin/{BOARD_BRANCH}"))
+        if not tried:
+            for _, why in skipped:
+                _say(f"skipped {why}")
+        remaining = [task for task in ready if task.id not in tried]
+        if not remaining:
+            print("no work available")
+            return 0
+        tried.add(remaining[0].id)
+        match _claim_on_board(board, remaining[0].id, worker):
+            case Claimed(task=task):
+                _announce(board, task, worker, cwd)
+                return 0
+            case Taken(reason=reason):
+                _say(reason)
+
+
+def release(board: Board, raw_id: str, worker: str, cwd: Path) -> None:
+    """Put the worker's own In Progress task back to To Do with no assignee.
+
+    Raises:
+        AsdlcError: the task isn't the worker's In Progress task, or the change can't be pushed.
+    """
+    task_id = normalise_id(raw_id, _prefix(board))
+    with _locked(board):
+        _require_ready(board)
+        _catch_up(board)
+        task = _find(_tasks(board), task_id)
+    if task is None or f"@{worker}" not in task.assignees or not is_status(task, IN_PROGRESS):
+        held = "is not on the board" if task is None else f"is {task.status}, assigned to {', '.join(task.assignees) or 'nobody'}"
+        raise AsdlcError(f"{task_id} {held}; only @{worker}'s own In Progress task can be released by @{worker}")
+    done = board_command(board, ["task", "edit", task_id, "-s", TO_DO, "-a", ""])
+    if done.returncode != 0:
+        raise AsdlcError(f"backlog could not release {task_id}: {(done.stderr or done.stdout).strip()}")
+    print(f"released {task_id}; it is {TO_DO} with no assignee")
+    if isinstance(repo := code_repo(cwd, board.path), Path) and (path := worktree_path(repo, task_id)).exists():
+        print(f"its worktree is left as it was: {path}")
+
+
+def init_board(directory: Path) -> None:
+    """A board repository at `directory`: git, `backlog init`, this board's config, one commit.
+
+    Raises:
+        AsdlcError: git or backlog init failed.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    board = open_board(directory)
+    top = _git(directory, "rev-parse", "--show-toplevel")
+    if top.returncode != 0 or Path(top.stdout.strip()).resolve() != directory.resolve():
+        _board_git(board, "init", "--quiet", "-b", BOARD_BRANCH)
+    config = directory / "backlog" / "config.yml"
+    if not config.exists():
+        done = _board_backlog(board, ["init", directory.name, "--defaults", "--integration-mode", "none",
+                                      "--check-branches", "false", "--include-remote", "false", "--bypass-git-hooks", "true"])
+        if done.returncode != 0 or not config.exists():
+            raise AsdlcError(f"backlog init failed in {directory}: {(done.stderr or done.stdout).strip()}")
+    config.write_text(board_config(config.read_text(), directory.name))
+    _board_git(board, "add", "backlog")
+    if _board_git(board, "diff", "--cached", "--quiet", check=False).returncode != 0:
+        _board_git(board, "commit", "--quiet", "--no-verify", "-m", "Initialise the asdlc board")
+    print(f"board ready at {directory}. Add its remote and push it: git -C {directory} remote add origin <url> && git -C {directory} push -u origin {BOARD_BRANCH}")
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="asdlc", description="A shared Backlog.md board: claims, worktrees and routing.")
+    parser.add_argument("--board", help="the board clone (else $ASDLC_BOARD, else git config asdlc.board)")
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("init-board", help="create a board repository").add_argument("dir")
+    for name, text in (("claim", "claim a task and make its worktree"), ("release", "put your claimed task back to To Do")):
+        sub = commands.add_parser(name, help=text)
+        sub.add_argument("id")
+        sub.add_argument("--as", dest="worker", required=True)
+    commands.add_parser("next", help="claim the next task that can start").add_argument("--as", dest="worker", required=True)
+    commands.add_parser("route", help="the model and effort for a task, as JSON").add_argument("id")
+    commands.add_parser("board", help="run a backlog command on the board and push it")
+    return parser
+
+
+def command_index(argv: Sequence[str]) -> int | None:
+    """Where the subcommand is, skipping `--board <path>`."""
+    index = 0
+    while index < len(argv):
+        if argv[index] == "--board":
+            index += 2
+        elif argv[index].startswith("-"):
+            index += 1
+        else:
+            return index
+    return None
+
+
+def _route_command(board: Board, raw_id: str) -> None:
+    """Raises: AsdlcError: no such task, or it can't start."""
+    tasks = _tasks(board)
+    task_id = normalise_id(raw_id, _prefix(board))
+    task = _find(tasks, task_id)
+    if task is None:
+        raise AsdlcError(f"{task_id} is not a task on the board")
+    match route(task, tasks):
+        case Route() as chosen:
+            print(route_json(task_id, chosen))
+        case Refusal(reason=reason):
+            raise AsdlcError(reason)
+
+
+def main(argv: Sequence[str]) -> int:
+    cwd = Path.cwd()
+    parser = _parser()
+    split = command_index(argv)
+    if split is not None and argv[split] == "board":  # the rest belongs to backlog, flags included
+        arguments, passthrough = parser.parse_args([*argv[:split], "board"]), list(argv[split + 1:])
+    else:
+        arguments, passthrough = parser.parse_args(argv), []
+    try:
+        if arguments.command == "init-board":
+            _check_backlog()
+            init_board(Path(arguments.dir).expanduser().resolve())
+            return 0
+        board = open_board(resolve_board(arguments.board, cwd))
+        match arguments.command:
+            case "route":
+                _route_command(board, arguments.id)
+            case "board":
+                _check_backlog()
+                if not passthrough:
+                    raise AsdlcError("say which backlog command to run, such as: asdlc board task list --plain")
+                done = board_command(board, passthrough)
+                print(done.stdout, end="")
+                print(done.stderr, end="", file=sys.stderr)
+                return done.returncode
+            case "claim":
+                _check_backlog()
+                return claim(board, arguments.id, worker_name(arguments.worker), cwd)
+            case "next":
+                _check_backlog()
+                return next_task(board, worker_name(arguments.worker), cwd)
+            case "release":
+                _check_backlog()
+                release(board, arguments.id, worker_name(arguments.worker), cwd)
+        return 0
+    except AsdlcError as error:
+        print(f"asdlc: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

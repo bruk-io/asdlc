@@ -17,6 +17,11 @@ jobs:
 
       - uses: astral-sh/setup-uv@v7
 
+      # The shared-board tests drive the real backlog CLI and fail, never skip, in CI
+      # without it. Pinned: asdlc needs 1.55.1 or later (scripts/asdlc, MIN_BACKLOG).
+      - name: Backlog.md
+        run: npm install --global backlog.md@1.55.2
+
       - name: Artefact checks and tests
         run: ./scripts/check
 
