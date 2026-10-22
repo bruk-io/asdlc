@@ -105,6 +105,40 @@ class BoardStatusTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIs(verdict(command), guard.Verdict.ALLOW)
 
+    def test_denies_an_agent_accepting_work(self) -> None:
+        for command in (
+            "asdlc accept TASK-3",
+            "asdlc --board ../board accept DRAFT-1 --json",
+            "uv run --quiet --script /plugin/scripts/asdlc accept 3",
+            "cd /work/board && asdlc accept DRAFT-1",
+            "bash -c 'asdlc accept DRAFT-1'",
+        ):
+            with self.subTest(command=command):
+                self.assertIs(verdict(command), guard.Verdict.DENY)
+        reason = guard.decide_command("asdlc accept DRAFT-1", PLAIN, lookup).reason
+        self.assertIn("person's decision", reason)
+        self.assertIn("their own terminal", reason)
+
+    def test_allows_the_orchestrators_commands(self) -> None:
+        for command in (
+            "asdlc lead DRAFT-1 --as kyle.lead --json",
+            "asdlc lead-of TASK-3.1",
+            "asdlc heartbeat TASK-3.1 --as kyle.w1",
+            "asdlc reap --older-than 2h",
+            "asdlc mine --as kyle --json",
+            "asdlc register",
+            "asdlc record-check TASK-1 -- ./scripts/check",
+            "asdlc board task create 'Child' --draft -p DRAFT-1",
+            "echo 'asdlc accept DRAFT-1'",
+        ):
+            with self.subTest(command=command):
+                self.assertIs(verdict(command), guard.Verdict.ALLOW)
+
+    def test_judges_the_command_a_recorded_check_runs(self) -> None:
+        self.assertIs(verdict("asdlc record-check TASK-1 -- backlog task edit 1 -s Done"), guard.Verdict.DENY)
+        self.assertIs(verdict("asdlc record-check 1 -- sh -c 'asdlc accept DRAFT-1'"), guard.Verdict.DENY)
+        self.assertIs(verdict("asdlc record-check TASK-1 -- git push origin main", CODE), guard.Verdict.DENY)
+
     def test_the_reason_points_at_the_person_and_at_release(self) -> None:
         outcome = guard.decide_command("backlog task edit 1 -s Done", PLAIN, lookup)
         self.assertIn("person's decision", outcome.reason)
@@ -247,6 +281,12 @@ class GuardHookTest(unittest.TestCase):
 
     def test_denies_setting_done_from_the_shell(self) -> None:
         self.assertEqual(self.decision(self.run_hook(self.code, "Bash", command="backlog task edit 1 -s Done")), "deny")
+
+    def test_denies_accepting_work_and_logs_it(self) -> None:
+        done = self.run_hook(self.board, "Bash", command="asdlc accept DRAFT-1")
+        self.assertEqual(self.decision(done), "deny")
+        self.assertIn("asdlc accept", json.loads(done.stdout)["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertEqual(self.log(self.board)[-1]["verdict"], "deny")
 
     def test_says_so_when_it_cannot_parse(self) -> None:
         done = self.run_hook(self.code, "Bash", command="backlog task edit 1 -s 'Done")
