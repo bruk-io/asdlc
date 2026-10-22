@@ -30,12 +30,15 @@ Usage:
   asdlc [--board <path>] record-check <id> -- <command...>
   asdlc [--board <path>] review-next --as <reviewer> [--fallback] [--json]
   asdlc [--board <path>] review-done <id> --as <reviewer> --verdict clean|changes --notes <text> [--json]
+  asdlc [--board <path>] doctor [--json]
+  asdlc [--board <path>] stats [--since <date>] [--json]
 
 The board is `--board`, else $ASDLC_BOARD, else `git config asdlc.board`, else the board
 clone the current directory is in. The engineer is `git config asdlc.engineer`; a worker
 is the engineer's name, a dot and a label, such as kyle.w1; a reviewer's label is r and a
 number, such as kyle.r1. The backlog CLI is
-$ASDLC_BACKLOG, else `backlog` on PATH.
+$ASDLC_BACKLOG, else `backlog` on PATH. `claim`, `next`, `review-next` and `lead` append
+each attempt to ${XDG_STATE_HOME:-~/.local/state}/asdlc/events.jsonl, which `stats` reads.
 """
 
 import argparse
@@ -47,6 +50,7 @@ import os
 import random
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -456,9 +460,10 @@ class Claimed:
 
 @dataclass(frozen=True)
 class Taken:
-    """Another agent holds the task; `next` moves on to the next one."""
+    """Another agent holds the task; `next` moves on to the next one. `lost`: it won a race for it just now."""
 
     reason: str
+    lost: bool = False
 
 
 @dataclass(frozen=True)
@@ -1578,6 +1583,7 @@ class Led:
     lead: str
     mine: bool
     reason: str
+    lost: bool = False  # another orchestrator's lead landed first, just now
 
 
 def lead(board: Board, raw_id: str, worker: str) -> Led:
@@ -1600,7 +1606,8 @@ def lead(board: Board, raw_id: str, worker: str) -> Led:
             return None, Led(intent_id, worker, True, f"@{worker} already leads {intent_id}")
         if intent.lead:
             first = f"Another orchestrator claimed the lead on {intent_id} first: @{intent.lead}" if attempt > 1 else f"{intent_id} is led by @{intent.lead}"
-            return None, Led(intent_id, intent.lead, False, f"{first}. Work under its direction: read its spec, contracts and decisions on the board, and report through the board.")
+            return None, Led(intent_id, intent.lead, False, f"{first}. Work under its direction: read its spec, contracts and decisions on the board, and report through the board.",
+                             lost=attempt > 1)
         _write_key(board, intent, LEAD_KEY, worker)
         _comment(board, intent, f"@{worker} leads {intent_id}: the spec, the breakdown and the contracts are theirs. Ask for a change in a comment on the task concerned, labelled contract-change.", f"@{worker}")
         return f"Lead {intent_id}: @{worker}", Led(intent_id, worker, True, f"@{worker} now leads {intent_id}")
@@ -1876,7 +1883,7 @@ def _claim_on_board(board: Board, task_id: str, worker: str, registry: Mapping[s
         refusal = claim_refusal(task, task_id, tasks, worker)
         if task is None or refusal:
             if task is not None and task.assignees:
-                return None, Taken(f"Another agent claimed {task_id} first. Run asdlc next for another task." if attempt > 1 else str(refusal))
+                return None, Taken(f"Another agent claimed {task_id} first. Run asdlc next for another task." if attempt > 1 else str(refusal), lost=attempt > 1)
             raise AsdlcError(refusal or f"{task_id} is not a task on the board")
         if task.project and task.project not in registry:
             raise AsdlcError(f"{task_id} is in {task.project}, which is not registered on this machine: run asdlc register in a clone of it, then claim it")
@@ -1919,10 +1926,31 @@ def _claim_lines(report: Mapping[str, object]) -> list[str]:
     return [head, str(report["worktree"])] if report["worktree"] else [f"{head} {report['note']}"]
 
 
+def _attempt[R](command: str, worker: str, task_id: str, claiming: Callable[[], R]) -> R:
+    """Run one claim of a task, a review or a lead, and record how it went in the event log.
+
+    Raises:
+        AsdlcError: the claim was refused; it is recorded first.
+    """
+    try:
+        result = claiming()
+    except AsdlcError as error:
+        _record(command, worker, task_id, Attempt.REFUSED, str(error))
+        raise
+    match result:
+        case Taken(reason=reason, lost=lost):
+            _record(command, worker, task_id, Attempt.LOST if lost else Attempt.REFUSED, reason)
+        case Led(mine=mine, reason=reason, lost=lost):
+            _record(command, worker, task_id, Attempt.CLAIMED if mine else Attempt.LOST if lost else Attempt.REFUSED, reason)
+        case _:
+            _record(command, worker, task_id, Attempt.CLAIMED, "")
+    return result
+
+
 def claim(board: Board, raw_id: str, worker: str, cwd: Path, as_json: bool) -> int:
     registry = _registry()
     task_id = normalise_id(raw_id, _prefix(board))
-    match _claim_on_board(board, task_id, worker, registry):
+    match _attempt("claim", worker, task_id, lambda: _claim_on_board(board, task_id, worker, registry)):
         case Claimed(task=task):
             report = _claim_report(board, task, worker, cwd, registry)
             _emit(report, as_json, _claim_lines(report))
@@ -1954,10 +1982,11 @@ def next_task(board: Board, worker: str, engineer: str, cwd: Path, as_json: bool
             return 0
         if (held := busy(tasks, engineer)) >= prefs.workers:
             reason = f"{engineer}'s workers and reviewers hold {held} task(s), the cap in devs/{engineer}.yaml ({prefs.workers})"
+            _record("next", worker, None, Attempt.REFUSED, reason)
             _emit({"claimed": False, "reason": reason, "skipped": reported}, as_json, [f"no work available: {reason}"])
             return 0
         tried.add(remaining[0].id)
-        match _claim_on_board(board, remaining[0].id, worker, registry):
+        match _attempt("next", worker, remaining[0].id, lambda: _claim_on_board(board, remaining[0].id, worker, registry)):
             case Claimed(task=task):
                 report = _claim_report(board, task, worker, cwd, registry)
                 _emit(report, as_json, _claim_lines(report))
@@ -2035,8 +2064,8 @@ def _claim_review(board: Board, task_id: str, reviewing: Reviewing) -> ReviewCla
         if task.reviewer == reviewing.reviewer:
             return None, ReviewClaimed(task, waited)
         if refusal := review_refusal(task, reviewing, entered):
-            lost = attempt > 1 and task.reviewer
-            return None, Taken(f"Another reviewer claimed the review of {task_id} first: @{task.reviewer}" if lost else refusal)
+            lost = bool(attempt > 1 and task.reviewer)
+            return None, Taken(f"Another reviewer claimed the review of {task_id} first: @{task.reviewer}" if lost else refusal, lost=lost)
         kind = review_kind(task, reviewing.engineer)
         _write_key(board, task, REVIEWER_KEY, reviewing.reviewer)
         _write_key(board, task, REVIEW_KIND_KEY, str(kind))
@@ -2088,10 +2117,11 @@ def review_next(board: Board, reviewer: str, engineer: str, now: datetime, fallb
             return 0
         if (held := busy(tasks, engineer)) >= prefs.workers:
             reason = f"{engineer}'s workers and reviewers hold {held} task(s), the cap in devs/{engineer}.yaml ({prefs.workers})"
+            _record("review-next", reviewer, None, Attempt.REFUSED, reason)
             _emit({"claimed": False, "reason": reason, "skipped": reported}, as_json, [f"no review available: {reason}"])
             return 0
         tried.add(remaining[0].id)
-        match _claim_review(board, remaining[0].id, reviewing):
+        match _attempt("review-next", reviewer, remaining[0].id, lambda: _claim_review(board, remaining[0].id, reviewing)):
             case ReviewClaimed() as claimed:
                 report = _review_report(claimed, registry)
                 _emit(report, as_json, [
@@ -2139,6 +2169,706 @@ def review_done(board: Board, raw_id: str, reviewer: str, verdict: ReviewVerdict
         return f"Review {task_id} by @{reviewer}: {verdict}", result
 
     return _transact(board, step)
+
+# --- the local event log: one line per claim attempt -------------------------------------
+
+
+class Attempt(StrEnum):
+    CLAIMED = "claimed"
+    LOST = "lost"  # another agent's push landed first
+    REFUSED = "refused"  # asdlc refused it: held, reserved, at the cap, not registered
+
+
+def event_line(now: datetime, command: str, worker: str, task: str | None, outcome: Attempt, reason: str) -> str:
+    """One attempt to claim a task, a review or a lead, as a JSON line for the machine's event log."""
+    return json.dumps({"time": now.astimezone(UTC).isoformat(timespec="seconds"), "command": command, "engineer": owner_of(worker),
+                       "worker": worker, "task": task, "outcome": str(outcome), "reason": reason})
+
+
+def parse_events(text: str) -> tuple[dict[str, object], ...]:
+    """The event log's lines; a line that isn't a JSON object with a time is skipped."""
+    found = []
+    for line in text.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and isinstance(entry.get("time"), str):
+            found.append(entry)
+    return tuple(found)
+
+
+def _events_file() -> Path:
+    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return Path(base).expanduser() / "asdlc" / "events.jsonl"
+
+
+def _record(command: str, worker: str, task: str | None, outcome: Attempt, reason: str) -> None:
+    """Append one attempt to this machine's event log. A log that can't be written never fails the command."""
+    path = _events_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as handle:
+            handle.write(event_line(datetime.now(UTC), command, worker, task, outcome, reason) + "\n")
+    except OSError as error:
+        _say(f"could not record this attempt in {path}, so asdlc stats won't count it: {error}")
+
+
+# --- doctor: is this machine ready for the pilot? -----------------------------------------
+
+
+class Level(StrEnum):
+    PASS = "pass"
+    WARN = "warn"
+    FAIL = "fail"
+
+
+@dataclass(frozen=True)
+class Finding:
+    area: str
+    level: Level
+    message: str  # what was found and, unless it passed, what to do
+
+
+@dataclass(frozen=True)
+class Tool:
+    """A program on this machine: where it is, and the first line its version flag printed."""
+
+    path: str | None
+    version: str = ""
+
+
+@dataclass(frozen=True)
+class RepoFacts:
+    """A registered code repository as found on this machine."""
+
+    slug: str
+    path: Path
+    registered_board: Path
+    exists: bool
+    remote_slug: str | None
+    board: str  # its local `git config asdlc.board`, "" when unset
+
+
+@dataclass(frozen=True)
+class PluginFacts:
+    """What `claude plugin marketplace list --json` and `claude plugin list --json` said."""
+
+    error: str = ""  # why they couldn't be read; empty when they were
+    marketplaces: tuple[frozendict[str, object], ...] = ()
+    installed: tuple[frozendict[str, object], ...] = ()
+    kit_files: frozenset[str] = frozenset()  # files of the installed authoring-kit, relative to its folder
+
+
+@dataclass(frozen=True)
+class PublishedCheck:
+    slug: str
+    code: int
+    output: str
+
+
+@dataclass(frozen=True)
+class Facts:
+    """Everything doctor looked at, gathered by the shell; `diagnose` decides what it means."""
+
+    git: Tool
+    uv: Tool
+    python: tuple[int, int]
+    backlog: Tool
+    asdlc: Tool
+    asdlc_plugin: Tool
+    gh: Tool
+    gh_signed_in: bool | None
+    claude: Tool
+    npx: Tool
+    engineer: str  # `git config asdlc.engineer`, "" when unset
+    board: Path | None
+    board_error: str = ""
+    devs: str | None = None  # devs/<engineer>.yaml's text
+    dirty: str = ""
+    branch: str = ""
+    origin: str = ""  # origin's URL, "" when there is none
+    origin_error: str | None = None  # why origin can't be reached without a prompt; None when it can
+    settings: str | None = None  # asdlc.toml's text
+    registry_error: str = ""
+    repos: tuple[RepoFacts, ...] = ()
+    marketplace: str | None = None  # the tasks repository's marketplace name
+    plugins: PluginFacts = PluginFacts()
+    leftovers: tuple[Path, ...] = ()
+    published: tuple[PublishedCheck, ...] = ()
+
+
+AUTHORING_KIT = ("skills/choosing-extension-types/SKILL.md", "skills/authoring-skills/SKILL.md", "skills/authoring-hooks/SKILL.md",
+                 "agents/authoring-auditor.md")
+_SIGN_IN = "for HTTPS, gh auth login and then gh auth setup-git store a credential git uses without asking; for SSH, load your key into ssh-agent"
+
+
+def _tool_findings(facts: Facts) -> list[Finding]:
+    found = [
+        Finding("git", Level.PASS, facts.git.version) if facts.git.path else Finding("git", Level.FAIL, "git is not installed"),
+        Finding("uv", Level.PASS, facts.uv.version) if facts.uv.path else
+        Finding("uv", Level.FAIL, "uv is not on PATH; the plugin's hooks and scripts run through it: https://docs.astral.sh/uv/"),
+        Finding("python", Level.PASS, f"Python {facts.python[0]}.{facts.python[1]} runs asdlc") if facts.python >= (3, 15) else
+        Finding("python", Level.FAIL, f"Python {facts.python[0]}.{facts.python[1]} runs asdlc; it needs 3.15: run it with uv run --script"),
+    ]
+    version = backlog_version(facts.backlog.version)
+    minimum = ".".join(map(str, MIN_BACKLOG))
+    if not facts.backlog.path:
+        found.append(Finding("backlog", Level.FAIL, "the backlog CLI is not installed: npm i -g backlog.md@1.55.2"))
+    elif version is None or version < MIN_BACKLOG:
+        found.append(Finding("backlog", Level.FAIL, f"backlog {facts.backlog.version or 'of an unknown version'} is older than {minimum}, which drops "
+                                                    "asdlc's keys from tasks: npm i -g backlog.md@1.55.2"))
+    else:
+        found.append(Finding("backlog", Level.PASS, f"backlog {'.'.join(map(str, version))}"))
+    for name, tool in (("asdlc", facts.asdlc), ("asdlc-plugin", facts.asdlc_plugin)):
+        found.append(Finding(name, Level.PASS, tool.path) if tool.path else
+                     Finding(name, Level.FAIL, f"{name} is not on PATH: link the plugin's scripts/{name} onto it (docs/guide.md, Install)"))
+    if not facts.gh.path:
+        found.append(Finding("gh", Level.WARN, "gh is not installed, so workers can't open pull requests and reviewers can't comment on them: "
+                                               "install it, then gh auth login"))
+    elif facts.gh_signed_in is False:
+        found.append(Finding("gh", Level.WARN, "gh is not signed in: gh auth login, then gh auth setup-git"))
+    else:
+        found.append(Finding("gh", Level.PASS, facts.gh.version))
+    if facts.claude.path:
+        found.append(Finding("claude", Level.PASS, f"claude plugin validate runs through {facts.claude.path}"))
+    elif facts.npx.path:
+        found.append(Finding("claude", Level.PASS, "claude plugin validate runs through npx @anthropic-ai/claude-code"))
+    else:
+        found.append(Finding("claude", Level.WARN, "neither claude nor npx is on PATH, so asdlc-plugin can't run claude plugin validate"))
+    return found
+
+
+def _identity_findings(facts: Facts) -> list[Finding]:
+    if not facts.engineer:
+        return [Finding("engineer", Level.FAIL, "asdlc doesn't know who you are: git config --global asdlc.engineer <name>")]
+    try:
+        name = engineer_name(facts.engineer)
+    except AsdlcError as error:
+        return [Finding("engineer", Level.FAIL, f"{error}: git config --global asdlc.engineer <name>")]
+    found = [Finding("engineer", Level.PASS, f"you are @{name}")]
+    if facts.board is None:
+        return found
+    where = f"devs/{name}.yaml"
+    if facts.devs is None:
+        return found + [Finding("preferences", Level.FAIL, f"{where} is not in the tasks repository: copy devs/example.yaml to it, set name: {name} "
+                                                           "and review, then commit and push it")]
+    try:
+        prefs = parse_prefs(facts.devs, name)
+    except AsdlcError as error:
+        return found + [Finding("preferences", Level.FAIL, str(error))]
+    if not re.search(r"(?m)^review\s*:", facts.devs):
+        return found + [Finding("preferences", Level.FAIL, f"{where} doesn't say whether your orchestrator reviews other engineers' work: "
+                                                           "add review: true (or false), then commit and push it")]
+    return found + [Finding("preferences", Level.PASS, f"{where}: review {'yes' if prefs.review else 'no'}, workers {prefs.workers}, "
+                                                       f"prefer {', '.join(prefs.prefer) or '-'}, avoid {', '.join(prefs.avoid) or '-'}")]
+
+
+def _board_findings(facts: Facts) -> list[Finding]:
+    if facts.board is None:
+        return [Finding("board", Level.FAIL, facts.board_error)]
+    found = [Finding("board", Level.PASS, f"the tasks repository's clone is {facts.board}")]
+    if facts.dirty:
+        changed = "; ".join(line.strip() for line in facts.dirty.splitlines())
+        found.append(Finding("board", Level.FAIL, f"it has uncommitted changes ({changed}), and asdlc refuses to work over them: commit or remove them"))
+    if facts.branch != BOARD_BRANCH:
+        found.append(Finding("board", Level.FAIL, f"it is on {facts.branch or 'a detached HEAD'}; asdlc works on {BOARD_BRANCH}: git -C {facts.board} switch {BOARD_BRANCH}"))
+    if not facts.origin:
+        found.append(Finding("board", Level.FAIL, f"it has no origin remote, so nothing reaches the team: git -C {facts.board} remote add origin <url>"))
+    elif facts.origin_error is not None:
+        found.append(Finding("board", Level.FAIL, f"origin ({facts.origin}) can't be reached without a prompt, and asdlc pushes every change there: "
+                                                  f"{_SIGN_IN}. git said: {facts.origin_error}"))
+    else:
+        found.append(Finding("board", Level.PASS, f"origin ({facts.origin}) answers without a prompt"))
+    return found
+
+
+def _settings_findings(facts: Facts) -> list[Finding]:
+    if facts.board is None:
+        return []
+    if facts.settings is None:
+        return [Finding("asdlc.toml", Level.WARN, f"the tasks repository has no asdlc.toml, so the defaults apply ({human(DEFAULT_STALE_AFTER)} stale, "
+                                                  f"{human(DEFAULT_REVIEW_FALLBACK_AFTER)} review fallback): asdlc init-board {facts.board} adds it")]
+    try:
+        settings = parse_settings(facts.settings)
+    except AsdlcError as error:
+        return [Finding("asdlc.toml", Level.FAIL, str(error))]
+    if settings.review_fallback_after >= settings.stale_after:
+        return [Finding("asdlc.toml", Level.FAIL, f"review_fallback_after ({human(settings.review_fallback_after)}) must be shorter than stale_after "
+                                                  f"({human(settings.stale_after)}), so the author's machine can review a waiting task before "
+                                                  "claims around it count as abandoned")]
+    return [Finding("asdlc.toml", Level.PASS, f"stale_after {human(settings.stale_after)}, review_fallback_after {human(settings.review_fallback_after)}")]
+
+
+def _repo_findings(facts: Facts, registry: str) -> list[Finding]:
+    if facts.registry_error:
+        return [Finding("repositories", Level.FAIL, facts.registry_error)]
+    if not facts.repos:
+        return [Finding("repositories", Level.WARN, "no code repository is registered on this machine, so asdlc next has nothing to offer: "
+                                                    "run asdlc register in a clone of each repository you work in")]
+    found = []
+    for repo in facts.repos:
+        area = f"repository {repo.slug}"
+        again = f"run asdlc register in {repo.path}"
+        if not repo.exists:
+            found.append(Finding(area, Level.FAIL, f"{repo.path} is gone: clone it again and run asdlc register there, or delete its entry in {registry}"))
+        elif repo.remote_slug is None:
+            found.append(Finding(area, Level.FAIL, f"{repo.path} has no origin remote naming an owner and repository: git remote add origin <url>, then {again}"))
+        elif repo.remote_slug != repo.slug:
+            found.append(Finding(area, Level.FAIL, f"{repo.path}'s origin is {repo.remote_slug} now, not {repo.slug}: {again}"))
+        elif not repo.board:
+            found.append(Finding(area, Level.FAIL, f"asdlc.board is not set in {repo.path}, so the guard and the rule loader skip it: {again}"))
+        elif Path(repo.board).expanduser().resolve() != repo.registered_board.resolve():
+            found.append(Finding(area, Level.WARN, f"{repo.path} points at {repo.board}, but is registered for {repo.registered_board}: {again} --board <the right clone>"))
+        else:
+            found.append(Finding(area, Level.PASS, f"{repo.path}"))
+    return found
+
+
+def _plugin_findings(facts: Facts) -> list[Finding]:
+    plugins = facts.plugins
+    if facts.board is not None and facts.marketplace is None:
+        return [Finding("marketplace", Level.FAIL, f"the tasks repository has no .claude-plugin/marketplace.json: asdlc init-board {facts.board} adds it")]
+    if plugins.error:
+        return [Finding("plugins", Level.WARN, f"can't check the installed plugins ({plugins.error}); check them in Claude Code with /plugin: "
+                                               "the tasks repository's marketplace with its team plugin, asdlc, and authoring-kit")]
+    found = []
+    installed = {str(p.get("id", "")): p for p in plugins.installed}
+
+    def enabled(name: str, market: str | None = None) -> frozendict[str, object] | None:
+        return next((p for key, p in installed.items() if (key == f"{name}@{market}" if market else key.startswith(f"{name}@")) and p.get("enabled", True)), None)
+
+    if facts.marketplace is not None:
+        name = facts.marketplace
+        entry = next((m for m in plugins.marketplaces if m.get("name") == name), None)
+        if entry is None:
+            found.append(Finding("marketplace", Level.FAIL, f"the tasks repository's marketplace, {name}, is not added: claude plugin marketplace add "
+                                                            f"{facts.origin or '<its url or owner/repo>'}, then claude plugin install team@{name}"))
+        else:
+            found.append(Finding("marketplace", Level.PASS, f"{name} is added"))
+            if entry.get("autoUpdate") is True:
+                found.append(Finding("auto-update", Level.PASS, f"auto-update is on for {name}"))
+            else:
+                found.append(Finding("auto-update", Level.WARN, f"auto-update is off for {name}, the default for a marketplace you add yourself, so new "
+                                                                f"repository plugins reach you only by hand: in Claude Code, /plugin, Marketplaces, {name}, "
+                                                                "Enable auto-update. It runs in the background without prompting, so a private repository "
+                                                                "needs git credentials that never ask, for example gh auth login and then gh auth setup-git"))
+            found.append(Finding("team plugin", Level.PASS, f"team@{name} is installed") if enabled("team", name) else
+                         Finding("team plugin", Level.FAIL, f"the team plugin is not installed and enabled: claude plugin install team@{name}"))
+    found.append(Finding("asdlc plugin", Level.PASS, "asdlc is installed") if enabled("asdlc") else
+                 Finding("asdlc plugin", Level.WARN, "the asdlc plugin is not installed, so no guard or rule loader runs (unless you load it with "
+                                                     "--plugin-dir): claude plugin marketplace add bruk-io/asdlc, then claude plugin install asdlc@asdlc"))
+    if (kit := enabled("authoring-kit")) is None:
+        found.append(Finding("authoring kit", Level.WARN, "authoring-kit is not installed: onboarding works without it but writes rules and skills "
+                                                          "unaudited, and says so on the task"))
+    elif missing := [path for path in AUTHORING_KIT if path not in plugins.kit_files]:
+        found.append(Finding("authoring kit", Level.WARN, f"authoring-kit ({kit.get('version', '?')}) lacks {', '.join(missing)}: update it"))
+    else:
+        found.append(Finding("authoring kit", Level.PASS, f"authoring-kit {kit.get('version', '')} with choosing-extension-types, authoring-skills, "
+                                                          "authoring-hooks and authoring-auditor"))
+    return found
+
+
+def _leftover_findings(facts: Facts) -> list[Finding]:
+    found = []
+    for path in facts.leftovers:
+        repo = path.parent.parent / path.parent.name.removesuffix(".worktrees")
+        if path.name.startswith("plugin-"):
+            why = f"an onboarding of {path.name.removeprefix('plugin-')} that was never published. If nobody is onboarding it now"
+        elif path.name == "asdlc-verify":
+            why = "the clean checkout asdlc-plugin verify-command keeps between commands. Once no onboarding of this repository is open"
+        else:
+            why = "a reviewer's worktree left behind. If no review of that task is running"
+        found.append(Finding("leftover", Level.WARN, f"{path}: {why}, remove it: git -C {repo} worktree remove --force {path}"))
+    return found
+
+
+def _published_findings(facts: Facts) -> list[Finding]:
+    if facts.board is None:
+        return []
+    if not facts.published:
+        return [Finding("repository plugins", Level.PASS, "none published yet")]
+    return [Finding(f"plugin {p.slug}", Level.PASS, "asdlc-plugin check is clean") if p.code == 0 else
+            Finding(f"plugin {p.slug}", Level.FAIL, f"asdlc-plugin check found problems; fix them with the onboard-repo skill "
+                                                    f"(asdlc-plugin scaffold <repo> opens the plugin again):\n{p.output.strip()}")
+            for p in facts.published]
+
+
+def diagnose(facts: Facts, registry: str = "the registry") -> tuple[Finding, ...]:
+    """Every finding about this machine, in the order a person fixes them."""
+    return (*_tool_findings(facts), *_identity_findings(facts), *_board_findings(facts), *_settings_findings(facts),
+            *_repo_findings(facts, registry), *_plugin_findings(facts), *_leftover_findings(facts), *_published_findings(facts))
+
+
+def doctor_lines(findings: Sequence[Finding]) -> list[str]:
+    counts = Counter(f.level for f in findings)
+    lines = [f"{str(f.level).upper() if f.level is Level.FAIL else f.level}  {f.area}: {f.message}" for f in findings]
+    return lines + [f"{counts[Level.PASS]} passed, {counts[Level.WARN]} warning(s), {counts[Level.FAIL]} failed"]
+
+
+def _tool(name: str, *version: str, binary: str | None = None) -> Tool:
+    path = shutil.which(binary or name)
+    if path is None:
+        return Tool(None)
+    try:
+        done = subprocess.run([path, *version], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return Tool(path)
+    return Tool(path, next((line.strip() for line in (done.stdout + done.stderr).splitlines() if line.strip()), ""))
+
+
+def _claude_json(claude: str, *args: str) -> object:
+    """Raises: AsdlcError: claude failed or printed something other than JSON."""
+    try:
+        done = subprocess.run([claude, *args], capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise AsdlcError(f"claude {' '.join(args)} did not finish: {error}") from None
+    try:
+        return json.loads(done.stdout)
+    except ValueError:
+        raise AsdlcError(f"claude {' '.join(args)} exited {done.returncode}: {(done.stderr or done.stdout).strip()[:200]}") from None
+
+
+def _plugin_facts(claude: str | None) -> PluginFacts:
+    if claude is None:
+        return PluginFacts(error="claude is not on PATH")
+    try:
+        markets, installed = _claude_json(claude, "plugin", "marketplace", "list", "--json"), _claude_json(claude, "plugin", "list", "--json")
+    except AsdlcError as error:
+        return PluginFacts(error=str(error))
+    as_rows = lambda found: tuple(frozendict(row) for row in found if isinstance(row, dict)) if isinstance(found, list) else ()  # noqa: E731
+    rows = as_rows(installed)
+    kit = next((row for row in rows if str(row.get("id", "")).startswith("authoring-kit@")), None)
+    folder = Path(str(kit.get("installPath", ""))) if kit else None
+    files = frozenset(p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file()) if folder and folder.is_dir() else frozenset()
+    return PluginFacts(marketplaces=as_rows(markets), installed=rows, kit_files=files)
+
+
+def _reachable(board: Path) -> str | None:
+    """None when origin answers without a prompt, else what git said."""
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "SSH_ASKPASS": ""}
+    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+    try:
+        done = subprocess.run(["git", "-C", str(board), "ls-remote", "--heads", "origin", BOARD_BRANCH], capture_output=True, text=True,
+                              timeout=60, env=env, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return "no answer within 60s"
+    return None if done.returncode == 0 else (done.stderr.strip().splitlines() or [f"exit {done.returncode}"])[-1]
+
+
+def _repo_facts(entry: Registered) -> RepoFacts:
+    exists = (entry.path / ".git").exists()
+    board = _git(entry.path, "config", "--local", "--get", "asdlc.board").stdout.strip() if exists else ""
+    return RepoFacts(entry.slug, entry.path, entry.board, exists, slug_of(entry.path) if exists else None, board)
+
+
+def _leftovers(board: Path | None, repos: Iterable[RepoFacts]) -> tuple[Path, ...]:
+    found = sorted((board.parent / f"{board.name}.worktrees").glob("plugin-*")) if board else []
+    for repo in repos:
+        beside = repo.path.parent / f"{repo.path.name}.worktrees"
+        found += [p for p in [beside / "asdlc-verify"] if p.is_dir()] + sorted(p for p in beside.glob("review-*") if p.is_dir())
+    return tuple(found)
+
+
+def _published(board: Path, repos: Sequence[RepoFacts]) -> tuple[PublishedCheck, ...]:
+    """`asdlc-plugin check` on every repository plugin in the clone, against the repository's files when it is cloned here."""
+    script = Path(__file__).resolve().parent / "asdlc-plugin"
+    where = {repo.slug: repo.path for repo in repos if repo.exists}
+    checks = []
+    for folder in sorted((board / "plugins").iterdir()) if (board / "plugins").is_dir() else ():
+        if folder.name == "team" or not (folder / ".claude-plugin" / "plugin.json").is_file():
+            continue
+        command = [sys.executable, str(script), "--board", str(board), "check", folder.name]
+        command += ["--repo", str(where[folder.name])] if folder.name in where else []
+        done = subprocess.run(command, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        checks.append(PublishedCheck(folder.name, done.returncode, (done.stdout + done.stderr).strip()))
+    return tuple(checks)
+
+
+def gather(explicit_board: str | None, cwd: Path) -> Facts:
+    """Look at this machine without changing anything."""
+    engineer = _git(cwd, "config", "--get", "asdlc.engineer").stdout.strip()
+    claude = (os.environ.get("ASDLC_CLAUDE") or "").strip() or shutil.which("claude")
+    facts = Facts(
+        git=_tool("git", "--version"), uv=_tool("uv", "--version"), python=sys.version_info[:2],
+        backlog=_tool("backlog", "--version", binary=_backlog_binary()), asdlc=_tool("asdlc"), asdlc_plugin=_tool("asdlc-plugin"),
+        gh=_tool("gh", "--version"), gh_signed_in=None, claude=Tool(claude), npx=_tool("npx"), engineer=engineer, board=None,
+    )
+    if facts.gh.path:
+        try:
+            signed = subprocess.run([facts.gh.path, "auth", "status"], capture_output=True, timeout=30, stdin=subprocess.DEVNULL).returncode == 0
+        except subprocess.TimeoutExpired:
+            signed = None
+        facts = replace(facts, gh_signed_in=signed)
+    try:
+        registry = _registry()
+        facts = replace(facts, repos=tuple(_repo_facts(entry) for entry in sorted(registry.values(), key=lambda e: e.slug)))
+    except AsdlcError as error:
+        facts = replace(facts, registry_error=str(error))
+    try:
+        board = resolve_board(explicit_board, cwd)
+    except AsdlcError as error:
+        return replace(facts, board_error=str(error), plugins=_plugin_facts(claude), leftovers=_leftovers(None, facts.repos))
+    read = lambda path: path.read_text() if path.is_file() else None  # noqa: E731
+    origin = _git(board, "remote", "get-url", "origin")
+    market = read(board / ".claude-plugin" / "marketplace.json")
+    try:
+        name = json.loads(market).get("name") if market else None
+    except (ValueError, AttributeError):
+        name = None
+    return replace(
+        facts, board=board, devs=read(board / "devs" / f"{engineer.removeprefix('@')}.yaml") if engineer else None,
+        dirty=_git(board, "status", "--porcelain", "--untracked-files=no").stdout.strip(),
+        branch=_git(board, "branch", "--show-current").stdout.strip(),
+        origin=origin.stdout.strip() if origin.returncode == 0 else "",
+        origin_error=_reachable(board) if origin.returncode == 0 else None,
+        settings=read(board / "asdlc.toml"), marketplace=name if isinstance(name, str) else None,
+        plugins=_plugin_facts(claude), leftovers=_leftovers(board, facts.repos), published=_published(board, facts.repos),
+    )
+
+
+def doctor(explicit_board: str | None, cwd: Path, as_json: bool) -> int:
+    findings = diagnose(gather(explicit_board, cwd), str(_registry_file()))
+    failed = sum(f.level is Level.FAIL for f in findings)
+    _emit({"findings": [{"area": f.area, "level": str(f.level), "message": f.message} for f in findings],
+           "passed": sum(f.level is Level.PASS for f in findings), "warnings": sum(f.level is Level.WARN for f in findings), "failed": failed},
+          as_json, doctor_lines(findings))
+    return 1 if failed else 0
+
+
+# --- stats: how the pilot is going, from the board's history -------------------------------
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """A task as one board commit left it."""
+
+    when: datetime
+    task: Task
+
+
+@dataclass(frozen=True)
+class History:
+    """What happened to one task, read from its snapshots in order."""
+
+    project: str
+    claims: tuple[datetime, ...]  # To Do to In Progress with a worker
+    entered_review: tuple[datetime, ...]
+    review_claims: tuple[tuple[datetime, str], ...]  # when, and the kind of review
+    changes: tuple[datetime, ...]  # changes-requested added
+    done: datetime | None
+
+
+def history(snapshots: Sequence[Snapshot]) -> History:
+    """Every transition that matters, from one task's snapshots in time order."""
+    claims, entered, reviews, changes = [], [], [], []
+    done = None
+    previous: Task | None = None
+    for snapshot in snapshots:
+        task, when = snapshot.task, snapshot.when
+        if is_status(task, IN_PROGRESS) and workers(task.assignees) and (previous is None or is_status(previous, TO_DO)):
+            claims.append(when)
+        if is_status(task, IN_REVIEW) and (previous is None or not is_status(previous, IN_REVIEW)):
+            entered.append(when)
+        if task.reviewer and (previous is None or previous.reviewer != task.reviewer):
+            reviews.append((when, task.review_kind or str(ReviewKind.CROSS_MACHINE)))
+        if CHANGES_REQUESTED in task.labels and (previous is None or CHANGES_REQUESTED not in previous.labels):
+            changes.append(when)
+        if is_status(task, DONE) and (previous is None or not is_status(previous, DONE)):
+            done = when
+        elif not is_status(task, DONE):
+            done = None
+        previous = task
+    return History(snapshots[-1].task.project if snapshots else "", tuple(claims), tuple(entered), tuple(reviews), tuple(changes), done)
+
+
+def histories(snapshots: Iterable[Snapshot]) -> dict[str, History]:
+    by_id: dict[str, list[Snapshot]] = {}
+    for snapshot in sorted(snapshots, key=lambda s: s.when):
+        by_id.setdefault(snapshot.task.id, []).append(snapshot)
+    return {task_id: history(found) for task_id, found in by_id.items()}
+
+
+def percentile(values: Sequence[float], q: float) -> float | None:
+    """The nearest-rank percentile: the smallest value with at least q of them at or below it."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[max(math.ceil(q * len(ordered)) - 1, 0)]
+
+
+def _spread(spans: Sequence[timedelta]) -> dict[str, object]:
+    seconds = [span.total_seconds() for span in spans]
+    return {"count": len(seconds), "median": percentile(seconds, 0.5), "p90": percentile(seconds, 0.9)}
+
+
+def published_plugins(log: Iterable[tuple[datetime, str]]) -> tuple[tuple[datetime, str], ...]:
+    """The tasks repository's first publish of each repository plugin: asdlc-plugin's "Add the <slug> plugin" commits."""
+    found = [(when, m[1]) for when, subject in log if (m := re.fullmatch(r"Add the (\S+) plugin", subject.strip()))]
+    return tuple(sorted(found))
+
+
+def board_stats(by_task: Mapping[str, History], current: Sequence[Task], texts: Mapping[str, str],
+                published: Sequence[tuple[datetime, str]], events: Sequence[Mapping[str, object]], since: datetime | None) -> dict[str, object]:
+    """The pilot's numbers: everything from `since` on (everything, when None)."""
+    def after(when: datetime | None) -> bool:
+        return when is not None and (since is None or when >= since)
+
+    claimed = sorted(task_id for task_id, h in by_task.items() if any(after(c) for c in h.claims))
+    to_review, to_done, waits, waiting = [], [], [], []
+    for task_id, h in by_task.items():
+        if first := next((c for c in h.claims if after(c)), None):
+            if reviewed := next((r for r in h.entered_review if r >= first), None):
+                to_review.append(reviewed - first)
+        if after(h.done) and (entered := next((r for r in h.entered_review if r <= h.done), None)):
+            to_done.append(h.done - entered)
+        for index, entered in enumerate(h.entered_review):
+            if not after(entered):
+                continue
+            until = h.entered_review[index + 1] if index + 1 < len(h.entered_review) else None
+            claim = next((when for when, _ in h.review_claims if when >= entered and (until is None or when < until)), None)
+            if claim is not None:
+                waits.append(claim - entered)
+            elif until is None:
+                waiting.append(task_id)
+    now = {task.id: task for task in current}
+    waiting = [task_id for task_id in waiting if task_id in now and is_status(now[task_id], IN_REVIEW) and not now[task_id].reviewer
+               and REVIEW_PASSED not in now[task_id].labels]
+    reviews = [(task_id, kind) for task_id, h in by_task.items() for when, kind in h.review_claims if after(when)]
+    reviewed = sorted({task_id for task_id, _ in reviews})
+    rounds = {task_id: sum(after(when) for when in by_task[task_id].changes) for task_id in reviewed}
+    same = sum(kind == ReviewKind.SAME_MACHINE for _, kind in reviews)
+    attempts: dict[str, Counter[str]] = {}
+    for event in events:
+        try:
+            when = datetime.fromisoformat(str(event["time"]))
+        except (KeyError, ValueError):
+            continue
+        if after(when if when.tzinfo else when.replace(tzinfo=UTC)):
+            attempts.setdefault(str(event.get("command", "")), Counter())[str(event.get("outcome", ""))] += 1
+    claims_made = sum(attempts.get(c, Counter())[Attempt.CLAIMED] for c in ("claim", "next"))
+    lost = sum(attempts.get(c, Counter())[Attempt.LOST] for c in ("claim", "next"))
+    onboardings = []
+    for when, plugin in published:
+        if not after(when):
+            continue
+        starts = [(c, task_id) for task_id, h in by_task.items() if h.project == plugin for c in h.claims if c <= when]
+        start, task_id = max(starts) if starts else (None, None)
+        onboardings.append({"plugin": plugin, "published": when.isoformat(timespec="seconds"), "task": task_id,
+                            "seconds": (when - start).total_seconds() if start else None})
+    small = [{"id": task_id, "recorded": "size-1: plan approval skipped" in texts.get(task_id, "")}
+             for task_id in claimed if task_id in now and "size-1" in now[task_id].labels]
+    return {
+        "since": since.isoformat(timespec="seconds") if since else None,
+        "tasks": {"claimed": len(claimed), "in_review": sum(is_status(t, IN_REVIEW) for t in current),
+                  "done": sum(after(h.done) for h in by_task.values())},
+        "claim_to_review": _spread(to_review),
+        "review_to_done": _spread(to_done),
+        "review_wait": _spread(waits) | {"waiting_now": sorted(waiting)},
+        "changes_requested": {"reviewed_tasks": len(reviewed), "round_trips": sum(rounds.values()),
+                              "per_task": (sum(rounds.values()) / len(reviewed)) if reviewed else None, "by_task": rounds},
+        "reviews": {"total": len(reviews), "same_machine": same, "share_same_machine": (same / len(reviews)) if reviews else None},
+        "races": {"claimed": claims_made, "lost": lost, "lost_per_claim": (lost / claims_made) if claims_made else None,
+                  "by_command": {command: dict(sorted(counts.items())) for command, counts in sorted(attempts.items())}},
+        "onboardings": onboardings,
+        "plan_approval_skipped": small,
+    }
+
+
+def _duration(seconds: object) -> str:
+    if not isinstance(seconds, (int, float)):
+        return "-"
+    return f"{int(seconds)}s" if seconds < 60 else human(timedelta(seconds=float(seconds)))
+
+
+def stats_lines(report: Mapping[str, object], log: str) -> list[str]:
+    def spread(key: str, what: str) -> str:
+        found = report[key]
+        return f"{what}: median {_duration(found['median'])}, p90 {_duration(found['p90'])} ({found['count']})"
+
+    tasks, changes, reviews, races = report["tasks"], report["changes_requested"], report["reviews"], report["races"]
+    share = f" ({reviews['share_same_machine']:.0%})" if reviews["share_same_machine"] is not None else ""
+    per = f"{races['lost_per_claim']:.2f}" if races["lost_per_claim"] is not None else "-"
+    worst = max(changes["by_task"].items(), key=lambda item: item[1], default=None)
+    lines = [
+        f"since {report['since'] or 'the board began'}",
+        f"tasks: {tasks['claimed']} claimed, {tasks['in_review']} in review now, {tasks['done']} done",
+        spread("claim_to_review", "claim to In Review"),
+        spread("review_to_done", "In Review to Done"),
+        spread("review_wait", "review wait") + (f"; waiting now: {', '.join(report['review_wait']['waiting_now'])}" if report["review_wait"]["waiting_now"] else ""),
+        f"changes requested: {changes['round_trips']} round trip(s) over {changes['reviewed_tasks']} reviewed task(s)"
+        + (f", {changes['per_task']:.1f} per task, most {worst[1]} ({worst[0]})" if worst else ""),
+        f"reviews: {reviews['total']}, {reviews['same_machine']} same-machine{share}",
+        f"lost races per claim: {per} ({races['lost']} lost, {races['claimed']} claimed; this machine's log, {log})",
+    ]
+    lines += [f"onboarded {o['plugin']} at {o['published']}" + (f", {_duration(o['seconds'])} after {o['task']} was claimed" if o["task"] else "")
+              for o in report["onboardings"]] or ["onboardings: none"]
+    skipped = report["plan_approval_skipped"]
+    lines.append("plan approval skipped (size-1): " + (", ".join(f"{s['id']}{'' if s['recorded'] else ' (no note says why)'}" for s in skipped) or "none"))
+    return lines
+
+
+def batch_objects(output: bytes) -> list[str | None]:
+    """`git cat-file --batch` output as each object's text, None where git said it is missing."""
+    found: list[str | None] = []
+    position = 0
+    while position < len(output):
+        end = output.index(b"\n", position)
+        header = output[position:end].split()
+        if header[-1:] == [b"missing"] or len(header) < 3:
+            found.append(None)
+            position = end + 1
+            continue
+        start, size = end + 1, int(header[2])
+        found.append(output[start:start + size].decode())
+        position = start + size + 1
+    return found
+
+
+def _snapshots(board: Board, ref: str) -> list[Snapshot]:
+    log = _board_git(board, "-c", "core.quotePath=false", "log", "--reverse", "--no-renames", "--diff-filter=AM", "--format=%x00%H %ct",
+                     "--name-only", ref, "--", "backlog/tasks").stdout
+    pairs: list[tuple[str, datetime, str]] = []
+    commit, when = "", None
+    for line in log.splitlines():
+        if line.startswith("\x00"):
+            commit, stamp = line[1:].split()
+            when = datetime.fromtimestamp(int(stamp), UTC)
+        elif line.strip().endswith(".md") and when is not None:
+            pairs.append((commit, when, line.strip()))
+    if not pairs:
+        return []
+    batch = subprocess.run(["git", "cat-file", "--batch"], cwd=board.path, env=dict(board.env), capture_output=True,
+                           input="".join(f"{c}:{p}\n" for c, _, p in pairs).encode())
+    return [Snapshot(when, task) for (_, when, path), text in zip(pairs, batch_objects(batch.stdout))
+            if text is not None and (task := task_from(path, text))]
+
+
+def stats(board: Board, since: datetime | None, as_json: bool) -> int:
+    """Read the board's history (fetched, never changed) and this machine's event log."""
+    try:
+        _fetch(board)
+    except AsdlcError as error:
+        _say(f"could not fetch the board, so this is as of the last fetch: {error}")
+    ref = f"origin/{BOARD_BRANCH}" if _board_git(board, "rev-parse", "--verify", "--quiet", f"origin/{BOARD_BRANCH}", check=False).returncode == 0 else "HEAD"
+    current = _tasks(board, ref)
+    bodies = subprocess.run(["git", "cat-file", "--batch"], cwd=board.path, env=dict(board.env), capture_output=True,
+                            input="".join(f"{ref}:{task.path}\n" for task in current).encode()).stdout if current else b""
+    texts = {task.id: text or "" for task, text in zip(current, batch_objects(bodies))}
+    subjects = _board_git(board, "log", "--format=%ct%x00%s", ref).stdout.splitlines()
+    published = published_plugins((datetime.fromtimestamp(int(stamp), UTC), subject) for line in subjects for stamp, _, subject in [line.partition("\x00")] if stamp.isdigit())
+    log = _events_file()
+    events = parse_events(log.read_text()) if log.is_file() else ()
+    report = board_stats(histories(_snapshots(board, ref)), current, texts, published, events, since)
+    _emit(report | {"board": str(board.path), "events": str(log)}, as_json, stats_lines(report, str(log)))
+    return 0
+
+
+def _since(raw: str | None) -> datetime | None:
+    """Raises: AsdlcError: not an ISO 8601 date or time."""
+    return None if raw is None else _when(raw)
+
+
 
 SCAFFOLDING = Path(__file__).resolve().parent.parent / "templates" / "board"
 MARKETPLACE_PLACEHOLDER = "{{marketplace}}"
@@ -2238,6 +2968,9 @@ def _parser() -> argparse.ArgumentParser:
     reviewing.add_argument("--fallback", action="store_true",
                            help="also take this engineer's own work once it has waited longer than review_fallback_after (a same-machine review)")
     reviewing.add_argument("--now", help="the time to judge the wait at, as ISO 8601 (for tests and demonstrations)")
+    add("doctor", "check that this machine is ready: tools, identity, the board, settings, repositories, plugins and leftovers", json_output=True)
+    measuring = add("stats", "how the pilot is going: claims, review times, round trips, races, onboardings", json_output=True)
+    measuring.add_argument("--since", help="count from this date or time, as ISO 8601 (else from the board's start)")
     finishing = add("review-done", "record a review's findings and verdict on the task", task="the task", who=reviewer, json_output=True)
     finishing.add_argument("--verdict", required=True, choices=[str(v) for v in ReviewVerdict], help="clean, or changes to send it back to its author")
     finishing.add_argument("--notes", required=True, help="the findings, as they go on the task")
@@ -2306,6 +3039,8 @@ def main(argv: Sequence[str]) -> int:
             case "register":
                 _check_backlog()
                 return register(arguments.register_board or arguments.board, cwd, as_json)
+            case "doctor":
+                return doctor(arguments.board, cwd, as_json)
         board = open_board(resolve_board(arguments.board, cwd))
         match arguments.command:
             case "route":
@@ -2329,13 +3064,15 @@ def main(argv: Sequence[str]) -> int:
                     case "release":
                         release(board, arguments.id, worker, cwd)
                     case "lead":
-                        led = lead(board, arguments.id, worker)
+                        led = _attempt("lead", worker, normalise_id(arguments.id, _prefix(board)), lambda: lead(board, arguments.id, worker))
                         _emit({"intent": led.intent, "lead": led.lead, "mine": led.mine, "reason": led.reason}, as_json, [led.reason])
                         return 0 if led.mine else 1
                     case "heartbeat":
                         print(heartbeat(board, arguments.id, worker, _when(None)))
             case "lead-of":
                 return lead_of_command(board, arguments.id, as_json)
+            case "stats":
+                return stats(board, _since(arguments.since), as_json)
             case "reap":
                 _check_backlog()
                 return reap(board, _when(arguments.now), parse_duration(arguments.older_than) if arguments.older_than else None, as_json)
