@@ -1,0 +1,14 @@
+{
+  "name": "{{marketplace}}",
+  "description": "The team's tasks repository: its Backlog.md board, and the plugins that carry the team's conventions to every agent.",
+  "owner": {
+    "name": "The team"
+  },
+  "plugins": [
+    {
+      "name": "team",
+      "source": "./plugins/team",
+      "description": "The team's own skills and rules: how we test and verify work, and the contract a lead writes for a large feature."
+    }
+  ]
+}

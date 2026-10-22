@@ -38,6 +38,7 @@ class Machine:
             "[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n"
         )
         self.env = {"GIT_CONFIG_GLOBAL": str(gitconfig), "GIT_CONFIG_NOSYSTEM": "1", "XDG_CONFIG_HOME": str(self.home / "config"),
+                    "XDG_STATE_HOME": str(self.home / "state"),
                     "ASDLC_BACKLOG": BACKLOG or "backlog"}
         self.board = self.home / "board"
         self.git(root, "clone", "--quiet", str(board_origin), str(self.board))

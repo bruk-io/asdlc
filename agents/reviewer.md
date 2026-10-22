@@ -26,19 +26,22 @@ You never change the work. You don't edit files, commit, push, rebase or check o
 
 ## 3. The diff
 
-Look at it in a detached checkout of your own, made fresh for this review and removed after it:
+Look at it in a detached worktree of the registered code repository (`<repo>`), made fresh for this review beside the task worktrees and removed after it. Not a fresh clone and not a folder elsewhere: a worktree of `<repo>` shares its git config, so `asdlc.board` resolves there and the repository's rules reach you when you read its files.
+
+`<review>` below is that worktree's absolute path, `<repo>.worktrees/review-<task id in lowercase>-<reviewer>`, such as `/home/kyle/api.worktrees/review-task-7-kyle.r1`. Shell variables don't persist between your commands, so write the path out each time.
 
 ```sh
 git -C <repo> fetch origin <branch> <default branch>
-review=$(mktemp -d)/<task>
-git -C <repo> worktree add --detach "$review" origin/<branch>
-git -C "$review" diff --stat origin/<default branch>...HEAD
-git -C "$review" diff origin/<default branch>...HEAD
+git -C <repo> worktree add --detach <review> origin/<branch>
+git -C <review> diff --stat origin/<default branch>...HEAD
+git -C <review> diff origin/<default branch>...HEAD
 ```
+
+If `<review>` already exists from an earlier review, remove it first: `git -C <repo> worktree remove --force <review>`.
 
 If the branch can't be fetched, record `changes` with that as the finding.
 
-Read every changed file in full in the detached checkout with the Read tool, not only the hunks: reading them is also how the repository's rules for those files reach you (the plugin's `load_rules` hook delivers the rules that apply to a file when it is read). Every rule that arrives applies to the change. Check the recorded checks too: were they run on this branch, after the last change, and did they pass?
+Read every changed file in full in `<review>` with the Read tool, not only the hunks: reading them is also how the repository's rules for those files reach you (the plugin's `load_rules` hook delivers the rules that apply to a file when it is read). Every rule that arrives applies to the change. Check the recorded checks too: were they run on this branch, after the last change, and did they pass?
 
 ## 4. The findings and the verdict
 
@@ -68,10 +71,10 @@ EOF
 )"
 ```
 
-`gh pr review <url> --comment --body ...` is fine too. Never `--approve` and never `--request-changes`. If `gh` is missing, not signed in, or the remote isn't GitHub, skip this step and say so in your final message; the findings are on the task either way.
+`gh pr review <url> --comment --body ...` is fine too. Never `--approve` and never `--request-changes`; the board guard refuses them, and merging. If `gh` is missing, not signed in, or the remote isn't GitHub, skip this step and say so in your final message; the findings are on the task either way.
 
 ## 6. Finish
 
-Remove your checkout: `git -C <repo> worktree remove --force "$review"`. If the review takes longer than half an hour, keep the claim alive in between: `asdlc heartbeat <task> --as <reviewer>`.
+Remove your worktree: `git -C <repo> worktree remove --force <review>`. If the review takes longer than half an hour, keep the claim alive in between: `asdlc heartbeat <task> --as <reviewer>`.
 
 Your final message is the verdict, the findings, and whether they reached the pull request.

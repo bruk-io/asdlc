@@ -205,7 +205,7 @@ class SmallPiecesTest(unittest.TestCase):
         self.assertEqual(fields["project_name"], "team-board")
         self.assertEqual(fields["statuses"], ("To Do", "In Progress", "In Review", "Done"))
         self.assertEqual(fields["types"], ("intent", "task", "bug", "spike"))
-        self.assertEqual(fields["labels"], ("size-1", "size-2", "size-3", "size-4", "size-5", "size-8"))
+        self.assertEqual(fields["labels"], ("size-1", "size-2", "size-3", "size-4", "size-5", "size-8", "changes-requested", "review-passed"))
         self.assertEqual(
             [fields[k] for k in ("default_status", "auto_commit", "bypass_git_hooks", "remote_operations", "check_active_branches")],
             ["To Do", "true", "true", "true", "false"],
@@ -558,6 +558,12 @@ class ReviewLogicTest(unittest.TestCase):
         self.assertEqual([r["id"] for r in report["changes_requested"]], ["TASK-3"])
         self.assertEqual(sorted(r["id"] for r in report["tasks"]), ["TASK-2", "TASK-3"])
 
+    def test_board_setting_is_explicit_then_environment_then_configuration(self) -> None:
+        self.assertEqual(asdlc.board_setting("/a", {"ASDLC_BOARD": "/b"}, "/c\n"), ("/a", "--board"))
+        self.assertEqual(asdlc.board_setting(None, {"ASDLC_BOARD": "/b"}, "/c\n"), ("/b", "ASDLC_BOARD"))
+        self.assertEqual(asdlc.board_setting("", {"ASDLC_BOARD": " "}, "/c\n"), ("/c", "git config asdlc.board"))
+        self.assertIsNone(asdlc.board_setting(None, {}, ""))
+
     def test_review_route(self) -> None:
         self.assertEqual((asdlc.REVIEW.model, asdlc.REVIEW.effort), ("sonnet", "medium"))
 
@@ -590,6 +596,247 @@ class DraftParentTest(unittest.TestCase):
         self.assertIsNone(asdlc.draft_parent(["task", "edit", "TASK-1", "-p", "DRAFT-2"]))
 
 
+class EventLogTest(unittest.TestCase):
+    def test_one_attempt_is_one_json_line(self) -> None:
+        line = asdlc.event_line(datetime(2026, 10, 22, 15, 0, tzinfo=UTC), "next", "kyle.w1", "TASK-3", asdlc.Attempt.LOST, "Another agent claimed TASK-3 first.")
+        self.assertEqual(json.loads(line), {"time": "2026-10-22T15:00:00+00:00", "command": "next", "engineer": "kyle", "worker": "kyle.w1",
+                                            "task": "TASK-3", "outcome": "lost", "reason": "Another agent claimed TASK-3 first."})
+
+    def test_unreadable_lines_are_skipped(self) -> None:
+        text = '{"time": "2026-10-22T15:00:00+00:00", "outcome": "claimed"}\nnot json\n[1]\n{"outcome": "lost"}\n'
+        self.assertEqual([e["outcome"] for e in asdlc.parse_events(text)], ["claimed"])
+
+
+def facts(**changes: object) -> object:
+    """A machine where every check passes; each test breaks one thing."""
+    board = Path("/home/kyle/tasks")
+    healthy = asdlc.Facts(
+        git=asdlc.Tool("/usr/bin/git", "git version 2.43.0"), uv=asdlc.Tool("/usr/bin/uv", "uv 0.9.0"), python=(3, 15),
+        backlog=asdlc.Tool("/usr/bin/backlog", "1.55.2"), asdlc=asdlc.Tool("/usr/bin/asdlc"), asdlc_plugin=asdlc.Tool("/usr/bin/asdlc-plugin"),
+        gh=asdlc.Tool("/usr/bin/gh", "gh version 2.80.0"), gh_signed_in=True, claude=asdlc.Tool("/usr/bin/claude"), npx=asdlc.Tool(None),
+        engineer="kyle", board=board, devs="name: kyle\nreview: true\n", branch="main", origin="git@github.com:acme/tasks.git",
+        settings='stale_after = "2h"\nreview_fallback_after = "30m"\n',
+        repos=(asdlc.RepoFacts("acme-api", Path("/home/kyle/api"), board, True, "acme-api", str(board)),),
+        marketplace="tasks",
+        plugins=asdlc.PluginFacts(
+            marketplaces=(frozendict({"name": "tasks", "autoUpdate": True}),),
+            installed=(frozendict({"id": "team@tasks", "enabled": True}), frozendict({"id": "asdlc@asdlc", "enabled": True}),
+                       frozendict({"id": "authoring-kit@synced", "enabled": True, "version": "0.7.0"})),
+            kit_files=frozenset(asdlc.AUTHORING_KIT)),
+        published=(asdlc.PublishedCheck("acme-api", 0, "acme-api: clean"),),
+    )
+    return asdlc.replace(healthy, **changes)
+
+
+class DoctorTest(unittest.TestCase):
+    def levels(self, found: object) -> dict[str, list[str]]:
+        by_level: dict[str, list[str]] = {}
+        for finding in asdlc.diagnose(found):
+            by_level.setdefault(str(finding.level), []).append(finding.area)
+        return by_level
+
+    def only(self, level: str, found: object) -> list[object]:
+        return [f for f in asdlc.diagnose(found) if str(f.level) == level]
+
+    def test_a_healthy_machine_passes_everything(self) -> None:
+        self.assertEqual(set(self.levels(facts())), {"pass"})
+        lines = asdlc.doctor_lines(asdlc.diagnose(facts()))
+        self.assertEqual(lines[0], "pass  git: git version 2.43.0")
+        self.assertRegex(lines[-1], r"^\d+ passed, 0 warning\(s\), 0 failed$")
+
+    def test_tools(self) -> None:
+        cases = {
+            "git": (facts(git=asdlc.Tool(None)), "fail", "not installed"),
+            "uv": (facts(uv=asdlc.Tool(None)), "fail", "docs.astral.sh/uv"),
+            "backlog": (facts(backlog=asdlc.Tool("/b", "1.54.0")), "fail", "older than 1.55.1"),
+            "asdlc-plugin": (facts(asdlc_plugin=asdlc.Tool(None)), "fail", "not on PATH"),
+            "gh": (facts(gh_signed_in=False), "warn", "gh auth setup-git"),
+            "claude": (facts(claude=asdlc.Tool(None)), "warn", "neither claude nor npx"),
+        }
+        for area, (found, level, says) in cases.items():
+            with self.subTest(area=area):
+                (finding,) = [f for f in self.only(level, found) if f.area == area]
+                self.assertIn(says, finding.message)
+        self.assertEqual(set(self.levels(facts(gh=asdlc.Tool(None)))), {"pass", "warn"}, "gh is a warning only")
+        self.assertEqual(set(self.levels(facts(claude=asdlc.Tool(None), npx=asdlc.Tool("/usr/bin/npx")))), {"pass"})
+
+    def test_identity_and_preferences(self) -> None:
+        cases = {
+            "unset": (facts(engineer=""), "git config --global asdlc.engineer"),
+            "not a name": (facts(engineer="kyle.w1"), "not an engineer's name"),
+            "no devs file": (facts(devs=None), "devs/kyle.yaml is not in the tasks repository"),
+            "malformed": (facts(devs="name: kyle\nreview: maybe\n"), "review is true or false"),
+            "review unset": (facts(devs="name: kyle\nworkers: 2\n"), "add review: true (or false)"),
+        }
+        for case, (found, says) in cases.items():
+            with self.subTest(case=case):
+                self.assertIn(says, " ".join(f.message for f in self.only("fail", found)))
+
+    def test_the_board(self) -> None:
+        cases = {
+            "missing": (facts(board=None, board_error="no board: pass --board <path>"), "no board"),
+            "dirty": (facts(dirty=" M asdlc.toml"), "uncommitted changes"),
+            "off main": (facts(branch="other"), "switch main"),
+            "no origin": (facts(origin=""), "no origin remote"),
+            "unreachable": (facts(origin_error="fatal: could not read Username"), "can't be reached without a prompt"),
+        }
+        for case, (found, says) in cases.items():
+            with self.subTest(case=case):
+                self.assertIn(says, " ".join(f.message for f in self.only("fail", found) if f.area == "board"))
+
+    def test_settings(self) -> None:
+        self.assertIn("must be shorter than stale_after", self.only("fail", facts(settings='stale_after = "30m"\nreview_fallback_after = "30m"\n'))[0].message)
+        self.assertIn("not valid TOML", self.only("fail", facts(settings="stale_after = \n"))[0].message)
+        self.assertIn("defaults apply", self.only("warn", facts(settings=None))[0].message)
+
+    def test_registered_repositories(self) -> None:
+        board = Path("/home/kyle/tasks")
+        repo = lambda **c: facts(repos=(asdlc.replace(asdlc.RepoFacts("acme-api", Path("/home/kyle/api"), board, True, "acme-api", str(board)), **c),))  # noqa: E731
+        cases = {
+            "gone": (repo(exists=False), "fail", "is gone"),
+            "no origin": (repo(remote_slug=None), "fail", "no origin remote"),
+            "renamed": (repo(remote_slug="acme-api-v2"), "fail", "origin is acme-api-v2 now"),
+            "no board": (repo(board=""), "fail", "asdlc.board is not set"),
+            "another board": (repo(board="/elsewhere"), "warn", "registered for /home/kyle/tasks"),
+        }
+        for case, (found, level, says) in cases.items():
+            with self.subTest(case=case):
+                self.assertIn(says, " ".join(f.message for f in self.only(level, found) if f.area == "repository acme-api"))
+        self.assertIn("run asdlc register", self.only("warn", facts(repos=()))[0].message)
+        self.assertEqual(self.only("fail", facts(registry_error="the registry is not valid TOML"))[0].area, "repositories")
+
+    def test_plugins(self) -> None:
+        plugins = facts().plugins
+        cases = {
+            "cannot check": (facts(plugins=asdlc.PluginFacts(error="claude is not on PATH")), "warn", "plugins", "/plugin"),
+            "no marketplace file": (facts(marketplace=None), "fail", "marketplace", "asdlc init-board"),
+            "not added": (facts(plugins=asdlc.replace(plugins, marketplaces=())), "fail", "marketplace", "claude plugin marketplace add git@github.com:acme/tasks.git"),
+            "auto-update off": (facts(plugins=asdlc.replace(plugins, marketplaces=(frozendict({"name": "tasks"}),))), "warn", "auto-update", "gh auth setup-git"),
+            "team missing": (facts(plugins=asdlc.replace(plugins, installed=plugins.installed[1:])), "fail", "team plugin", "claude plugin install team@tasks"),
+            "asdlc missing": (facts(plugins=asdlc.replace(plugins, installed=(plugins.installed[0], plugins.installed[2]))), "warn", "asdlc plugin", "--plugin-dir"),
+            "kit missing": (facts(plugins=asdlc.replace(plugins, installed=plugins.installed[:2])), "warn", "authoring kit", "unaudited"),
+            "kit short": (facts(plugins=asdlc.replace(plugins, kit_files=frozenset(asdlc.AUTHORING_KIT[:3]))), "warn", "authoring kit", "agents/authoring-auditor.md"),
+        }
+        for case, (found, level, area, says) in cases.items():
+            with self.subTest(case=case):
+                self.assertIn(says, " ".join(f.message for f in self.only(level, found) if f.area == area))
+        disabled = asdlc.replace(plugins, installed=(frozendict({"id": "team@tasks", "enabled": False}), *plugins.installed[1:]))
+        self.assertEqual([f.area for f in self.only("fail", facts(plugins=disabled))], ["team plugin"])
+        self.assertIn("auto-update is off for tasks, the default for a marketplace you add yourself",
+                      self.only("warn", facts(plugins=asdlc.replace(plugins, marketplaces=(frozendict({"name": "tasks"}),))))[0].message)
+
+    def test_leftovers_say_how_to_remove_them(self) -> None:
+        found = facts(leftovers=(Path("/home/kyle/tasks.worktrees/plugin-acme-api"), Path("/home/kyle/api.worktrees/asdlc-verify"),
+                                 Path("/home/kyle/api.worktrees/review-task-7-kyle.r1")))
+        messages = [f.message for f in self.only("warn", found)]
+        self.assertIn("onboarding of acme-api that was never published", messages[0])
+        self.assertIn("git -C /home/kyle/tasks worktree remove --force /home/kyle/tasks.worktrees/plugin-acme-api", messages[0])
+        self.assertIn("git -C /home/kyle/api worktree remove --force /home/kyle/api.worktrees/asdlc-verify", messages[1])
+        self.assertIn("reviewer's worktree", messages[2])
+
+    def test_published_plugins_must_pass_their_check(self) -> None:
+        found = facts(published=(asdlc.PublishedCheck("acme-api", 1, "plugins/acme-api/commands.toml: [lint] is not verified"),))
+        (finding,) = self.only("fail", found)
+        self.assertEqual(finding.area, "plugin acme-api")
+        self.assertIn("[lint] is not verified", finding.message)
+        self.assertEqual(self.only("pass", facts(published=()))[-1].message, "none published yet")
+
+
+T0 = datetime(2026, 10, 22, 9, 0, tzinfo=UTC)
+
+
+def at(minutes: float, task_id: str = "TASK-1", **fields: object) -> object:
+    return asdlc.Snapshot(T0 + timedelta(minutes=minutes), task(task_id, **fields))
+
+
+class StatsTest(unittest.TestCase):
+    """The pilot's numbers over fixed histories."""
+
+    SNAPSHOTS = (
+        # TASK-1: claimed at 0, In Review at 30, reviewed (changes) at 40, back at 60, reviewed clean at 70, Done at 100.
+        at(0, status="To Do"),
+        at(1, status="In Progress", assignees=("@ann.w1",)),
+        at(30, status="In Review", assignees=("@ann.w1",)),
+        at(40, status="In Review", assignees=("@ann.w1",), reviewer="kyle.r1", review_kind="cross-machine"),
+        at(45, status="In Progress", assignees=("@ann.w1",), labels=("size-2", "changes-requested"), review_kind="cross-machine"),
+        at(60, status="In Review", assignees=("@ann.w1",), labels=("size-2",), review_kind="cross-machine"),
+        at(70, status="In Review", assignees=("@ann.w1",), reviewer="kyle.r1", review_kind="cross-machine"),
+        at(75, status="In Review", assignees=("@ann.w1",), labels=("size-2", "review-passed"), review_kind="cross-machine"),
+        at(100, status="Done", assignees=("@ann.w1",), labels=("size-2", "review-passed")),
+        # TASK-2: size-1, claimed at 10, In Review at 20, a same-machine review at 60.
+        at(5, "TASK-2", labels=("size-1",)),
+        at(10, "TASK-2", status="In Progress", assignees=("@ann.w2",), labels=("size-1",)),
+        at(20, "TASK-2", status="In Review", assignees=("@ann.w2",), labels=("size-1",)),
+        at(60, "TASK-2", status="In Review", assignees=("@ann.w2",), labels=("size-1",), reviewer="ann.r1", review_kind="same-machine"),
+        # TASK-3: in another project, claimed at 2 and still In Review with nobody reviewing.
+        at(2, "TASK-3", status="In Progress", assignees=("@kyle.w1",), project="acme-web"),
+        at(50, "TASK-3", status="In Review", assignees=("@kyle.w1",), project="acme-web"),
+    )
+
+    def report(self, since: datetime | None = None, events: tuple[dict[str, object], ...] = ()) -> dict[str, object]:
+        by_task = asdlc.histories(self.SNAPSHOTS)
+        current = (self.SNAPSHOTS[8].task, self.SNAPSHOTS[12].task, self.SNAPSHOTS[14].task)
+        texts = {"TASK-2": "size-1: plan approval skipped; small because one line"}
+        published = asdlc.published_plugins([(T0 + timedelta(minutes=25), "Add the app plugin"), (T0 + timedelta(minutes=90), "Update the app plugin")])
+        return asdlc.board_stats(by_task, current, texts, published, events, since)
+
+    def test_history_reads_the_transitions(self) -> None:
+        h = asdlc.histories(self.SNAPSHOTS)["TASK-1"]
+        minute = lambda m: T0 + timedelta(minutes=m)  # noqa: E731
+        self.assertEqual(h.claims, (minute(1),))
+        self.assertEqual(h.entered_review, (minute(30), minute(60)))
+        self.assertEqual(h.review_claims, ((minute(40), "cross-machine"), (minute(70), "cross-machine")))
+        self.assertEqual((h.changes, h.done, h.project), ((minute(45),), minute(100), "app"))
+
+    def test_the_numbers(self) -> None:
+        report = self.report()
+        self.assertEqual(report["tasks"], {"claimed": 3, "in_review": 2, "done": 1})
+        self.assertEqual(report["claim_to_review"], {"count": 3, "median": 29 * 60.0, "p90": 48 * 60.0})
+        self.assertEqual(report["review_to_done"], {"count": 1, "median": 70 * 60.0, "p90": 70 * 60.0})
+        self.assertEqual(report["review_wait"], {"count": 3, "median": 10 * 60.0, "p90": 40 * 60.0, "waiting_now": ["TASK-3"]})
+        self.assertEqual(report["changes_requested"], {"reviewed_tasks": 2, "round_trips": 1, "per_task": 0.5, "by_task": {"TASK-1": 1, "TASK-2": 0}})
+        self.assertEqual(report["reviews"], {"total": 3, "same_machine": 1, "share_same_machine": 1 / 3})
+        self.assertEqual(report["onboardings"], [{"plugin": "app", "published": (T0 + timedelta(minutes=25)).isoformat(), "task": "TASK-2", "seconds": 15 * 60.0}])
+        self.assertEqual(report["plan_approval_skipped"], [{"id": "TASK-2", "recorded": True}])
+
+    def test_since_leaves_out_what_came_before(self) -> None:
+        report = self.report(since=T0 + timedelta(minutes=55))
+        self.assertEqual(report["tasks"], {"claimed": 0, "in_review": 2, "done": 1})
+        self.assertEqual(report["review_wait"]["count"], 1)  # TASK-1 back In Review at 60; the others entered before 55
+        self.assertEqual(report["reviews"]["total"], 2)
+        self.assertEqual(report["onboardings"], [])
+
+    def test_races_come_from_the_event_log(self) -> None:
+        event = lambda m, command, outcome: {"time": (T0 + timedelta(minutes=m)).isoformat(), "command": command, "outcome": outcome}  # noqa: E731
+        events = (event(1, "next", "claimed"), event(2, "next", "lost"), event(3, "next", "claimed"), event(4, "claim", "refused"),
+                  event(5, "review-next", "claimed"), event(6, "lead", "lost"))
+        races = self.report(events=events)["races"]
+        self.assertEqual((races["claimed"], races["lost"], races["lost_per_claim"]), (2, 1, 0.5))
+        self.assertEqual(races["by_command"]["lead"], {"lost": 1})
+        self.assertEqual(self.report(since=T0 + timedelta(minutes=3), events=events)["races"]["claimed"], 1)
+
+    def test_lines(self) -> None:
+        lines = asdlc.stats_lines(self.report(), "/state/asdlc/events.jsonl")
+        self.assertIn("tasks: 3 claimed, 2 in review now, 1 done", lines)
+        self.assertIn("claim to In Review: median 29m, p90 48m (3)", lines)
+        self.assertIn("review wait: median 10m, p90 40m (3); waiting now: TASK-3", lines)
+        self.assertIn("changes requested: 1 round trip(s) over 2 reviewed task(s), 0.5 per task, most 1 (TASK-1)", lines)
+        self.assertIn("reviews: 3, 1 same-machine (33%)", lines)
+        self.assertIn("lost races per claim: - (0 lost, 0 claimed; this machine's log, /state/asdlc/events.jsonl)", lines)
+        self.assertIn(f"onboarded app at {(T0 + timedelta(minutes=25)).isoformat()}, 15m after TASK-2 was claimed", lines)
+        self.assertEqual(lines[-1], "plan approval skipped (size-1): TASK-2")
+
+    def test_percentile_and_the_pieces(self) -> None:
+        self.assertIsNone(asdlc.percentile([], 0.5))
+        self.assertEqual(asdlc.percentile([5, 1, 3, 2, 4], 0.5), 3)
+        self.assertEqual(asdlc.percentile(list(range(1, 11)), 0.9), 9)
+        self.assertEqual(asdlc.percentile([7], 0.9), 7)
+        self.assertEqual([asdlc._duration(v) for v in (None, 42.7, 60, 5400)], ["-", "42s", "1m", "1h 30m"])
+        self.assertEqual(asdlc.published_plugins([(T0, "Add the acme-api plugin"), (T0, "Update the acme-api plugin"), (T0, "Claim TASK-1")]),
+                         ((T0, "acme-api"),))
+        self.assertEqual(asdlc.batch_objects(b"abc blob 3\nxyz\nmain:gone missing\ndef blob 0\n\n"), ["xyz", None, ""])
+
+
 # --- the script, against real git repositories and the backlog CLI --------------------
 
 
@@ -598,8 +845,10 @@ def as_engineer(name: str) -> dict[str, str]:
     return {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "asdlc.engineer", "GIT_CONFIG_VALUE_0": name}
 
 
-# A machine with nothing registered: tests that register pass their own XDG_CONFIG_HOME.
-NO_MACHINE_CONFIG = {"XDG_CONFIG_HOME": "/nonexistent/asdlc-tests"}
+# A machine with nothing registered: tests that register pass their own XDG_CONFIG_HOME. Its
+# event log goes to a folder of its own, never the real ~/.local/state.
+_STATE = tempfile.TemporaryDirectory()
+NO_MACHINE_CONFIG = {"XDG_CONFIG_HOME": "/nonexistent/asdlc-tests", "XDG_STATE_HOME": _STATE.name}
 
 
 def _asdlc(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None, engineer: str = "agent") -> subprocess.CompletedProcess[str]:
@@ -704,7 +953,7 @@ class InitBoardTest(unittest.TestCase):
             self.assertEqual(fields["statuses"], ("To Do", "In Progress", "In Review", "Done"))
             self.assertEqual(fields["default_status"], "To Do")
             self.assertEqual(fields["types"], ("intent", "task", "bug", "spike"))
-            self.assertEqual(fields["labels"], ("size-1", "size-2", "size-3", "size-4", "size-5", "size-8"))
+            self.assertEqual(fields["labels"], ("size-1", "size-2", "size-3", "size-4", "size-5", "size-8", "changes-requested", "review-passed"))
             self.assertEqual(
                 [fields[k] for k in ("auto_commit", "bypass_git_hooks", "remote_operations", "check_active_branches")],
                 ["true", "true", "true", "false"],
@@ -743,6 +992,19 @@ class BoardCommandTest(unittest.TestCase):
         done = _asdlc("board", "task", "list", "--plain", cwd=code)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("TASK-1", done.stdout)
+
+    def test_the_environment_comes_before_git_config_and_the_flag_before_both(self) -> None:
+        code = self.boards.root / "code"
+        _git(self.boards.root, "init", "--quiet", "-b", "main", str(code))
+        _git(code, "config", "asdlc.board", str(self.boards.root / "not-a-board"))
+        done = _asdlc("board", "task", "list", "--plain", cwd=code, env={"ASDLC_BOARD": str(self.mine)})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("TASK-1", done.stdout)
+        done = _asdlc("--board", str(self.mine), "board", "task", "list", "--plain", cwd=code, env={"ASDLC_BOARD": str(code)})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        refused = _asdlc("board", "task", "list", "--plain", cwd=code)
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("(from git config asdlc.board) is not a board", refused.stderr)
 
     def test_a_rejected_push_is_rebased_and_retried(self) -> None:
         env = _interfering_backlog(self.boards.root, self.theirs, f'"$REAL_BACKLOG" task edit TASK-1 --notes "theirs"')
@@ -809,6 +1071,34 @@ class ClaimTest(unittest.TestCase):
         self.assertIn("Another agent claimed TASK-1 first. Run asdlc next for another task.", done.stderr)
         self.assertEqual(self.boards.on_origin()["TASK-1"][0].assignees, ("@agent.2",))
         self.assertEqual(_git(self.mine, "rev-parse", "HEAD"), _git(self.mine, "rev-parse", "origin/main"))
+
+    def test_each_attempt_goes_in_the_machines_event_log(self) -> None:
+        state = {"XDG_STATE_HOME": str(self.boards.root / "state")}
+        lose = _interfering_backlog(self.boards.root, self.theirs, '"$REAL_BACKLOG" task edit TASK-1 -s "In Progress" -a @agent.2')
+        self.assertEqual(_asdlc("--board", str(self.mine), "claim", "TASK-1", "--as", "agent.1", env=lose | state).returncode, 1)
+        self.assertEqual(_asdlc("--board", str(self.mine), "claim", "TASK-1", "--as", "agent.1", env=state).returncode, 1)
+        self.assertEqual(_asdlc("--board", str(self.mine), "claim", "TASK-3", "--as", "agent.1", env=state).returncode, 1)
+        self.assertEqual(_asdlc("--board", str(self.mine), "claim", "TASK-2", "--as", "agent.1", env=state).returncode, 0)
+        log = (self.boards.root / "state" / "asdlc" / "events.jsonl").read_text()
+        events = [(e["command"], e["worker"], e["task"], e["outcome"]) for e in asdlc.parse_events(log)]
+        self.assertEqual(events, [("claim", "agent.1", "TASK-1", "lost"), ("claim", "agent.1", "TASK-1", "refused"),
+                                  ("claim", "agent.1", "TASK-3", "refused"), ("claim", "agent.1", "TASK-2", "claimed")])
+        self.assertIn("split it before it starts", asdlc.parse_events(log)[2]["reason"])
+
+    def test_stats_reads_the_boards_history_and_the_log(self) -> None:
+        state = {"XDG_STATE_HOME": str(self.boards.root / "state")}
+        self.assertEqual(_asdlc("--board", str(self.mine), "claim", "TASK-1", "--as", "agent.1", env=state).returncode, 0)
+        self.assertEqual(_asdlc("--board", str(self.mine), "board", "task", "edit", "TASK-1", "-s", "In Review").returncode, 0)
+        done = _asdlc("--board", str(self.theirs), "stats", "--json", env=state)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        report = json.loads(done.stdout)
+        self.assertEqual(report["tasks"], {"claimed": 1, "in_review": 1, "done": 0})
+        self.assertEqual(report["claim_to_review"]["count"], 1)
+        self.assertEqual(report["review_wait"]["waiting_now"], ["TASK-1"])
+        self.assertEqual((report["races"]["claimed"], report["races"]["lost"]), (1, 0))
+        later = _asdlc("--board", str(self.theirs), "stats", "--since", "2999-01-01", env=state)
+        self.assertIn("tasks: 0 claimed, 1 in review now, 0 done", later.stdout)
+        self.assertEqual(_git(self.theirs, "status", "--porcelain"), "", "stats changes nothing")
 
     def test_a_push_rejected_for_another_task_is_retried(self) -> None:
         env = _interfering_backlog(self.boards.root, self.theirs, '"$REAL_BACKLOG" task edit TASK-2 -s "In Progress" -a @agent.2')
