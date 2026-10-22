@@ -7,7 +7,8 @@ Denied, each with the reason and the way that works instead:
 
 - Editing a file in a board's `backlog/` folder by hand. The board changes through
   `asdlc board`, so each change is committed and pushed where every agent sees it.
-- Setting a task to To Do or Done, or promoting a draft, with `backlog` or `asdlc board`.
+- Setting a task to To Do or Done, promoting a draft, or creating a task without
+  `--draft` (it would start as accepted To Do work), with `backlog` or `asdlc board`.
   Accepting work and closing it are a person's decisions. `asdlc release`, the tool's own
   way of handing a claimed task back, is allowed.
 - Editing a file in a code repository that takes its work from a board (`git config
@@ -154,6 +155,11 @@ def backlog_refusal(arguments: Sequence[str]) -> str | None:
     pairs = set(zip(arguments, arguments[1:]))
     if ("draft", "promote") in pairs or ("task", "promote") in pairs:
         return "promoting a draft accepts it as work, which is a person's decision: ask the person to promote it."
+    if ("task", "create") in pairs and "--draft" not in arguments:
+        return (
+            "a task created without --draft starts as accepted To Do work, and accepting work is a "
+            "person's decision: add --draft, and the person promotes it."
+        )
     return None
 
 

@@ -52,7 +52,7 @@ A claimed task's worktree is `<repo>.worktrees/<id>` beside the repository, on a
 The `guard_board` hook refuses, with the reason:
 
 - Editing a board's `backlog/` files by hand, so every change is committed and pushed where other agents see it.
-- `backlog` or `asdlc board` setting To Do or Done, or promoting a draft: accepting and closing work are a person's decisions. `asdlc release` is the way to hand a task back.
+- `backlog` or `asdlc board` setting To Do or Done, promoting a draft, or creating a task without `--draft` (it would start as accepted To Do work): accepting and closing work are a person's decisions. `asdlc release` is the way to hand a task back.
 - Editing a code repository that has `asdlc.board` set outside a claimed task's worktree, so no two agents change the same work.
 - `git push` to that repository's default branch, so changes arrive through review. Pushes to the board are allowed.
 

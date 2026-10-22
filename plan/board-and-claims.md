@@ -13,7 +13,7 @@ It departs from the spec's design in one respect: the spec keeps every artefact 
 | File | New | What it holds | Requirements |
 |---|---|---|---|
 | `scripts/asdlc` | yes | `init-board`, `board`, `claim`, `next`, `release` and `route`; the routing table as data; pure decisions (claimability, race result, push outcome, candidates, routing) with git, files and the backlog CLI in a thin shell | R2, R9, R12 |
-| `hooks/guard_board.py` | yes | The PreToolUse guard: hand edits of `backlog/`, a person's statuses and draft promotion, code edits outside a claimed worktree, pushes to a code repository's default branch | R2, R9, R16, R26 |
+| `hooks/guard_board.py` | yes | The PreToolUse guard: hand edits of `backlog/`, a person's statuses, draft promotion and creating a task without `--draft`, code edits outside a claimed worktree, pushes to a code repository's default branch | R2, R9, R16, R26 |
 | `hooks/hooks.json` | no | The board guard beside the test-edit guard, same matcher and uv wrapper | R16 |
 | `tests/test_asdlc.py` | yes | The logic, then the script against real git repositories with a bare `origin` and the real backlog CLI: init, push, rejected push, duplicate ids, conflicts, the claim race ten times, `next`, `release`, worktrees, routing | R12 |
 | `tests/test_guard_board.py` | yes | Every guard rule, deny and allow, as logic and as the hook run against real repositories; the uv wrapper | R16, R26 |

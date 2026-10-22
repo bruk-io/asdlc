@@ -84,6 +84,27 @@ class BoardStatusTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIs(verdict(command), guard.Verdict.ALLOW)
 
+    def test_denies_creating_accepted_work(self) -> None:
+        for command in (
+            "backlog task create 'New'",
+            "backlog task create 'New' --type task -l size-2",
+            "asdlc board task create 'New' --priority high",
+            "uv run --script /plugin/scripts/asdlc board task create 'New'",
+        ):
+            with self.subTest(command=command):
+                self.assertIs(verdict(command), guard.Verdict.DENY)
+        outcome = guard.decide_command("backlog task create 'New'", PLAIN, lookup)
+        self.assertIn("--draft", outcome.reason)
+
+    def test_allows_creating_drafts(self) -> None:
+        for command in (
+            "backlog task create 'New' --draft",
+            "asdlc board task create 'New' --draft --type task",
+            "backlog draft create 'New'",
+        ):
+            with self.subTest(command=command):
+                self.assertIs(verdict(command), guard.Verdict.ALLOW)
+
     def test_the_reason_points_at_the_person_and_at_release(self) -> None:
         outcome = guard.decide_command("backlog task edit 1 -s Done", PLAIN, lookup)
         self.assertIn("person's decision", outcome.reason)
