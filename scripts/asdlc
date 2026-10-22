@@ -85,7 +85,7 @@ BOARD_SETTINGS = frozendict({
     "check_active_branches": False,
 })
 PUSH_ATTEMPTS = 5
-LOCK_WAIT_SECONDS = 120
+LOCK_WAIT_SECONDS = 45
 MARKER = ".asdlc-task"
 PRIORITY_ORDER = frozendict({"high": 0, "medium": 1, "low": 2})
 _WORKER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -94,6 +94,11 @@ LEAD_KEY = "asdlc_lead"  # frontmatter keys asdlc writes itself; Backlog 1.55 ke
 HEARTBEAT_KEY = "asdlc_heartbeat"
 REVIEWER_KEY = "asdlc_reviewer"  # the reviewer holding a review claim; cleared when it finishes
 REVIEW_KIND_KEY = "asdlc_review_kind"  # cross-machine or same-machine, kept after the review for the person who merges
+BRANCH_KEY = "asdlc_branch"  # the task's branch, written by its first claim; every later claim resumes it
+APPROVED_KEY = "asdlc_plan_approved_by"  # the person who approved the plan, written only by asdlc approve
+ACCEPTED_FROM_KEY = "asdlc_accepted_from"  # the draft id an accepted item had, written by asdlc accept
+TRAILER = "Asdlc-Transaction"  # on every board commit asdlc makes, so an unpushed one is known as its own
+PENDING = "asdlc-transaction.json"  # in the board clone's git folder while a change is being made
 _REVIEWER_LABEL = re.compile(r"^r\d+$")
 DRAFTS = "backlog/drafts/"
 DEFAULT_WORKERS = 3
@@ -159,6 +164,9 @@ class Task:
     reviewer: str = ""  # the reviewer holding the review claim, from REVIEWER_KEY
     review_kind: str = ""
     references: tuple[str, ...] = ()
+    branch: str = ""  # from BRANCH_KEY
+    plan_approved_by: str = ""  # from APPROVED_KEY
+    accepted_from: str = ""  # from ACCEPTED_FROM_KEY
 
 
 def is_draft(task: Task) -> bool:
@@ -272,6 +280,9 @@ def task_from(path: str, text: str) -> Task | None:
         reviewer=text_field(REVIEWER_KEY).removeprefix("@"),
         review_kind=text_field(REVIEW_KIND_KEY),
         references=_as_tuple(fields.get("references")),
+        branch=text_field(BRANCH_KEY),
+        plan_approved_by=text_field(APPROVED_KEY).removeprefix("@"),
+        accepted_from=text_field(ACCEPTED_FROM_KEY).upper(),
     )
 
 
@@ -432,6 +443,29 @@ def claim_refusal(task: Task | None, task_id: str, tasks: Iterable[Task], worker
     if isinstance(chosen := route(task, tasks), Refusal):
         return chosen.reason
     return None
+
+
+def holder_refusal(task: Task | None, task_id: str, worker: str, doing: str) -> str | None:
+    """Why the worker can't change the task's work now, or None when it can: it must hold the
+    task In Progress. A claim that was reaped or released may be someone else's now."""
+    if task is None:
+        return f"{task_id} is not a task on the board"
+    if f"@{worker}" not in task.assignees:
+        held = ", ".join(workers(task.assignees)) or "nobody"
+        return (f"{task_id} is held by {held}, not @{worker}, so @{worker} can't {doing}: its claim was released (by asdlc reap or "
+                f"asdlc release) and the task may be someone else's now. Stop and tell your orchestrator; asdlc mine --as {owner_of(worker)} "
+                "shows what your workers hold")
+    if not is_status(task, IN_PROGRESS):
+        return f"{task_id} is {task.status}, not {IN_PROGRESS}, so @{worker} can't {doing}"
+    return None
+
+
+def finish_edit(task: Task, branch: str, pull: str | None, notes: str) -> list[str]:
+    """The backlog edit that hands a held task to review: In Review, its branch and pull request
+    among its references (once), the changes-requested label gone, the worker's notes appended."""
+    refs = [r for r in dict.fromkeys((branch, pull or "")) if r and r not in task.references]
+    edit = ["task", "edit", task.id, "-s", IN_REVIEW, *[word for ref in refs for word in ("--add-ref", ref)], "--append-notes", notes.strip()]
+    return edit + (["--remove-label", CHANGES_REQUESTED] if CHANGES_REQUESTED in task.labels else [])
 
 
 class Race(StrEnum):
@@ -938,8 +972,18 @@ def mine_report(items: Sequence[Task], engineer: str, prefs: Prefs) -> dict[str,
     }
 
 
-def check_note(command: Sequence[str], code: int, output: str, now: datetime, tail: int = CHECK_TAIL_LINES) -> str:
-    """A task note recording one check: the command, its exit code, and the end of its output."""
+@dataclass(frozen=True)
+class Where:
+    """Where a check ran: the task's worktree, its branch and commit, and whether it had uncommitted changes."""
+
+    worktree: str
+    branch: str
+    commit: str
+    dirty: bool
+
+
+def check_note(command: Sequence[str], code: int, output: str, now: datetime, tail: int = CHECK_TAIL_LINES, where: Where | None = None) -> str:
+    """A task note recording one check: the command, its exit code, where it ran, and the end of its output."""
     lines = output.rstrip("\n").splitlines()
     shown = lines[-tail:] if tail else []
     cut = f", last {len(shown)} of {len(lines)} lines" if len(lines) > len(shown) else ""
@@ -948,7 +992,9 @@ def check_note(command: Sequence[str], code: int, output: str, now: datetime, ta
         fence += "`"
     stamp = now.astimezone(UTC).isoformat(timespec="seconds")
     verdict = "passed" if code == 0 else "FAILED"
-    return f"Check {verdict}: `{shlex.join(command)}` exited {code} at {stamp}{cut}:\n\n{fence}text\n" + "\n".join(shown) + f"\n{fence}"
+    place = (f" in {where.worktree} on {where.branch} at {where.commit[:12]}{' with uncommitted changes' if where.dirty else ''}"
+             if where else "")
+    return f"Check {verdict}: `{shlex.join(command)}` exited {code} at {stamp}{place}{cut}:\n\n{fence}text\n" + "\n".join(shown) + f"\n{fence}"
 
 
 def draft_parent(arguments: Sequence[str]) -> tuple[tuple[str, ...], str] | None:
@@ -1835,33 +1881,92 @@ def lead_of_command(board: Board, raw_id: str, as_json: bool) -> int:
     return 0
 
 
-def record_check(board: Board, raw_id: str, command: Sequence[str], cwd: Path) -> int:
-    """Run a check, append its command, exit code and output tail to the task's notes, and
-    return its exit code, so the evidence on the board comes from the toolchain.
+def _where(cwd: Path, task_id: str) -> Where:
+    """The claimed worktree the current directory is in.
 
     Raises:
-        AsdlcError: no such task, or the note could not be pushed.
+        AsdlcError: it isn't in a task's worktree, or the worktree holds another task.
+    """
+    top = _git(cwd, "rev-parse", "--show-toplevel")
+    root = Path(top.stdout.strip()) if top.returncode == 0 else None
+    marker = root / MARKER if root else None
+    if marker is None or not marker.is_file():
+        raise AsdlcError(f"run asdlc record-check from {task_id}'s worktree, the one whose {MARKER} names it (asdlc claim printed it); "
+                         f"{root or cwd} is not a task's worktree, so the check was not run")
+    try:
+        recorded = str(json.loads(marker.read_text()).get("task", ""))
+    except (ValueError, AttributeError):
+        recorded = ""
+    if recorded.upper() != task_id:
+        raise AsdlcError(f"{root} is the worktree of {recorded or 'an unknown task'}, not {task_id}, so the check was not run")
+    return Where(str(root), _git(root, "branch", "--show-current").stdout.strip() or "a detached HEAD",
+                 _git(root, "rev-parse", "HEAD").stdout.strip(), bool(_git(root, "status", "--porcelain").stdout.strip()))
+
+
+def record_check(board: Board, raw_id: str, worker: str, command: Sequence[str], cwd: Path) -> int:
+    """Run a check in the task's worktree, append its command, exit code, where it ran and its output
+    tail to the task's notes, and return its exit code, so the evidence on the board comes from the
+    toolchain. Only the worker holding the task In Progress records checks on it.
+
+    Raises:
+        AsdlcError: not in the task's worktree, the worker doesn't hold the task, or the note could not be pushed.
     """
     task_id = normalise_id(raw_id, _prefix(board))
+    where = _where(cwd, task_id)
+    tasks = _tasks(board, _refresh(board))
+    if refusal := holder_refusal(_find(tasks, task_id), task_id, worker, "record checks on it"):
+        raise AsdlcError(f"{refusal}. The check was not run")
     try:
         done = subprocess.run(list(command), cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         code, output = done.returncode, done.stdout
     except OSError as error:
         code, output = 127, f"could not run {command[0]}: {error}\n"
     print(output, end="", flush=True)
-    note = check_note(command, code, output, datetime.now(UTC))
+    note = check_note(command, code, output, datetime.now(UTC), where=where)
 
     def step(attempt: int) -> tuple[str | None, None]:
-        if _find(_tasks(board), task_id) is None:
-            raise AsdlcError(f"{task_id} is not a task on the board, so the check was not recorded")
+        if refusal := holder_refusal(_find(_tasks(board), task_id), task_id, worker, "record checks on it"):
+            raise AsdlcError(f"{refusal}. The check ran but was not recorded")
         recorded = _board_backlog(board, ["task", "edit", task_id, "--append-notes", note])
         if recorded.returncode != 0:
             raise AsdlcError(f"backlog could not record the check on {task_id}: {(recorded.stderr or recorded.stdout).strip()}")
-        return f"Record a check on {task_id}: exit {code}", None
+        return f"Record a check on {task_id} by @{worker}: exit {code}", None
 
     _transact(board, step)
     _say(f"recorded on {task_id}: {shlex.join(command)} exited {code}")
     return code
+
+
+def finish(board: Board, raw_id: str, worker: str, branch: str | None, pull: str | None, notes: str) -> dict[str, object]:
+    """Hand the worker's task to review: In Review with its branch and pull request recorded and the
+    worker's notes appended, or, after a review asked for changes, back to review without the label.
+
+    Raises:
+        AsdlcError: no notes, the worker doesn't hold the task In Progress, the branch isn't the
+            task's, backlog failed, or the change could not be pushed.
+    """
+    if not notes.strip():
+        raise AsdlcError("say in --notes what was built, the checks recorded, and anything the reviewer should look at")
+    task_id = normalise_id(raw_id, _prefix(board))
+
+    def step(attempt: int) -> tuple[str | None, dict[str, object]]:
+        task = _find(_tasks(board), task_id)
+        if refusal := holder_refusal(task, task_id, worker, "finish it"):
+            raise AsdlcError(refusal)
+        assert task is not None
+        if branch and task.branch and branch != task.branch:
+            raise AsdlcError(f"{task_id}'s branch is {task.branch}, recorded when it was first claimed, not {branch}: push {task.branch} and finish with it")
+        chosen = task.branch or branch or branch_name(task)
+        done = _board_backlog(board, finish_edit(task, chosen, pull, notes))
+        if done.returncode != 0:
+            raise AsdlcError(f"backlog could not hand {task_id} to review: {(done.stderr or done.stdout).strip()}")
+        if not task.branch:
+            _write_key(board, task, BRANCH_KEY, chosen)
+        again = CHANGES_REQUESTED in task.labels
+        return f"Finish {task_id}: @{worker}, In Review", {"task": task_id, "worker": worker, "branch": chosen, "pull_request": pull,
+                                                           "status": IN_REVIEW, "resubmitted": again}
+
+    return _transact(board, step)
 
 
 # --- claims ------------------------------------------------------------------------------
@@ -2962,7 +3067,11 @@ def _parser() -> argparse.ArgumentParser:
     reaping.add_argument("--now", help="the time to judge staleness at, as ISO 8601 (for tests and demonstrations)")
     add("accept", "a person's command: accept an intent and its draft children", task="the intent", json_output=True)
     add("mine", "an engineer's workers' tasks, leads and reservations", who="the engineer, such as kyle", json_output=True)
-    commands.add_parser("record-check", help="run a check and record its command, exit code and output on the task: record-check <id> -- <command...>")
+    commands.add_parser("record-check", help="run a check in the task's worktree and record it on the task: record-check <id> --as <worker> -- <command...>")
+    finishing_work = add("finish", "hand your held task to review: In Review with its branch and pull request", task="the task", who=worker, json_output=True)
+    finishing_work.add_argument("--branch", help="the task's branch (default: the one recorded when it was claimed)")
+    finishing_work.add_argument("--pr", help="the pull request's URL, when there is one")
+    finishing_work.add_argument("--notes", required=True, help="what was built, the checks recorded, and anything the reviewer should look at")
     reviewer = "the reviewer: your engineer name, a dot, r and a number, such as kyle.r1"
     reviewing = add("review-next", "claim the review that has waited longest among those this reviewer may take", who=reviewer, json_output=True)
     reviewing.add_argument("--fallback", action="store_true",
@@ -2975,6 +3084,24 @@ def _parser() -> argparse.ArgumentParser:
     finishing.add_argument("--verdict", required=True, choices=[str(v) for v in ReviewVerdict], help="clean, or changes to send it back to its author")
     finishing.add_argument("--notes", required=True, help="the findings, as they go on the task")
     return parser
+
+
+def record_check_arguments(words: Sequence[str]) -> tuple[str, str, list[str]] | None:
+    """`<id> --as <worker> -- <command...>`, in either order before the `--`; None when malformed."""
+    if "--" not in words:
+        return None
+    split = list(words).index("--")
+    head, command = list(words[:split]), list(words[split + 1:])
+    worker = None
+    for index, word in enumerate(head):
+        if word == "--as" and index + 1 < len(head):
+            worker = head[index + 1]
+        elif word.startswith("--as="):
+            worker = word.partition("=")[2]
+    rest = [w for i, w in enumerate(head) if w != "--as" and not w.startswith("--as=") and not (i and head[i - 1] == "--as")]
+    if worker is None or len(rest) != 1 or not command:
+        return None
+    return rest[0], worker, command
 
 
 def command_index(argv: Sequence[str]) -> int | None:
@@ -3096,10 +3223,18 @@ def main(argv: Sequence[str]) -> int:
                         f"{result['task']} passed review by @{reviewer} ({result['kind']}); it stays In Review for a person to merge")
                 _emit(result, as_json, [line])
             case "record-check":
-                if len(passthrough) < 3 or passthrough[1] != "--":
-                    raise AsdlcError("say which task and which check: asdlc record-check TASK-1 -- ./scripts/check")
+                found = record_check_arguments(passthrough)
+                if found is None:
+                    raise AsdlcError("say which task, which worker and which check: asdlc record-check TASK-1 --as kyle.w1 -- ./scripts/check")
                 _check_backlog()
-                return record_check(board, passthrough[0], passthrough[2:], cwd)
+                raw_id, raw_worker, command = found
+                return record_check(board, raw_id, worker_for(raw_worker, _engineer(cwd)), command, cwd)
+            case "finish":
+                _check_backlog()
+                worker = worker_for(arguments.worker, _engineer(cwd))
+                result = finish(board, arguments.id, worker, arguments.branch, arguments.pr, arguments.notes)
+                again = " again, without changes-requested" if result["resubmitted"] else ""
+                _emit(result, as_json, [f"{result['task']} is In Review{again}: branch {result['branch']}, pull request {result['pull_request'] or '-'}"])
         return 0
     except AsdlcError as error:
         print(f"asdlc: {error}", file=sys.stderr)

@@ -1485,11 +1485,12 @@ class MineAndRecordCheckTest(unittest.TestCase):
 
     def test_record_check_notes_the_command_and_keeps_its_exit_code(self) -> None:
         worktree = self.team.boards.root / "api.worktrees" / "task-1"
-        done = _asdlc("record-check", "TASK-1", "--", "sh", "-c", "echo checked; exit 3", cwd=worktree, env=self.team.machine, engineer="kyle")
+        done = _asdlc("record-check", "TASK-1", "--as", "kyle.w1", "--", "sh", "-c", "echo checked; exit 3", cwd=worktree, env=self.team.machine, engineer="kyle")
         self.assertEqual(done.returncode, 3, done.stderr)
         self.assertEqual(done.stdout, "checked\n")
         text = self.team.text("TASK-1")
         self.assertIn("Check FAILED: `sh -c 'echo checked; exit 3'` exited 3", text)
+        self.assertIn(f"in {worktree} on task-1-mine at {_git(worktree, 'rev-parse', 'HEAD')[:12]}", text)
         self.assertIn("checked", text)
         self.assertEqual(self.team.run("record-check", "TASK-1", "true").returncode, 1)
 
@@ -1507,8 +1508,8 @@ class ReviewCommandTest(unittest.TestCase):
         engineer = asdlc.owner_of(worker)
         team.ok("claim", task_id, "--as", worker, engineer=engineer)
         number = task_id.rpartition("-")[2]
-        team.ok("board", "task", "edit", task_id, "--add-ref", f"task-{number}-branch", "--add-ref", f"https://github.com/acme/api/pull/{number}",
-                "-s", "In Review", engineer=engineer)
+        team.ok("finish", task_id, "--as", worker, "--branch", f"task-{number}-branch", "--pr", f"https://github.com/acme/api/pull/{number}",
+                "--notes", "Built.", engineer=engineer)
 
     def later(self, **delta: float) -> str:
         return (datetime.now(UTC) + timedelta(**delta)).isoformat()
@@ -1573,7 +1574,7 @@ class ReviewCommandTest(unittest.TestCase):
         mine = json.loads(self.team.ok("mine", "--as", "ann", "--json", engineer="ann").stdout)
         self.assertEqual([r["id"] for r in mine["changes_requested"]], ["TASK-1"])
         self.team.ok("heartbeat", "TASK-1", "--as", "ann.w1", engineer="ann")
-        self.team.ok("board", "task", "edit", "TASK-1", "--remove-label", "changes-requested", "-s", "In Review", engineer="ann")
+        self.team.ok("finish", "TASK-1", "--as", "ann.w1", "--notes", "Fixed: failures only are counted.", engineer="ann")
         self.assertEqual(self.review("kyle.r1")["task"], "TASK-1")
         clean = self.team.ok("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "clean", "--notes", "No findings.")
         self.assertEqual(clean.stdout.strip(), "TASK-1 passed review by @kyle.r1 (cross-machine); it stays In Review for a person to merge")
@@ -1660,3 +1661,48 @@ class RouteCommandTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- the independent review's experiments, as regression tests -----------------------
+# Each class reproduces one experiment from the review of the pilot (plan/pilot.md,
+# "Fixes from the independent review") against real repositories.
+
+
+def _later(**delta: float) -> str:
+    return (datetime.now(UTC) + timedelta(**delta)).isoformat()
+
+
+@needs_backlog
+class ReapedWorkerTest(unittest.TestCase):
+    """B1: a reaped worker can't finish, or record checks on, a task someone else now holds."""
+
+    def setUp(self) -> None:
+        self.team = Team(self, [_sized("Add login", "size-1", "--project", "acme-api")])
+        self.team.ok("claim", "1", "--as", "kyle.w1")
+        self.worktree = self.team.boards.root / "api.worktrees" / "task-1"
+        self.team.ok("reap", "--now", _later(hours=3))
+        self.team.ok("claim", "1", "--as", "ann.w1", engineer="ann")
+
+    def test_finish_refuses_a_worker_that_no_longer_holds_the_task(self) -> None:
+        done = self.team.run("finish", "1", "--as", "kyle.w1", "--pr", "https://github.com/acme/api/pull/1", "--notes", "built")
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("@ann.w1", done.stderr)
+        task = self.team.task("TASK-1")
+        self.assertEqual((task.status, task.assignees, task.references), ("In Progress", ("@ann.w1",), ()))
+
+    def test_record_check_refuses_a_worker_that_no_longer_holds_the_task(self) -> None:
+        ran = self.team.boards.root / "ran"
+        done = _asdlc("record-check", "TASK-1", "--as", "kyle.w1", "--", "touch", str(ran), cwd=self.worktree, env=self.team.machine, engineer="kyle")
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("@ann.w1", done.stderr)
+        self.assertFalse(ran.exists(), "the check ran for a worker that doesn't hold the task")
+        self.assertNotIn("Check passed", self.team.text("TASK-1"))
+
+    def test_the_holder_finishes_it(self) -> None:
+        done = self.team.ok("finish", "1", "--as", "ann.w1", "--pr", "https://github.com/acme/api/pull/1", "--notes", "built it", engineer="ann")
+        self.assertIn("TASK-1 is In Review", done.stdout)
+        task = self.team.task("TASK-1")
+        self.assertEqual((task.status, task.assignees), ("In Review", ("@ann.w1",)))
+        self.assertEqual(task.references, ("task-1-add-login", "https://github.com/acme/api/pull/1"))
+        self.assertIn("built it", self.team.text("TASK-1"))
+        self.assertEqual(_git(self.team.boards.origin, "log", "-1", "--format=%s", "main"), "Finish TASK-1: @ann.w1, In Review")

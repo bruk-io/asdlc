@@ -90,13 +90,15 @@ class CrossMachineReviewTest(unittest.TestCase):
         """The worker's build and finish steps: commit, record a check, push the branch."""
         (worktree / "login.py").write_text(text)
         machine.git(worktree, "commit", "--quiet", "-am", message)
-        machine.asdlc("record-check", task_id, "--", "python3", "-c", "import ast, sys; ast.parse(open('login.py').read())", cwd=worktree)
-        machine.git(worktree, "push", "--quiet", "--force-with-lease", "-u", "origin", "HEAD")
+        worker = json.loads((worktree / ".asdlc-task").read_text())["worker"]
+        machine.asdlc("record-check", task_id, "--as", worker, "--", "python3", "-c", "import ast, sys; ast.parse(open('login.py').read())", cwd=worktree)
+        machine.git(worktree, "push", "--quiet", "-u", "origin", "HEAD")
         return machine.git(worktree, "branch", "--show-current")
 
-    def submit(self, machine: demo.Machine, task_id: str, branch: str, number: int, first: bool) -> None:
-        refs = ("--add-ref", branch, "--add-ref", f"https://github.com/acme/api/pull/{number}") if first else ("--remove-label", "changes-requested")
-        machine.asdlc("board", "task", "edit", task_id, *refs, "-s", "In Review", "--append-notes", "Built; checks recorded above.")
+    def submit(self, machine: demo.Machine, task_id: str, worktree: Path, number: int, first: bool) -> None:
+        worker = json.loads((worktree / ".asdlc-task").read_text())["worker"]
+        pull = ("--pr", f"https://github.com/acme/api/pull/{number}") if first else ()
+        machine.asdlc("finish", task_id, "--as", worker, *pull, "--notes", "Built; checks recorded above.")
 
     def diff(self, machine: demo.Machine, claimed: dict[str, object]) -> str:
         """The reviewer's view: the branch against the default branch, fetched, never checked out for editing."""
@@ -117,7 +119,7 @@ class CrossMachineReviewTest(unittest.TestCase):
         self.assertEqual(claimed["task"], "TASK-1")
         worktree = Path(str(claimed["worktree"]))
         branch = self.build(ann, "TASK-1", worktree, "def login(user):\n    limit(user)\n    return check(user)\n", "Rate limit login")
-        self.submit(ann, "TASK-1", branch, 1, first=True)
+        self.submit(ann, "TASK-1", worktree, 1, first=True)
         own = ann.json("review-next", "--as", "ann.r1")
         self.assertFalse(own["claimed"])
         self.say(f"1. ann.w1 claims TASK-1, builds it in {worktree.relative_to(self.root)}, records a check, pushes {branch} and sets it In Review "
@@ -144,7 +146,7 @@ class CrossMachineReviewTest(unittest.TestCase):
         self.assertEqual([r["id"] for r in back["changes_requested"]], ["TASK-1"])
         self.assertIn(findings, self.task(ann, "TASK-1"))
         self.build(ann, "TASK-1", worktree, "def login(user):\n    ok = check(user)\n    if not ok:\n        limit(user)\n    return ok\n", "Count failures only")
-        self.submit(ann, "TASK-1", branch, 1, first=False)
+        self.submit(ann, "TASK-1", worktree, 1, first=False)
         self.say("3. ann's `mine` lists TASK-1 under changes_requested. Her worker reads the findings on the task, fixes login.py, records the "
                  "check, pushes the same branch and sets it In Review again without the label.")
 
@@ -166,7 +168,7 @@ class CrossMachineReviewTest(unittest.TestCase):
         second = ann.json("next", "--as", "ann.w2")
         self.assertEqual(second["task"], "TASK-2")
         other = self.build(ann, "TASK-2", Path(str(second["worktree"])), "def login(user):\n    log(user)\n    return check(user)\n", "Log logins")
-        self.submit(ann, "TASK-2", other, 2, first=True)
+        self.submit(ann, "TASK-2", Path(str(second["worktree"])), 2, first=True)
         now = datetime.now(UTC)
         early = ann.asdlc("review-next", "--as", "ann.r1", "--fallback", "--json", "--now", (now + timedelta(minutes=10)).isoformat())
         self.assertFalse(json.loads(early.stdout)["claimed"])

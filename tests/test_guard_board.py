@@ -71,8 +71,6 @@ class BoardStatusTest(unittest.TestCase):
         for command in (
             "backlog task list --plain",
             "backlog task view TASK-1 --plain",
-            'backlog task edit TASK-1 -s "In Progress" -a @agent-1',
-            "backlog task edit TASK-1 -s 'In Review' --notes 'Done with the parser'",
             "asdlc board task edit 1 --append-notes 'set -s Done later'",
             "asdlc release TASK-1 --as agent-1",
             "asdlc next --as agent-1",
@@ -80,6 +78,36 @@ class BoardStatusTest(unittest.TestCase):
             'echo "backlog task edit 1 -s Done"',
             "git commit -m 'backlog task edit -s Done'",
             "grep -rn 'status: Done' backlog/",
+        ):
+            with self.subTest(command=command):
+                self.assertIs(verdict(command), guard.Verdict.ALLOW)
+
+    def test_denies_an_agent_changing_who_holds_a_task_or_where_it_is(self) -> None:
+        """B1: a worker's state changes go through asdlc claim, finish, release and review-done, which check the holder."""
+        for command, says in (
+            ("asdlc board task edit 1 --add-ref task-1-add-login -s 'In Review' --append-notes built", "asdlc finish"),
+            ("backlog task edit TASK-1 -s 'In Review' --notes 'Done with the parser'", "asdlc finish"),
+            ("backlog task edit 1 --status=in-review", "asdlc finish"),
+            ('backlog task edit TASK-1 -s "In Progress" -a @agent-1', "asdlc claim"),
+            ("asdlc board task edit 1 -s 'In Progress' -a @kyle.w2", "asdlc claim"),
+            ("asdlc board task create 'X' --draft -s 'In Progress'", "asdlc claim"),
+            ("asdlc board task edit 1 -a @kyle.w2", "asdlc claim"),
+            ("backlog task edit 1 --assignee @ann.w1", "asdlc claim"),
+            ("asdlc board task archive 1", "person's"),
+            ("backlog task demote 1", "person's"),
+            ("asdlc board task edit 1 --add-label review-passed", "asdlc review-done"),
+            ("asdlc board task edit 1 --remove-label changes-requested", "asdlc finish"),
+        ):
+            with self.subTest(command=command):
+                outcome = guard.decide_command(command, PLAIN, lookup)
+                self.assertIs(outcome.verdict, guard.Verdict.DENY)
+                self.assertIn(says, outcome.reason)
+        for command in (
+            "asdlc board task create 'Child' --draft -p DRAFT-1 -a @kyle",
+            "asdlc board task edit 1 --add-label contract-change --comment 'the field is wrong'",
+            "asdlc board task edit 1 --remove-label contract-change",
+            "asdlc finish 1 --as kyle.w1 --pr https://github.com/acme/api/pull/1 --notes built",
+            "asdlc board task edit 1 --plan '1. do it'",
         ):
             with self.subTest(command=command):
                 self.assertIs(verdict(command), guard.Verdict.ALLOW)
@@ -127,7 +155,7 @@ class BoardStatusTest(unittest.TestCase):
             "asdlc reap --older-than 2h",
             "asdlc mine --as kyle --json",
             "asdlc register",
-            "asdlc record-check TASK-1 -- ./scripts/check",
+            "asdlc record-check TASK-1 --as kyle.w1 -- ./scripts/check",
             "asdlc board task create 'Child' --draft -p DRAFT-1",
             "echo 'asdlc accept DRAFT-1'",
         ):
@@ -135,9 +163,9 @@ class BoardStatusTest(unittest.TestCase):
                 self.assertIs(verdict(command), guard.Verdict.ALLOW)
 
     def test_judges_the_command_a_recorded_check_runs(self) -> None:
-        self.assertIs(verdict("asdlc record-check TASK-1 -- backlog task edit 1 -s Done"), guard.Verdict.DENY)
-        self.assertIs(verdict("asdlc record-check 1 -- sh -c 'asdlc accept DRAFT-1'"), guard.Verdict.DENY)
-        self.assertIs(verdict("asdlc record-check TASK-1 -- git push origin main", CODE), guard.Verdict.DENY)
+        self.assertIs(verdict("asdlc record-check TASK-1 --as kyle.w1 -- backlog task edit 1 -s Done"), guard.Verdict.DENY)
+        self.assertIs(verdict("asdlc record-check 1 --as kyle.w1 -- sh -c 'asdlc accept DRAFT-1'"), guard.Verdict.DENY)
+        self.assertIs(verdict("asdlc record-check TASK-1 --as kyle.w1 -- git push origin main", CODE), guard.Verdict.DENY)
 
     def test_the_reason_points_at_the_person_and_at_release(self) -> None:
         outcome = guard.decide_command("backlog task edit 1 -s Done", PLAIN, lookup)

@@ -45,7 +45,11 @@ from decision_log import Verdict, current_branch, decision, project_dir, record
 HOOK = "guard_board"
 MARKER = ".asdlc-task"
 BOARD_FOLDER = "backlog"
-PERSON_STATUSES = frozendict({"todo": "To Do", "done": "Done"})
+STATUSES = frozendict({"todo": "To Do", "done": "Done", "inprogress": "In Progress", "inreview": "In Review"})
+PERSON_STATUSES = frozenset({"To Do", "Done"})
+REVIEW_LABELS = frozenset({"review-passed", "changes-requested"})
+_LABEL_FLAGS = frozenset({"-l", "--label", "--labels", "--add-label", "--remove-label"})
+_ASSIGNEE_FLAGS = frozenset({"-a", "--assignee", "--assignees"})
 _SEPARATORS = frozenset(";&|()\n`")
 _REDIRECTS = frozenset({">", ">>", "<", "<<", "<<<", ">&", "&>", "<&", ">|", "&>>"})
 _LAUNCHERS = frozenset({"env", "sudo", "command", "exec", "time", "nohup", "nice", "npx", "bunx", "uv", "uvx", "run", "python", "python3"})
@@ -156,7 +160,7 @@ def unwrap(words: Sequence[str]) -> list[str]:
 
 
 def status_set(arguments: Sequence[str]) -> str | None:
-    """The person's status (To Do or Done) a backlog command sets, if any."""
+    """The board status (To Do, In Progress, In Review or Done) a backlog command sets, if any."""
     for index, word in enumerate(arguments):
         value = None
         if word in ("-s", "--status") and index + 1 < len(arguments):
@@ -165,19 +169,61 @@ def status_set(arguments: Sequence[str]) -> str | None:
             value = word.partition("=")[2]
         elif word.startswith("-s") and not word.startswith("--") and len(word) > 2:
             value = word[2:].removeprefix("=")
-        if value is not None and (named := PERSON_STATUSES.get(re.sub(r"[\s_-]", "", value).casefold())):
+        if value is not None and (named := STATUSES.get(re.sub(r"[\s_-]", "", value).casefold())):
             return named
     return None
 
 
+def _flag_values(arguments: Sequence[str], flags: frozenset[str]) -> list[str]:
+    """The values given to any of `flags`, as `-f v`, `--flag v` or `--flag=v`."""
+    found = []
+    for index, word in enumerate(arguments):
+        flag, equals, value = word.partition("=")
+        if flag in flags and equals:
+            found.append(value)
+        elif word in flags and index + 1 < len(arguments):
+            found.append(arguments[index + 1])
+    return found
+
+
+IN_PROGRESS_REFUSAL = (
+    "a task goes In Progress only through a claim, which checks that nobody else holds it: asdlc claim <id> --as <worker>, "
+    "or asdlc next --as <worker>."
+)
+IN_REVIEW_REFUSAL = (
+    "a task goes to review only through asdlc finish <id> --as <worker> --pr <url> --notes ..., which checks that the "
+    "worker still holds it (its claim may have been reaped and taken by someone else) and records its branch."
+)
+ASSIGNEE_REFUSAL = (
+    "who holds a task changes only through asdlc claim, asdlc release, asdlc reap and asdlc review-done, which check the "
+    "holder; reserving accepted work for a person is that person's decision."
+)
+REVIEW_LABEL_REFUSAL = (
+    "the review-passed and changes-requested labels are set only by asdlc review-done (a reviewer's verdict on a review it "
+    "holds) and changes-requested is removed only by asdlc finish (handing the fixed task back to review)."
+)
+
+
 def backlog_refusal(arguments: Sequence[str]) -> str | None:
-    if named := status_set(arguments):
-        return (
-            f"setting a task to {named} is a person's decision: To Do accepts work, and Done closes it "
-            "after someone who didn't do it has reviewed it. Ask the person; to hand back a task you "
-            "claimed, use asdlc release."
-        )
+    match status_set(arguments):
+        case "To Do" | "Done" as named:
+            return (
+                f"setting a task to {named} is a person's decision: To Do accepts work, and Done closes it "
+                "after someone who didn't do it has reviewed it. Ask the person; to hand back a task you "
+                "claimed, use asdlc release."
+            )
+        case "In Progress":
+            return IN_PROGRESS_REFUSAL
+        case "In Review":
+            return IN_REVIEW_REFUSAL
     pairs = set(zip(arguments, arguments[1:]))
+    if ("task", "archive") in pairs or ("task", "demote") in pairs:
+        return "archiving or demoting accepted work is a person's decision: ask the person."
+    if ("task", "edit") in pairs and _flag_values(arguments, _ASSIGNEE_FLAGS):
+        return ASSIGNEE_REFUSAL
+    labels = {label.strip().lower() for value in _flag_values(arguments, _LABEL_FLAGS) for label in value.split(",")}
+    if labels & REVIEW_LABELS:
+        return REVIEW_LABEL_REFUSAL
     if ("draft", "promote") in pairs or ("task", "promote") in pairs:
         return "promoting a draft accepts it as work, which is a person's decision: ask the person to promote it."
     if ("task", "create") in pairs and "--draft" not in arguments:
