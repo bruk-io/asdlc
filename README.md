@@ -58,6 +58,19 @@ The `guard_board` hook refuses, with the reason:
 
 Stale claims are released by hand for now: `asdlc release`, run as the agent that holds the task.
 
+## Tasks repository as a marketplace
+
+The board's repository is also a Claude Code plugin marketplace, so the team's conventions reach every engineer's agents without any setup in the code repositories. `asdlc init-board` adds, and on an existing board adds only what is missing, never overwriting:
+
+- `.claude-plugin/marketplace.json`, listing the `team` plugin (and later one plugin per code repository).
+- `plugins/team/`: the team's testing skill and rules, and the contract a lead writes for a large feature. Its README says where a new team skill or rule goes and how rules are scoped.
+- `asdlc.toml`: how long a claim lives without a heartbeat, and how long a review waits for another machine.
+- `devs/`: each engineer's preferences, `devs/<name>.yaml`.
+
+Each developer installs the team plugin once: `/plugin install team --marketplace <owner>/<tasks repo>`. Its skills then load like any plugin's.
+
+Claude Code doesn't load a plugin's rules, so asdlc's `load_rules` hook does. When an agent reads or edits a file in a code repository that has a board, it injects each team rule (`plugins/team/rules/`) and each of that repository's rules (`plugins/<owner-repo>/rules/`) whose `paths` match the file, once per session and per subagent, and again after compaction, naming the file's layer for a repository rule. Rules come from the local board clone, capped at 10,000 characters per injection. The per-repository plugin's format (layers, rules, skills, verified commands) is [`docs/repo-plugins.md`](docs/repo-plugins.md).
+
 ## Review
 
 Every pull request to this repository is reviewed by Claude in CI, using Anthropic's `code-review` plugin under the rules in [`REVIEW.md`](REVIEW.md), both read from `main`. Findings arrive as inline comments and never approve or block; the cost of each review is in the run's job summary.
