@@ -8,7 +8,9 @@ argument-hint: <code repository path> [task id]
 
 The plugin you make here is read by every agent that later works in this repository: its rules arrive whenever they touch a matching file, and its commands are how they prove their work. A wrong layer map or a command nobody ran misleads all of them, so put down only what the code and the toolchain show you, and keep the plugin small.
 
-The caller gives the code repository's path (`<repo>` below) and usually the task that needed it (`<task>`). `asdlc-plugin` is `${CLAUDE_PLUGIN_ROOT}/scripts/asdlc-plugin`; run it as that path. It does everything deterministic. You supply the judgement.
+The caller gives the code repository (`<repo>` below: its path, or its slug when it is registered on this machine, as `asdlc repos` lists them) and usually the task that needed it (`<task>`). `asdlc-plugin` is `${CLAUDE_PLUGIN_ROOT}/scripts/asdlc-plugin`; run it as that path. It does everything deterministic. You supply the judgement.
+
+Run every command from where your session started, the tasks clone: `asdlc-plugin` takes the repository as an argument, and nothing here needs a `cd`. Read the code repository with the Read tool on absolute paths, and `git -C <repo> ls-files` (or `log`, `grep`) with the repository's path, never a `cd` first: Claude Code asks a person before any line that changes directory and runs git.
 
 ## 1. Open the plugin
 

@@ -281,6 +281,28 @@ class World:
         return done.stdout if done.returncode == 0 else None
 
 
+class RepoArgumentTest(unittest.TestCase):
+    """The first eval run: the orchestrator asked `asdlc-plugin status` for the slug it had, and got "not a git repository"."""
+
+    REGISTERED = {"acme-api": Path("/home/kyle/api"), "acme-web": Path("/home/kyle/web")}
+
+    def test_paths_slugs_and_folders(self) -> None:
+        for raw, folder, expected in (("/home/kyle/api", False, Path("/home/kyle/api")), ("./acme-api", False, Path("acme-api")),
+                                      ("~/src/x", False, Path("~/src/x").expanduser()), ("acme-api", False, Path("/home/kyle/api")),
+                                      ("acme-api", True, Path("/home/kyle/api")), ("shop", True, Path("shop"))):
+            with self.subTest(raw=raw, folder=folder):
+                self.assertEqual(plugin.repo_argument(raw, self.REGISTERED, folder), expected)
+
+    def test_an_unknown_name_is_refused_with_the_registered_slugs(self) -> None:
+        with self.assertRaises(plugin.PluginError) as caught:
+            plugin.repo_argument("acme-ap", self.REGISTERED, False)
+        self.assertIn("acme-ap is neither a folder nor a repository registered on this machine", str(caught.exception))
+        self.assertIn("acme-api, acme-web", str(caught.exception))
+        with self.assertRaises(plugin.PluginError) as caught:
+            plugin.repo_argument("acme-api", {}, False)
+        self.assertIn("none yet", str(caught.exception))
+
+
 class StatusAndScaffoldTest(unittest.TestCase):
     def setUp(self) -> None:
         self.world = World(self)
@@ -289,6 +311,21 @@ class StatusAndScaffoldTest(unittest.TestCase):
         done = _run("status", str(self.world.code), "--json")
         self.assertEqual(done.returncode, 0, done.stderr)
         return json.loads(done.stdout)
+
+    def test_status_by_registered_slug(self) -> None:
+        config = self.world.root / "config"
+        _write(config / "asdlc" / "repos.toml", plugin.asdlc.registry_text([plugin.asdlc.Registered("acme-shop", self.world.code, self.world.board)]))
+        machine = {"XDG_CONFIG_HOME": str(config)}
+        by_slug = _run("status", "acme-shop", "--json", cwd=self.world.board, env=machine)
+        self.assertEqual(by_slug.returncode, 0, by_slug.stderr)
+        self.assertEqual(json.loads(by_slug.stdout), self.status())
+        unknown = _run("status", "acme-shp", "--json", cwd=self.world.board, env=machine)
+        self.assertEqual(unknown.returncode, 1)
+        self.assertIn("acme-shp is neither a folder nor a repository registered on this machine; give its path or a registered slug: acme-shop",
+                      unknown.stderr)
+        scaffolded = _run("scaffold", "acme-shop", cwd=self.world.board, env=machine)
+        self.assertEqual(scaffolded.returncode, 0, scaffolded.stderr)
+        self.assertTrue(self.world.folder.is_dir())
 
     def test_status_before_and_during_onboarding(self) -> None:
         self.assertEqual(self.status() | {"repo": "", "board": ""}, {"repo": "", "slug": "acme-shop", "board": "", "plugin": "plugins/acme-shop",
