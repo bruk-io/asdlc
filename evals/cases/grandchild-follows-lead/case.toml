@@ -1,0 +1,15 @@
+source = "The independent review's second round (plan/pilot.md, Second review round), Important 2: lead-of took the direct parent as the intent, so a grandchild's orchestrator didn't find the real lead."
+kind = "outcome"
+suite = "regression"
+description = "An accepted intent led by ann has a child, and under it a grandchild in acme/api. kyle's orchestrator picks the grandchild: it works under ann's lead rather than claiming a lead of its own, and its worker's plan builds to the contract linked on the intent."
+checks = ["grandchild_claimed_and_planned", "no_second_lead", "plan_follows_the_contract", "nothing_built_yet"]
+
+[run]
+model = "sonnet"
+effort = "medium"
+max_turns = 80
+max_budget_usd = 5.0
+timeout_minutes = 30
+
+[[sessions]]
+prompt = "I'm kyle. Work the board for me: pick up work for my worker. I'm at my desk, so bring me anything that needs me."

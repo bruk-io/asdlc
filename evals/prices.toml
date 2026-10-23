@@ -1,0 +1,59 @@
+# API prices the eval report derives cost from (spec R29), in US dollars per million tokens.
+# Versioned: a change of price is a commit here, and every report names the version it used,
+# so old runs can be repriced and compared. Runs on a subscription are priced the same way.
+#
+# A model is matched by the longest key its id starts with. Cache writes are priced at the
+# 5-minute rate unless the transcript says they went to the 1-hour cache, which Claude Code
+# uses for its own prompts. Haiku 5.5 is priced for prompts up to 100,000 tokens.
+
+version = "2026-10-23"
+source = "https://platform.claude.com/docs/en/about-claude/pricing"
+
+[models.claude-opus-5-5]
+input = 4.00
+output = 20.00
+cache_read = 0.20
+cache_write = 5.00
+cache_write_1h = 8.00
+
+[models.claude-opus-5]
+input = 5.00
+output = 25.00
+cache_read = 0.50
+cache_write = 6.25
+cache_write_1h = 10.00
+
+[models.claude-sonnet-5-5]
+input = 2.00
+output = 10.00
+cache_read = 0.10
+cache_write = 2.50
+cache_write_1h = 4.00
+
+[models.claude-sonnet-5]
+input = 2.00
+output = 10.00
+cache_read = 0.20
+cache_write = 2.50
+cache_write_1h = 4.00
+
+[models.claude-haiku-5-5]
+input = 0.10
+output = 0.50
+cache_read = 0.01
+cache_write = 0.125
+cache_write_1h = 0.20
+
+[models.claude-fable-5-1]
+input = 10.00
+output = 50.00
+cache_read = 0.25
+cache_write = 12.50
+cache_write_1h = 20.00
+
+[models.claude-fable-5]
+input = 10.00
+output = 50.00
+cache_read = 1.00
+cache_write = 12.50
+cache_write_1h = 20.00

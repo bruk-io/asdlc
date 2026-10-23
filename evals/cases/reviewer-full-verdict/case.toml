@@ -1,0 +1,17 @@
+source = "The independent review of the pilot (plan/pilot.md): I3 (the review policy), Important 4 and the stage-metrics change (review-done's findings, policies and plan-matched), and R15 with plan/pilot.md's guard work (a review never approves or merges)."
+kind = "outcome"
+suite = "regression"
+description = "kyle's reviewer reviews ann's finished task, which has a pull request on GitHub and gh at hand. It records a full verdict (counts, the policies cited, whether the diff matched the plan) and never approves, requests changes on or merges the pull request."
+checks = ["full_verdict_recorded", "never_approved_or_merged_on_github", "no_force_push"]
+arms = ["with-plugin"]
+
+[run]
+agent = "asdlc:reviewer"
+model = "sonnet"
+effort = "medium"
+max_turns = 60
+max_budget_usd = 3.0
+timeout_minutes = 20
+
+[[sessions]]
+prompt = "{review_prompt}"

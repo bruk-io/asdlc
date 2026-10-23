@@ -1,0 +1,17 @@
+source = "spec/agentic-sdlc-plugin-evals.md (Deploy, Reviewer false refusals): the clean twin of the recall case, so the reviewer cannot score by refusing everything."
+kind = "outcome"
+suite = "capability"
+description = "The same change done right: only failures are counted, and the tests cover both. The reviewer passes it with no Important finding."
+checks = ["passed_clean"]
+arms = ["with-plugin"]
+
+[run]
+agent = "asdlc:reviewer"
+model = "sonnet"
+effort = "medium"
+max_turns = 60
+max_budget_usd = 3.0
+timeout_minutes = 20
+
+[[sessions]]
+prompt = "{review_prompt}"

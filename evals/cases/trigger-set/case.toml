@@ -1,0 +1,93 @@
+source = "The owner (the approved evals plan, case 9), and spec/agentic-sdlc-plugin-evals.md: a should-stay-quiet case for each skill. Requests written as an engineer in their tasks clone would put them."
+kind = "outcome"
+suite = "capability"
+description = "Twenty realistic requests, each in a fresh session in kyle's tasks clone, read only for which skill the first turn loads. Ten should load capture-intent or orchestrate and ten neither; the checks count false positives and false negatives per skill."
+checks = ["capture_intent_triggers", "orchestrate_triggers"]
+arms = ["with-plugin"]
+
+[run]
+model = "sonnet"
+effort = "low"
+max_turns = 1
+max_budget_usd = 0.5
+timeout_minutes = 5
+
+[[items]]
+prompt = "Our support team can't tell which customers got locked out after too many failed logins. They want to see that and unlock people themselves. Can you write this up so the team can pick it up?"
+expect = "capture-intent"
+
+[[items]]
+prompt = "Put this on the board as new work: mobile users get logged out every hour and have to log in again. Product wants sessions to last a week without making accounts less safe."
+expect = "capture-intent"
+
+[[items]]
+prompt = "We keep getting paged at night because the login service runs out of database connections. I want that to stop. Capture it for the team."
+expect = "capture-intent"
+
+[[items]]
+prompt = "I'd like to write down a new piece of work: partners need a way to check whether an account is locked. Nobody has decided how yet."
+expect = "capture-intent"
+
+[[items]]
+prompt = "The login error rate tripled after Tuesday's deploy and nobody owns it. Turn this into work on the board."
+expect = "capture-intent"
+
+[[items]]
+prompt = "Work the board."
+expect = "orchestrate"
+
+[[items]]
+prompt = "Pick up work for my workers and keep going on the team's tasks."
+expect = "orchestrate"
+
+[[items]]
+prompt = "Start my day: claim what's reserved for me and get my workers going."
+expect = "orchestrate"
+
+[[items]]
+prompt = "Keep going on the board, and review anything that's waiting for me first."
+expect = "orchestrate"
+
+[[items]]
+prompt = "Run my workers on whatever's next until it's in review."
+expect = "orchestrate"
+
+[[items]]
+prompt = "What does stale_after in asdlc.toml mean?"
+expect = "none"
+
+[[items]]
+prompt = "Show me TASK-1."
+expect = "none"
+
+[[items]]
+prompt = "How many tasks are in progress right now?"
+expect = "none"
+
+[[items]]
+prompt = "Explain what asdlc reap does, in two sentences."
+expect = "none"
+
+[[items]]
+prompt = "Which code repositories are registered on this machine?"
+expect = "none"
+
+[[items]]
+prompt = "Is there a test for a wrong password in acme/api?"
+expect = "none"
+
+[[items]]
+prompt = "What's the difference between a size-2 and a size-3 task on our board?"
+expect = "none"
+
+[[items]]
+prompt = "Add __pycache__/ to this repository's .gitignore."
+expect = "none"
+
+[[items]]
+prompt = "Set workers to 3 in devs/kyle.yaml."
+expect = "none"
+
+[[items]]
+prompt = "Who is assigned to TASK-1, if anyone?"
+expect = "none"
