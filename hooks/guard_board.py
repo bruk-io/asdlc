@@ -52,8 +52,10 @@ _LABEL_FLAGS = frozenset({"-l", "--label", "--labels", "--add-label", "--remove-
 _ASSIGNEE_FLAGS = frozenset({"-a", "--assignee", "--assignees"})
 _SEPARATORS = frozenset(";&|()\n`")
 _REDIRECTS = frozenset({">", ">>", "<", "<<", "<<<", ">&", "&>", "<&", ">|", "&>>"})
-_LAUNCHERS = frozenset({"env", "sudo", "command", "exec", "time", "nohup", "nice", "npx", "bunx", "uv", "uvx", "run", "python", "python3"})
-_LAUNCHER_VALUES = frozenset({"--with", "--python", "-p", "--project", "--directory", "--package", "-u", "-n"})
+_LAUNCHERS = frozenset({"env", "sudo", "command", "exec", "time", "nohup", "nice", "npx", "bunx", "uv", "uvx", "run", "python", "python3", "xargs"})
+_LAUNCHER_VALUES = frozenset({"--with", "--python", "-p", "--project", "--directory", "--package", "-u", "-n",
+                              "-I", "-P", "-L", "-d", "-E", "-s", "-a", "--max-args", "--max-procs", "--delimiter", "--arg-file"})
+_KEYWORDS = frozenset({"if", "then", "else", "elif", "fi", "for", "select", "while", "until", "do", "done", "case", "esac", "{", "}", "!"})
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
 _BACKLOG = frozenset({"backlog", "backlog.md"})
 _PUSH_VALUES = frozenset({"-o", "--push-option", "--receive-pack", "--exec", "--repo"})
@@ -170,10 +172,24 @@ def simple_commands(command: str) -> list[list[str]]:
 
 
 def _without_assignments(words: Sequence[str]) -> list[str]:
+    """The words without leading assignments and shell keywords (`do`, `then`, `{`, `!` ...), so the
+    command inside a loop or a conditional is judged like any other."""
     index = 0
-    while index < len(words) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[index]):
+    while index < len(words) and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[index]) or words[index] in _KEYWORDS):
         index += 1
     return list(words[index:])
+
+
+def directory_of(base: Path | None, raw: str) -> Path | None:
+    """Where `cd <raw>` or `git -C <raw>` leads from `base`, with `~` expanded; None when it can't be
+    told, because the path holds a variable or a command substitution."""
+    if "$" in raw or "`" in raw:
+        return None
+    if raw == "~" or raw.startswith("~/"):
+        return Path.home() / raw[2:]
+    if Path(raw).is_absolute():
+        return Path(raw)
+    return base / raw if base is not None else None
 
 
 def unwrap(words: Sequence[str]) -> list[str]:
@@ -307,13 +323,13 @@ def push_destinations(arguments: Sequence[str], branch: str) -> frozenset[str]:
     return frozenset(destinations)
 
 
-def _git_call(words: Sequence[str], directory: Path) -> tuple[str, list[str], Path]:
-    """A git command's subcommand, its arguments, and the directory it runs in."""
+def _git_call(words: Sequence[str], directory: Path | None) -> tuple[str, list[str], Path | None]:
+    """A git command's subcommand, its arguments, and the directory it runs in (None when it can't be told)."""
     index = 1
     while index < len(words) and words[index].startswith("-"):
         word = words[index]
         if word == "-C" and index + 1 < len(words):
-            directory = directory / words[index + 1]
+            directory = directory_of(directory, words[index + 1])
             index += 2
         elif word in _GIT_VALUES:
             index += 2
@@ -397,7 +413,17 @@ def gh_outcome(arguments: Sequence[str]) -> Outcome | None:
     return None
 
 
-def decide_command(command: str, cwd: Path, lookup: Lookup) -> Outcome:
+def _shell_script(words: Sequence[str]) -> str | None:
+    """The script `sh -c`, `bash -lc` or `sh -ec` runs, or None."""
+    for index, word in enumerate(words[1:-1], start=1):
+        if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", word):
+            return words[index + 1]
+    return None
+
+
+def decide_command(command: str, cwd: Path | None, lookup: Lookup) -> Outcome:
+    """The verdict on a shell command: the first refusal among its simple commands, else the first
+    thing it couldn't tell (allowed, and said), else allowed."""
     try:
         commands = simple_commands(command)
     except ValueError as error:
@@ -405,41 +431,46 @@ def decide_command(command: str, cwd: Path, lookup: Lookup) -> Outcome:
             return Outcome(Verdict.ERROR, f"could not parse a command that may touch the board, push, approve or merge ({error}); allowed")
         return ALLOW
     directory = cwd
+    unsure: Outcome | None = None
     for words in commands:
         words = _without_assignments(words)
         if words[:1] == ["cd"]:
-            directory = directory / (words[1] if len(words) > 1 else str(Path.home()))
+            directory = directory_of(directory, words[1] if len(words) > 1 else "~")
             continue
-        words = unwrap(words)
-        if not words:
-            continue
-        name = PurePath(words[0]).name
-        if name in _SHELLS and "-c" in words[1:-1]:
-            inner = decide_command(words[words.index("-c", 1) + 1], directory, lookup)
-            if inner.verdict is not Verdict.ALLOW:
-                return inner
-        elif name in _BACKLOG:
-            if reason := backlog_refusal(words[1:]):
-                return Outcome(Verdict.DENY, reason)
-        elif name == "asdlc":
-            subcommand, rest = _asdlc_subcommand(words[1:])
-            if subcommand == "board" and (reason := backlog_refusal(rest)):
-                return Outcome(Verdict.DENY, reason)
-            if subcommand == "accept":
-                return Outcome(Verdict.DENY, ACCEPT_REFUSAL)
-            if subcommand == "approve":
-                return Outcome(Verdict.DENY, APPROVE_REFUSAL)
-            if subcommand == "record-check" and "--" in rest:
-                inner = decide_command(shlex.join(rest[rest.index("--") + 1:]), directory, lookup)
-                if inner.verdict is not Verdict.ALLOW:
-                    return inner
-        elif name == "gh":
-            if (outcome := gh_outcome(words[1:])) is not None:
-                return outcome
-        elif name == "git":
-            subcommand, rest, where = _git_call(words, directory)
-            if subcommand == "push" and (outcome := _decide_push(rest, where, lookup)).verdict is not Verdict.ALLOW:
-                return outcome
+        outcome = _decide_simple(unwrap(words), directory, lookup)
+        if outcome.verdict is Verdict.DENY:
+            return outcome
+        if outcome.verdict is Verdict.ERROR and unsure is None:
+            unsure = outcome
+    return unsure or ALLOW
+
+
+def _decide_simple(words: Sequence[str], directory: Path | None, lookup: Lookup) -> Outcome:
+    if not words:
+        return ALLOW
+    name = PurePath(words[0]).name
+    if name in _SHELLS and (script := _shell_script(words)) is not None:
+        return decide_command(script, directory, lookup)
+    if name in _BACKLOG:
+        if reason := backlog_refusal(words[1:]):
+            return Outcome(Verdict.DENY, reason)
+    elif name == "asdlc":
+        subcommand, rest = _asdlc_subcommand(words[1:])
+        if subcommand == "board" and (reason := backlog_refusal(rest)):
+            return Outcome(Verdict.DENY, reason)
+        if subcommand == "accept":
+            return Outcome(Verdict.DENY, ACCEPT_REFUSAL)
+        if subcommand == "approve":
+            return Outcome(Verdict.DENY, APPROVE_REFUSAL)
+        if subcommand == "record-check" and "--" in rest:
+            return decide_command(shlex.join(rest[rest.index("--") + 1:]), directory, lookup)
+    elif name == "gh":
+        if (outcome := gh_outcome(words[1:])) is not None:
+            return outcome
+    elif name == "git":
+        subcommand, rest, where = _git_call(words, directory)
+        if subcommand == "push":
+            return _decide_push(rest, where, lookup)
     return ALLOW
 
 
@@ -461,7 +492,10 @@ FORCE_REFUSAL = (
 )
 
 
-def _decide_push(arguments: Sequence[str], directory: Path, lookup: Lookup) -> Outcome:
+def _decide_push(arguments: Sequence[str], directory: Path | None, lookup: Lookup) -> Outcome:
+    if directory is None:
+        return Outcome(Verdict.ERROR, "can't tell which repository this git push runs in (its cd or -C names a variable), so it may push to a "
+                                      "default branch or force a task branch; allowed")
     repo = lookup(directory)
     if repo is None or repo.is_board or not repo.takes_board_work:
         return ALLOW

@@ -2245,7 +2245,8 @@ def _claim_on_board(board: Board, task_id: str, worker: str, registry: Mapping[s
         tasks = _tasks(board)
         task = _find(tasks, task_id)
         if task is not None and race_result(task, worker) is Race.WON:
-            return None, Claimed(task)
+            raise AsdlcError(f"{task_id} is already claimed by @{worker}: another session may be using that name. Give each session's "
+                             f"workers names of their own; if this session claimed it, carry on in its worktree")
         refusal = claim_refusal(task, task_id, tasks, worker)
         if task is None or refusal:
             if task is not None and task.assignees:
@@ -3447,11 +3448,16 @@ def init_board(directory: Path) -> None:
             raise AsdlcError(f"backlog init failed in {directory}: {(done.stderr or done.stdout).strip()}")
     config.write_text(board_config(config.read_text(), directory.name))
     added = _add_scaffolding(directory)
+    ignore, ignored = directory / ".gitignore", []
+    if ".gitignore" not in added and (updated := with_exclude(ignore.read_text() if ignore.exists() else "", ".asdlc/")) is not None:
+        ignore.write_text(updated)  # the hooks' decision log, written wherever a session runs
+        ignored = [".gitignore"]
+        _say("added .asdlc/, the hooks' decision log, to .gitignore")
     fresh = _board_git(board, "rev-parse", "--verify", "--quiet", "HEAD", check=False).returncode != 0
-    _board_git(board, "add", "--", "backlog", *added)
-    if _board_git(board, "diff", "--cached", "--quiet", "--", "backlog", *added, check=False).returncode != 0:
+    _board_git(board, "add", "--", "backlog", *added, *ignored)
+    if _board_git(board, "diff", "--cached", "--quiet", "--", "backlog", *added, *ignored, check=False).returncode != 0:
         message = "Initialise the asdlc board" if fresh else "Update the asdlc board's config and add missing scaffolding"
-        _board_git(board, "commit", "--quiet", "--no-verify", "-m", message, "--", "backlog", *added)
+        _board_git(board, "commit", "--quiet", "--no-verify", "-m", message, "--", "backlog", *added, *ignored)
     if added:
         _say(f"added {len(added)} scaffolding file(s), leaving existing ones as they were: {', '.join(added)}")
     print(f"board ready at {directory}. Add its remote and push it: git -C {directory} remote add origin <url> && git -C {directory} push -u origin {BOARD_BRANCH}")

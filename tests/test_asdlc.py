@@ -2043,3 +2043,16 @@ class ReviewPolicyTest(unittest.TestCase):
         claimed = json.loads(team.ok("review-next", "--as", "kyle.r1", "--json").stdout)
         self.assertEqual(claimed["policies"], [str(team.board / "plugins" / "team" / "review.md"), str(team.board / "plugins" / "acme-api" / "review.md")])
         self.assertNotIn("REVIEW.md", claimed["route"])
+
+
+@needs_backlog
+class SameWorkerNameTest(unittest.TestCase):
+    """M4: a claim for a task already held under the same worker name is refused, since another session may be using that name."""
+
+    def test_refused(self) -> None:
+        team = Team(self, [_sized("One", "size-1", "--project", "acme-api")])
+        team.ok("claim", "1", "--as", "kyle.w1")
+        again = team.run("claim", "1", "--as", "kyle.w1")
+        self.assertEqual(again.returncode, 1)
+        self.assertIn("already claimed by @kyle.w1", again.stderr)
+        self.assertIn("another session may be using that name", again.stderr)

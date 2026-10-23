@@ -307,6 +307,43 @@ class PullRequestTest(unittest.TestCase):
                          (["12", "-r"], [("-a", ""), ("-b", "body"), ("--repo", "a/b"), ("--x", "1")]))
 
 
+class ShellFormsTest(unittest.TestCase):
+    """M2: the shell forms the review walked around the guard with."""
+
+    def setUp(self) -> None:
+        REPOS[Path.home() / "api"] = _repo(Path.home() / "api", takes_board_work=True)
+        self.addCleanup(REPOS.pop, Path.home() / "api")
+
+    def test_denied_through_home_dirs_loops_shells_and_xargs(self) -> None:
+        for command in (
+            "cd ~/api && git push origin main",
+            "git -C ~/api push origin HEAD:main",
+            "git -C ~/api/ push origin main",
+            "for i in 1; do gh pr merge 3; done",
+            "if true; then gh pr merge 3; fi",
+            "if true; then echo; else gh pr merge 3; fi",
+            "while true; do backlog task edit 1 -s Done; done",
+            "until false; do asdlc accept DRAFT-1; done",
+            "bash -lc 'gh pr merge 3'",
+            "sh -ec 'asdlc approve 3'",
+            "xargs gh pr merge < prs.txt",
+            "xargs -n1 -I{} gh pr merge {} < prs.txt",
+            "{ gh pr merge 3; }",
+            "! gh pr merge 3",
+        ):
+            with self.subTest(command=command):
+                self.assertIs(verdict(command), guard.Verdict.DENY)
+
+    def test_an_unexpanded_directory_is_allowed_and_said(self) -> None:
+        for command in ("WT=/work/app; git -C $WT push origin HEAD:main", 'cd "$WT" && git push origin main', "git -C ${REPO} push origin main"):
+            with self.subTest(command=command):
+                outcome = guard.decide_command(command, PLAIN, lookup)
+                self.assertIs(outcome.verdict, guard.Verdict.ERROR)
+                self.assertIn("can't tell", outcome.reason)
+        self.assertIs(verdict("cd $WT && npm test"), guard.Verdict.ALLOW)
+        self.assertIs(verdict("for f in *.py; do echo $f; done"), guard.Verdict.ALLOW)
+
+
 class DecideFileTest(unittest.TestCase):
     def test_board_files(self) -> None:
         board = REPOS[BOARD]

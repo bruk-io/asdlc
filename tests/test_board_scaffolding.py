@@ -27,6 +27,7 @@ ISOLATED = {
 }
 SCAFFOLDING = (
     ".claude-plugin/marketplace.json",
+    ".gitignore",
     "asdlc.toml",
     "devs/README.md",
     "devs/example.yaml",
@@ -203,6 +204,19 @@ class InitBoardScaffoldingTest(unittest.TestCase):
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertNotIn("added", again.stderr)
         self.assertEqual(_git(self.board, "rev-parse", "HEAD"), head)
+
+    def test_the_board_ignores_the_hook_decision_log(self) -> None:
+        """M9: the hooks' decision log, .asdlc/, never shows up as a change in the tasks repository."""
+        self.assertEqual(_init_board(self.board).returncode, 0)
+        self.assertIn(".asdlc/", (self.board / ".gitignore").read_text().splitlines())
+        (self.board / ".gitignore").write_text("node_modules/\n")
+        _git(self.board, "-c", "commit.gpgsign=false", "commit", "-qam", "Our own ignores")
+        done = _init_board(self.board)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((self.board / ".gitignore").read_text(), "node_modules/\n.asdlc/\n")
+        (self.board / ".asdlc").mkdir()
+        (self.board / ".asdlc" / "hooks.jsonl").write_text("{}\n")
+        self.assertEqual(_git(self.board, "status", "--porcelain"), "")
 
     @unittest.skipIf(VALIDATOR is None, "claude is not installed, so the JSON shape tests above stand in for plugin validate")
     def test_the_marketplace_and_team_plugin_validate(self) -> None:
