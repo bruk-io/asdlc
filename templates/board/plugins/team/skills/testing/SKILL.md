@@ -70,12 +70,12 @@ A check or test that looks wrong is a finding on the task, not something to chan
 
 ## Recording the evidence
 
-Before saying a task is done, run the change's tier and put its result on the task, so the reviewer judges the tool's output rather than an account of it:
+Before saying a task is done, run the change's tier through `asdlc record-check`, from the task's worktree, so the reviewer judges the tool's output rather than an account of it:
 
 ```sh
-asdlc board task edit <task-id> --append-notes "$(printf 'Check: %s\nExit: %s\n\n%s' "<command>" "<exit code>" "<the last 40 lines of its output>")"
+asdlc record-check <task-id> --as <worker> -- <command>
 ```
 
-Record the exact command, its exit code and the tail of its output. For a bug, also record the failing run of the reproducing test from step 1, before the fix.
+It runs the command, exits with its code, and appends to the task the command, its exit code, the worktree, branch and commit it ran on, and the tail of its output; only the worker holding the task can record on it. Checks can take minutes: give the Bash call a long timeout (up to 600000 ms) or run it in the background and wait for it. For a bug, also record the failing run of the reproducing test from step 1, before the fix.
 
 Done is measured against the task's acceptance criteria, written as things a check can show ("every test in `test_status.py` passes", "the lint command exits 0"). Whether the task closes is decided by its reviewer, not here.

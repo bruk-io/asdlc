@@ -48,3 +48,19 @@ The team pilot: several engineers, each with one orchestrator session and its wo
 - `asdlc stats`: claims, review times, round trips, same-machine reviews, lost races, onboardings and skipped plan approvals, from the board's history and a per-machine event log of claim attempts.
 - `docs/guide.md` for developers joining the pilot.
 - This repository's own loop is lighter: each change carries a plan, approved in the session before building, in the same pull request.
+
+### Fixes from the independent review (this release)
+
+An independent review of the combined pilot ran each claim below as an experiment; each fix has a regression test that reproduces it.
+
+- A worker's state changes go through commands that check it still holds the task: `asdlc finish <id> --as <worker> [--pr <url>] --notes ...` hands a task to review (and back, after changes), and `asdlc record-check <id> --as <worker> -- <command>` runs only in the task's worktree and records the worktree, branch and commit. The guard refuses agents setting In Progress or In Review, changing assignees, archiving or demoting tasks, or touching the review labels through `asdlc board` or `backlog`, so a reaped worker can't finish a task someone else now holds.
+- A claim records the task's branch (`asdlc_branch`); every later claim resumes it, from `origin/<branch>` once it was pushed. A reaped task that a review sent back stays reserved for its author's engineer. Workers never force-push, and the guard refuses force pushes to code repositories.
+- An interrupted asdlc command drops its unpushed board change (at once on Ctrl-C or SIGTERM, on the next command after a kill) and never pushes it later; commits asdlc didn't make are refused, not pushed. Every board commit asdlc makes carries an `Asdlc-Transaction` trailer. The lock wait is 45 seconds.
+- `asdlc approve <id>...`, a person's command the guard refuses from agents, records plan approval; `record-check` and `finish` refuse size 2 and up without it.
+- `asdlc accept` promotes the whole draft subtree, at any depth, comments the old and new ids on the intent and marks each task with `asdlc_accepted_from`; heartbeats, releases and `lead-of` find a task by its old draft id, and `lead` refuses an old draft id unless `--new`.
+- A claim is its first heartbeat; heartbeat on a task that left In Progress is a quiet no-op. The orchestrator heartbeats what its agents are working on at the top of every round, never from a detached loop, and adopts its engineer's claims on start.
+- With `review: true`, `asdlc next` leaves a slot for a waiting review, and the orchestrator reviews before it picks; `mine` reports the reviews waiting.
+- Reviewers judge a team's code by the team's policy, `plugins/team/review.md` in the tasks repository (plus a repository plugin's own `review.md`), named in the review claim's `policies`; never by asdlc's own `REVIEW.md`.
+- The guard refuses writes through Backlog.md's MCP tools; `asdlc doctor` warns when one is configured, and checks the Claude Code allow rules and worktree folders background workers need. The guide has the settings.
+- The guard reads `~`, `git -C`, loops and conditionals, `bash -lc` and `xargs`; a claim under a name already holding the task is refused; `init-board` ignores `.asdlc/` in the tasks repository.
+- Re-run `asdlc init-board` on an existing tasks repository to add `plugins/team/review.md` and the `.gitignore` line. It never overwrites, so a board made earlier keeps its old `plugins/team/skills/testing/SKILL.md`, whose evidence step now uses `asdlc record-check`: update it by hand.

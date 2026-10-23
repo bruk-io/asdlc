@@ -7,7 +7,7 @@ description: Lead a large piece of work - an intent with children across reposit
 
 An intent with children has exactly one lead: the orchestrator holding the atomic claim from `asdlc lead <intent> --as <engineer>.lead`. The lead owns the vision and the breakdown, the contracts between layers and repositories, and their consistency, and escalates to its engineer. Every other orchestrator working on a child reads the lead's documents and reports through the board.
 
-Keep everything on the board. Your claim can go stale and another orchestrator can take over; whatever is only in this conversation is lost to them. Heartbeat the lead while you hold it (`asdlc heartbeat <intent> --as <engineer>.lead`), and give it up with `asdlc release <intent> --as <engineer>.lead` if your engineer stops the work.
+Keep everything on the board. Your claim can go stale and another orchestrator can take over; whatever is only in this conversation is lost to them. The orchestrator heartbeats the lead at the top of each round (`asdlc heartbeat <intent> --as <engineer>.lead`, orchestrate step 2), reading the intent's id from `asdlc mine --as <engineer> --json` each time rather than remembering it: when the person accepts the intent its id changes from `DRAFT-<n>` to `TASK-<n>`, and Backlog gives the old draft id to the next new draft. Give the lead up with `asdlc release <intent> --as <engineer>.lead` if your engineer stops the work.
 
 You may run your own helper subagents for research or drafting. They follow the same rules.
 
@@ -45,7 +45,7 @@ asdlc board task create "<title>" --draft -p <intent> --project <repo-slug> -l s
 - `-a @<engineer>` reserves a child for that engineer's workers, when the engineer asked for it or only they can do it.
 - Drafts under a draft intent are allowed: asdlc records the draft parent itself.
 
-Then ask the person to accept the work: tell your engineer the intent, the spec and contract documents, and the children with their repositories, sizes and dependencies, and ask them to run `asdlc accept <intent>` themselves. It promotes the intent and every draft child in one board commit. You can't run it; the board guard refuses agents.
+Then ask the person to accept the work: tell your engineer the intent, the spec and contract documents, and the children with their repositories, sizes and dependencies, and ask them to run `asdlc accept <intent>` themselves. It promotes the intent and every draft under it, at any depth, in one board commit, and comments the new ids on the intent (`DRAFT-1 -> TASK-4`, and so on); each promoted task keeps its old draft id as `asdlc_accepted_from`. You can't run it; the board guard refuses agents. From then on use the new ids: `asdlc mine` lists your lead under its new id with the draft id it had.
 
 ## 4. Contract change requests
 
@@ -59,7 +59,7 @@ Look for them each round: `asdlc board task list -p <intent> -l contract-change 
 
 ## 5. Plans against the contract
 
-Before any engineer approves a child's plan, check it against the spec and contracts: the endpoints, events and names it will build match the contract, it builds only its own part, and its proof covers its acceptance criteria. Record the result on the child:
+Before any engineer approves a child's plan (with `asdlc approve`, in their own terminal), check it against the spec and contracts: the endpoints, events and names it will build match the contract, it builds only its own part, and its proof covers its acceptance criteria. Record the result on the child:
 
 ```sh
 asdlc board task edit <task> --append-notes "Plan checked against <doc-id> by @<engineer>.lead: <ok, or what must change>"

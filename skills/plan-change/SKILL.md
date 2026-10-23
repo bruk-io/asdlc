@@ -45,7 +45,7 @@ A `size-1` task is built by a small model that follows steps, not intent, and it
 
 Before handing it over, ask what could break, which step carries the most risk, and which alternatives were rejected and why. Check it against the contract: names, endpoints and events as the contract has them. Refine it until someone who never saw this conversation could build the change from the task alone.
 
-Then stop. For a task of size 2 or more, the engineer approves the plan in their orchestrator's batch, and the approval is recorded in the task's notes before building starts.
+Then stop. For a task of size 2 or more, the engineer reads the plan in their orchestrator's batch and approves it with `asdlc approve <task>` in their own terminal, which records the approval on the task; building starts only after that, and `asdlc record-check` and `asdlc finish` refuse until it is there.
 
 ## When the work drifts
 

@@ -15,8 +15,11 @@ Code repositories carry no agent setup. What an agent needs to know about one re
       commands.toml
       rules/*.md                      optional
       skills/<name>/SKILL.md          optional
+      review.md                       optional: review rules of this repository's own, added to the team's
       README.md                       optional: what this plugin knows about the repository
 ```
+
+`review.md`, when there is one, adds to the team's review policy (`plugins/team/review.md`): `asdlc review-next` names both in its `policies`, the team's first, and the reviewer applies both. It never loosens the team's.
 
 `<repo-slug>` is `owner-repo` from the code repository's `origin` remote, lowercase, with anything other than letters and digits turned into hyphens: `git@github.com:Acme/Web-App.git` and `https://github.com/acme/web-app` are both `acme-web-app`. The host and any group above the owner are dropped, so two repositories whose last two path parts are the same share a slug; rename one plugin by hand if that ever happens. `scripts/repo_slug.py` (`repo_slug(url)`, `slug_of(repo_path)`) is the one implementation; everything in asdlc that names a repository uses it. The same slug is the Backlog `project` of every task in that repository.
 

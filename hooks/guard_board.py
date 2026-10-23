@@ -7,26 +7,34 @@ Denied, each with the reason and the way that works instead:
 
 - Editing a file in a board's `backlog/` folder by hand. The board changes through
   `asdlc board`, so each change is committed and pushed where every agent sees it.
-- Setting a task to To Do or Done, promoting a draft, or creating a task without
-  `--draft` (it would start as accepted To Do work), with `backlog` or `asdlc board`, and
-  running `asdlc accept`, which promotes an intent and its draft children. Accepting work
-  and closing it are a person's decisions. `asdlc release` and `asdlc reap`, the tool's own
-  ways of handing a claimed task back, are allowed. The command `asdlc record-check` runs is
-  judged like any other.
+- Setting a task to To Do or Done, promoting a draft, archiving or demoting a task, or
+  creating a task without `--draft` (it would start as accepted To Do work), with `backlog`
+  or `asdlc board`, and running `asdlc accept` or `asdlc approve`. Accepting work, approving
+  plans and closing work are a person's decisions. `asdlc release` and `asdlc reap`, the
+  tool's own ways of handing a claimed task back, are allowed.
+- Setting a task In Progress or In Review, changing a task's assignees, or adding or
+  removing the review-passed or changes-requested labels, with `backlog` or `asdlc board`.
+  Claims, `asdlc finish`, `asdlc release` and `asdlc review-done` do those, checking who
+  holds the task, so a worker whose claim was reaped can't change someone else's task.
+- Writes through Backlog.md's MCP tools; their reads are allowed. They change the board's
+  files without committing or pushing.
 - Editing a file in a code repository that takes its work from a board (`git config
   asdlc.board` is set) outside a claimed task's worktree, the one with a `.asdlc-task`
   marker. Work starts with a claim, so no two agents change the same thing.
-- `git push` to the default branch of such a code repository. Changes reach it through
-  review. Pushes to the board itself are how the board works, so they are allowed.
+- `git push` to the default branch of such a code repository, and any force push there.
+  Changes reach the default branch through review, and a task branch under review is never
+  rewritten. Pushes to the board itself are how the board works, so they are allowed.
 - Approving, requesting changes on or merging a pull request: `gh pr review --approve` or
   `--request-changes` (`-a`, `-r`), `gh pr merge`, and the same through `gh api` (a pull
   request's `/merge`, a review with event APPROVE or REQUEST_CHANGES, or the GraphQL
   mutations that do either). Approving and merging are a person's; a review comments.
 
-Shell commands are parsed with shlex, through `&&`, `;`, `|`, subshells, `cd`, env
-assignments and `sh -c`. A shell can always do something this doesn't recognise, so it
-is a guardrail, not a wall. When the guard can't tell, it allows, logs an error and says
-so. Every decision is logged.
+Shell commands are parsed with shlex, through `&&`, `;`, `|`, subshells, loops and
+conditionals, `cd` and `git -C` (with `~` expanded), env assignments, `xargs`, and
+`sh -c`/`bash -lc`. The command `asdlc record-check` runs is judged like any other. A
+shell can always do something this doesn't recognise, so it is a guardrail, not a wall.
+When the guard can't tell (a `cd` to a variable, a request body it can't see), it allows,
+logs an error and says so. Every decision is logged.
 """
 
 import json

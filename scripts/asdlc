@@ -21,13 +21,15 @@ Usage:
   asdlc [--board <path>] next --as <worker> [--json]
   asdlc [--board <path>] release <id> --as <worker>
   asdlc [--board <path>] route <id>
-  asdlc [--board <path>] lead <intent-id> --as <worker> [--json]
+  asdlc [--board <path>] lead <intent-id> --as <worker> [--new] [--json]
   asdlc [--board <path>] lead-of <id> [--json]
   asdlc [--board <path>] heartbeat <id> --as <worker>
   asdlc [--board <path>] reap [--older-than 2h] [--json]
   asdlc [--board <path>] accept <intent-id> [--json]         (a person's command)
+  asdlc [--board <path>] approve <id>...                     (a person's command)
   asdlc [--board <path>] mine --as <engineer> [--json]
-  asdlc [--board <path>] record-check <id> -- <command...>
+  asdlc [--board <path>] record-check <id> --as <worker> -- <command...>   (in the task's worktree)
+  asdlc [--board <path>] finish <id> --as <worker> [--branch <b>] [--pr <url>] --notes <text> [--json]
   asdlc [--board <path>] review-next --as <reviewer> [--fallback] [--json]
   asdlc [--board <path>] review-done <id> --as <reviewer> --verdict clean|changes --notes <text> [--json]
   asdlc [--board <path>] doctor [--json]
@@ -1026,7 +1028,8 @@ def mine_report(items: Sequence[Task], engineer: str, prefs: Prefs, waiting: Seq
 
     held = [
         row(t, workers=[w.removeprefix("@") for w in workers(t.assignees) if owner_of(w) == engineer],
-            changes_requested=CHANGES_REQUESTED in t.labels and is_status(t, IN_PROGRESS))
+            changes_requested=CHANGES_REQUESTED in t.labels and is_status(t, IN_PROGRESS), branch=t.branch or None,
+            size=next((label for label in t.labels if label.startswith("size-")), None), plan_approved_by=t.plan_approved_by or None)
         for t in items if any(owner_of(w) == engineer for w in workers(t.assignees)) and not is_status(t, DONE)
     ]
     reviews = review_claims(items, engineer)
@@ -2119,7 +2122,9 @@ def mine(board: Board, engineer: str, as_json: bool) -> int:
     waiting = _waiting_reviews(board, origin, [t for t in items if not is_draft(t)], engineer, datetime.now(UTC)) if prefs.review else ()
     report = mine_report(items, engineer, prefs, waiting)
     lines = [f"{engineer}: {report['active']} of {report['workers_cap']} workers busy building, {report['reviewing']} reviewing (the cap counts both)"]
-    lines += [f"  {r['id']}\t{r['status']}{' (changes requested)' if r['changes_requested'] else ''}\t@{', @'.join(r['workers'])}\t{r['project'] or '-'}\t{r['title']}" for r in report["tasks"]]
+    lines += [f"  {r['id']}\t{r['status']}{' (changes requested)' if r['changes_requested'] else ''}"
+              f"{' (plan approved by @' + r['plan_approved_by'] + ')' if r['plan_approved_by'] else ''}\t@{', @'.join(r['workers'])}\t{r['project'] or '-'}\t{r['title']}"
+              for r in report["tasks"]]
     lines += [f"  review {r['id']}\t@{r['reviewer']}\t{r['kind']}\t{r['project'] or '-'}\t{r['title']}" for r in report["reviews"]]
     lines += [f"  lead {r['id']}{' (was ' + r['accepted_from'] + ')' if r['accepted_from'] else ''}\t{r['status']}\t@{r['lead']}\t{r['title']}" for r in report["leads"]]
     lines += [f"  reserved {r['id']}\t{r['project'] or '-'}\t{r['title']}" for r in report["reserved"]]

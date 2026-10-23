@@ -21,7 +21,7 @@ You never change the work. You don't edit files, commit, push, rebase or check o
 ## 2. What the work was meant to do
 
 - The task: `asdlc board task view <task> --plain`. Its description, acceptance criteria, plan, implementation notes (the checks the worker recorded) and comments (earlier reviews and the worker's answers) are what you judge against.
-- The size and the plan's approval. A `size-1` task skipped plan approval; its notes say "size-1: plan approval skipped; small because ...". Its plan must be numbered steps, and the change must really be small and mechanical: a few lines in a few files, no new behaviour beyond what the steps say, no design choice the steps left open. A `size-2` or larger task needs "Plan approved by @<engineer>" in its notes. Either one missing or untrue is an Important Compliance finding.
+- The size and the plan's approval. A `size-1` task skipped plan approval; its notes say "size-1: plan approval skipped; small because ...". Its plan must be numbered steps, and the change must really be small and mechanical: a few lines in a few files, no new behaviour beyond what the steps say, no design choice the steps left open. A `size-2` or larger task was approved by a person with `asdlc approve`, which leaves a "Plan approved by @<engineer>" comment on it (and `asdlc finish` refuses without it). A skipped approval that wasn't really small is an Important Compliance finding; so is a plan that changed after its approval without the notes saying why.
 - If it has a parent intent, `asdlc lead-of <task> --json` names it. Read the intent (`asdlc board task view <intent> --plain`) and every document linked on it (`asdlc board doc view <doc-id> --plain`): a contract binds the change, and a change that builds against something other than the contract is an Important Compliance finding.
 
 ## 3. The diff
@@ -75,6 +75,6 @@ EOF
 
 ## 6. Finish
 
-Remove your worktree: `git -C <repo> worktree remove --force <review>`. If the review takes longer than half an hour, keep the claim alive in between: `asdlc heartbeat <task> --as <reviewer>`.
+Remove your worktree: `git -C <repo> worktree remove --force <review>`. Your orchestrator keeps your review claim alive while you work; if `asdlc review-done` says you no longer hold the review, it was reaped: stop and say so.
 
 Your final message is the verdict, the findings, and whether they reached the pull request.
