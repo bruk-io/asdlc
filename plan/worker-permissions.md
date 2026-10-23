@@ -86,6 +86,34 @@ No `cd`, no refused git, no record-check from the wrong folder, no slug error, n
 
 The fixes for errors 1 to 3 came after the one model run this change was allowed, so no run proves them; their unit test (the folders exist after `--write`) and the walk do.
 
+## After review: git that runs a program
+
+The orchestrator's review of #26 found the gap this plan had left open: the `*` in every `git -C <worktree>/* <subcommand> *` allow rule matches any text, so `git -C <wt>/x -c core.fsmonitor=<cmd> status`, `git -C <wt>/x config core.fsmonitor <cmd> status`, `git grep -O<program>` and the like ran without a prompt under rules asdlc wrote. Closed on this branch:
+
+| File | What changes | Requirements |
+|---|---|---|
+| `hooks/guard_board.py` | `git_program_refusal`, `git_config_writes`, `env_names`, `git_env_refusal`: agents are refused global `-c`, `--config-env`, `--exec-path=<dir>`; `git config` writes (reads stay allowed); `grep -O`/`--open-files-in-pager`; `--upload-pack`, `--receive-pack` and `--exec` on fetch, pull, push, clone, ls-remote, archive and submodule; `-u` on clone and ls-remote; `--ext-diff` and `--textconv` on any subcommand; clone's `-c`/`--config`, clone and init `--template`; `rebase -x`/`--exec`; `difftool`, `mergetool`, `submodule foreach`, `bisect run`, `filter-branch`, `instaweb`; and any `GIT_*` variable set in front of a command, through `env`, or with `export`/`declare`. Short options are parsed per subcommand, attached and clustered (`-ccore.x=y`, `-Ovim`, `-nO`, `-uevil`, `-ix`), and a value-taking option's value is skipped (`grep -e -O` is a pattern). Each refusal names the form and says to run git plainly or ask the person | R16 |
+| `scripts/asdlc` | `GIT_DENY`, written as `permissions.deny` by `asdlc permissions` (deny beats allow) and checked by `asdlc doctor` in every permission mode: `git -c*`, `git -C * -c*`, `--config-env`, `--exec-path=`, `grep -O`/`--open-files-in-pager`, `--upload-pack`, `--receive-pack`, `--exec`, clone and ls-remote `-u`, clone `-c`/`--config`, `--template`, `--ext-diff`, `--textconv`, `rebase -x`, `difftool`, `mergetool`, `submodule foreach`, `bisect run`, `filter-branch`, `instaweb`, `git config` and `git -C * config`, `env GIT_*`, `env * GIT_*`, `export GIT_*` | R16, R17 |
+| `agents/worker.md`, `agents/reviewer.md` | Run git plainly; a refused commit message that quotes such a flag is reworded | R12 |
+| `tests/test_guard_board.py` | Every form above refused with its reason (attached, clustered, through `sh -c`, `record-check`, loops and `env`); plain git (`push -u`, `fetch -u`, `grep -e -O`, `rebase -X ours`, `commit -c`, `log -O`, config reads) allowed; every form written on its own matched by a deny rule, including the allow rule's span that let `config` through; no command an agent or skill gives matched by any deny rule; the known limits written down | R16 |
+| `tests/test_asdlc.py` | The deny rules in the settings, merged after the person's own, and reported missing by doctor even under `bypassPermissions` | R16 |
+| `README.md`, `docs/guide.md`, `CHANGELOG.md` | The deny rules and the guard's new refusals | - |
+
+Checked against code.claude.com/docs/en/permissions: deny and ask rules apply when any subcommand of a compound line matches, including inside a subshell, a command substitution or a loop body; a `*` matches any text; a trailing ` *` also matches the bare command only when it is the only wildcard; deny rules match past any leading assignment, while an allow rule never matches past an assignment of a variable outside Claude Code's known-safe set, so `GIT_PAGER=x git log` already prompts and is refused in the background.
+
+### Departures from the review's list
+
+- **`-u` only on clone and ls-remote.** On `push` it is `--set-upstream`, which every worker runs (`git push -u origin HEAD`), and on `fetch` it is `--update-head-ok`; neither runs a program, and pull has no `-u`. `--upload-pack`, `--receive-pack` and `--exec` are refused on all of them.
+- **More than the list**, the same class: `git config` writes (the allow rules' `*` let `git -C <wt>/x config core.fsmonitor <cmd> status` through), `rebase --exec`, `bisect run`, `filter-branch`, `instaweb`, `clone -c`/`--config`/`--template` and `init --template`, `archive --exec`, and `--textconv` everywhere.
+- **Every `GIT_*` assignment is refused**, not only those in front of git: they change nothing but git, and a bare `export GIT_PAGER=...` changes every git after it.
+
+### Risks
+
+- **A deny rule matches text, not options.** A commit message or a grep pattern that quotes ` -c `, `--exec`, ` config ` or `-O` after `grep` is refused with Claude Code's generic denial; the guard, which parses the command, allows it. The worker agent says to reword the message. The tests keep the known cases in `_DENY_RULE_FALSE_POSITIVES` and check that no command the agents and skills give is denied.
+- **A deny rule can't see inside a cluster** (`-nO`, `-ix`); only the guard catches those, and the guard is a hook (it allows on its own internal error, with a message).
+- **Case.** `Bash(git -c*)` must not match `git -C ...`. The permissions page says the words before the first `*` are matched as written; WebFetch domains are the only case-insensitive match it names. Not exercised by a model run here.
+- **asdlc's own git** sets `GIT_CONFIG_*` and `core.hooksPath` to turn hooks off on board commits, inside the `asdlc` process, which neither the guard nor the permission rules see. No skill, agent or team template tells an agent to set a `GIT_*` variable or pass `-c` (the walk checks every command they give against the guard and the deny rules).
+
 ## Departures from the plan
 
 - **The folders `permissions --write` makes, and no Glob in the agents' guidance**: not in the approved plan; the second run found both, and they share its root cause (a background worker stopped by something it can't ask about).

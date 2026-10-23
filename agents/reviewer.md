@@ -19,6 +19,7 @@ You start in the tasks clone and stay there; nobody can answer a permission prom
 - git always with `-C` and the absolute folder, such as `git -C <review> status`, one command per Bash call, where the folder is `<repo>` or your review worktree. Never change directory first (no `cd`): Claude Code asks a person before any line that changes directory and runs git, and you have no person, so the whole line is refused.
 - List, search and trace files with `git -C <review> ls-files`, `git -C <review> grep <pattern>` and `git -C <review> blame <file>`, and read each with the Read tool by its absolute path (Read takes a file, never a folder).
 - Never pipe a command's output into `python3`, `jq` or another program to pick it apart: read it yourself.
+- Run git plainly: no `-c`, no setting values with git's `config` subcommand, no `GIT_*` variables, no options that run a program (`grep -O`, `--ext-diff`, `--textconv`). The board guard and the deny rules refuse them.
 
 ## 1. The rules you judge by
 

@@ -23,6 +23,15 @@ Denied, each with the reason and the way that works instead:
 - `git push` to the default branch of such a code repository, and any force push there.
   Changes reach the default branch through review, and a task branch under review is never
   rewritten. Pushes to the board itself are how the board works, so they are allowed.
+- Running git so that it runs a program the command doesn't name, or with configuration
+  the command sets: global `-c`, `--config-env` and `--exec-path=<dir>`; `git config` writes;
+  `grep -O`/`--open-files-in-pager`; `--upload-pack`, `--receive-pack` and `--exec` (and `-u`
+  on clone and ls-remote); `--ext-diff` and `--textconv`; clone's `-c`/`--config` and
+  `--template`; `rebase -x`/`--exec`; `difftool`, `mergetool`, `submodule foreach`,
+  `bisect run`, `filter-branch` and `instaweb`; and `GIT_*` environment variables set for
+  git (`GIT_SSH_COMMAND=`, `GIT_PAGER=`, `GIT_CONFIG_*` ...), in front of it, through
+  `env`, or with `export`. The permission rules `asdlc permissions` writes match git
+  commands with `*`, which would let any of these through without a prompt.
 - Approving, requesting changes on or merging a pull request: `gh pr review --approve` or
   `--request-changes` (`-a`, `-r`), `gh pr merge`, and the same through `gh api` (a pull
   request's `/merge`, a review with event APPROVE or REQUEST_CHANGES, or the GraphQL
@@ -119,6 +128,132 @@ PERMISSIONS_REFUSAL = (
     "asdlc permissions --write changes the person's own Claude Code settings, which is theirs to do: show them "
     "asdlc permissions and ask them to run asdlc permissions --write in their own terminal."
 )
+
+
+GIT_PROGRAM_REFUSAL = (
+    "{what} makes git run a program this command doesn't name, or with configuration it sets, and the permission rules for "
+    "background agents can't tell that apart from the git they allow. Run git plainly (git -C <worktree> <subcommand> ...); "
+    "if the work really needs it, ask the person to run it."
+)
+_GIT_CONFIG_READS = frozenset({"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color", "--get-colorbool", "-l", "--list",
+                               "--show-origin", "--show-scope", "--name-only"})
+_GIT_CONFIG_WRITES = frozenset({"--add", "--unset", "--unset-all", "--replace-all", "--rename-section", "--remove-section", "-e", "--edit"})
+_GIT_CONFIG_VALUES = frozenset({"-f", "--file", "--blob", "--type", "--default", "--comment", "--value", "--fixed-value"})
+_GIT_FETCHERS = frozenset({"fetch", "pull", "push", "clone", "ls-remote", "archive", "submodule"})
+_GIT_ENV_PREFIX = "GIT_"
+
+
+# The short options that take a value, per subcommand: in a cluster such as `-eO`, what follows one is its value.
+_SHORT_VALUES = frozendict({"grep": "efABCm", "clone": "obucj", "ls-remote": "u", "rebase": "xsX", "init": ""})
+
+
+def _short_flags(word: str, takes_value: str) -> str:
+    """The short options a word such as `-nO` or `-Ovim` sets, up to and including the first that takes a value."""
+    if not word.startswith("-") or word.startswith("--") or len(word) < 2:
+        return ""
+    letters = ""
+    for letter in word[1:]:
+        if not letter.isalpha():
+            break
+        letters += letter
+        if letter in takes_value:
+            break
+    return letters
+
+
+def _short_cluster_has(word: str, letter: str, subcommand: str) -> bool:
+    """Whether a short-option word of this git subcommand sets `letter`, alone (`-O`), clustered (`-nO`) or with its value (`-Ovim`)."""
+    return letter in _short_flags(word, _SHORT_VALUES.get(subcommand, ""))
+
+
+def git_env_refusal(names: Iterable[str]) -> str | None:
+    """Why setting these environment variables for git is refused, or None."""
+    found = sorted({name for name in names if name.startswith(_GIT_ENV_PREFIX)})
+    return GIT_PROGRAM_REFUSAL.format(what=f"setting {', '.join(found)}") if found else None
+
+
+def git_config_writes(arguments: Sequence[str]) -> bool:
+    """Whether a `git config` call sets or removes configuration, in the old form or the new (`git config set ...`)."""
+    positional, found = options(arguments, _GIT_CONFIG_VALUES)
+    flags = {flag for flag, _ in found}
+    if positional[:1] and positional[0] in ("set", "unset", "rename-section", "remove-section", "edit"):
+        return True
+    if positional[:1] and positional[0] in ("get", "list"):
+        return False
+    if flags & _GIT_CONFIG_WRITES:
+        return True
+    return not (flags & _GIT_CONFIG_READS) and len(positional) >= 2
+
+
+def git_program_refusal(words: Sequence[str]) -> str | None:
+    """Why a git command (words[0] is git) is refused for running a program or setting configuration, or None."""
+    index = 1
+    while index < len(words) and words[index].startswith("-"):
+        word = words[index]
+        if word == "-c" or (word.startswith("-c") and not word.startswith("--")):
+            return GIT_PROGRAM_REFUSAL.format(what="git -c")
+        if word == "--config-env" or word.startswith("--config-env="):
+            return GIT_PROGRAM_REFUSAL.format(what="git --config-env")
+        if word.startswith("--exec-path="):
+            return GIT_PROGRAM_REFUSAL.format(what="git --exec-path=<dir>")
+        index += 2 if word in _GIT_VALUES or word == "-C" else 1
+    if index >= len(words):
+        return None
+    subcommand, rest = words[index], list(words[index + 1:])
+    if "--" in rest:
+        rest = rest[:rest.index("--")]
+    if subcommand in ("difftool", "mergetool", "filter-branch", "instaweb"):
+        return GIT_PROGRAM_REFUSAL.format(what=f"git {subcommand}")
+    if subcommand == "submodule" and "foreach" in rest:
+        return GIT_PROGRAM_REFUSAL.format(what="git submodule foreach")
+    if subcommand == "bisect" and rest[:1] == ["run"]:
+        return GIT_PROGRAM_REFUSAL.format(what="git bisect run")
+    if subcommand == "config" and git_config_writes(rest):
+        return GIT_PROGRAM_REFUSAL.format(what="git config setting a value")
+    takes_value = _SHORT_VALUES.get(subcommand, "")
+    skip = False
+    for word in rest:
+        if skip:  # the value of the option before it, such as the pattern after grep -e
+            skip = False
+            continue
+        flag = word.partition("=")[0]
+        letters = _short_flags(word, takes_value)
+        skip = bool(letters) and letters[-1] in takes_value and len(word) == len(letters) + 1
+        if flag in ("--ext-diff", "--textconv"):
+            return GIT_PROGRAM_REFUSAL.format(what=f"git {subcommand} {flag}")
+        if subcommand == "grep" and (flag == "--open-files-in-pager" or _short_cluster_has(word, "O", subcommand)):
+            return GIT_PROGRAM_REFUSAL.format(what="git grep -O (--open-files-in-pager)")
+        if subcommand in _GIT_FETCHERS and flag in ("--upload-pack", "--receive-pack", "--exec"):
+            return GIT_PROGRAM_REFUSAL.format(what=f"git {subcommand} {flag}")
+        if subcommand in ("clone", "ls-remote") and _short_cluster_has(word, "u", subcommand):
+            return GIT_PROGRAM_REFUSAL.format(what=f"git {subcommand} -u (--upload-pack)")
+        if subcommand in ("clone", "init") and (flag in ("--config", "--template") or (subcommand == "clone" and _short_cluster_has(word, "c", subcommand))):
+            return GIT_PROGRAM_REFUSAL.format(what=f"git {subcommand} {flag if flag.startswith('--') else '-c'}")
+        if subcommand == "rebase" and (flag == "--exec" or _short_cluster_has(word, "x", subcommand)):
+            return GIT_PROGRAM_REFUSAL.format(what="git rebase --exec (-x)")
+    return None
+
+
+_SETTERS = frozenset({"env", "export", "declare", "typeset", "readonly"})
+_SETTER_VALUES = frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"})
+_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=")
+
+
+def env_names(words: Sequence[str]) -> list[str]:
+    """The variables a simple command sets: its leading assignments, and those `env`, `export` or `declare` take."""
+    names: list[str] = []
+    index = 0
+    while index < len(words) and (words[index] in _KEYWORDS or _ASSIGNMENT.match(words[index])):
+        if found := _ASSIGNMENT.match(words[index]):
+            names.append(found[1])
+        index += 1
+    if index < len(words) and PurePath(words[index]).name in _SETTERS:
+        index += 1
+        while index < len(words) and (words[index].startswith("-") or _ASSIGNMENT.match(words[index])):
+            if found := _ASSIGNMENT.match(words[index]):
+                names.append(found[1])
+            index += 2 if words[index] in _SETTER_VALUES else 1
+    return names
 
 
 # --- the logic -----------------------------------------------------------------------
@@ -457,6 +592,8 @@ def decide_command(command: str, cwd: Path | None, lookup: Lookup) -> Outcome:
     directory = cwd
     unsure: Outcome | None = None
     for words in commands:
+        if reason := git_env_refusal(env_names(words)):  # GIT_* only ever changes what git does
+            return Outcome(Verdict.DENY, reason)
         words = _without_assignments(words)
         if words[:1] == ["cd"]:
             directory = directory_of(directory, words[1] if len(words) > 1 else "~")
@@ -494,6 +631,8 @@ def _decide_simple(words: Sequence[str], directory: Path | None, lookup: Lookup)
         if (outcome := gh_outcome(words[1:])) is not None:
             return outcome
     elif name == "git":
+        if reason := git_program_refusal(words):
+            return Outcome(Verdict.DENY, reason)
         subcommand, rest, where = _git_call(words, directory)
         if subcommand == "push":
             return _decide_push(rest, where, lookup)

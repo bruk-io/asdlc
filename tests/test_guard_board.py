@@ -257,7 +257,7 @@ _COMMAND = re.compile(r"^(asdlc|asdlc-plugin|backlog|git|gh|cd|uv run) \S")
 # Commands a skill gives for a person's own session: setting their identity, and checking this plugin's own artefacts.
 _PERSONS_SESSION = re.compile(r"git config --global|scripts/artefacts\.py")
 _REFUSED_BY_DESIGN = re.compile(r"asdlc (accept|approve)\b|permissions --write|-s Done|gh pr merge|--approve|--request-changes|"
-                                r"--force|git push origin main")
+                                r"--force|git push origin main|git (-C \S+ )?config (--global )?(--unset )?asdlc\.\w+ ?\S")
 
 
 def skill_commands() -> list[tuple[str, str]]:
@@ -398,6 +398,43 @@ class BackgroundPermissionsTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertFalse(prompts_for_cd_with_git(command))
 
+    def test_the_deny_rules_catch_git_that_runs_a_program(self) -> None:
+        """Deny beats allow, so these hold even where the `*` in an allow rule would match, and even without the guard."""
+        for command in _GIT_PROGRAMS:
+            if command.startswith(("GIT_", "FOO=", "sh -c", "asdlc ", "for ")) or ";" in command or command in ("git grep -nO pattern", "git rebase -ix make main"):
+                continue  # an allow rule never matches past a GIT_* assignment, and a deny rule is matched against each part
+            with self.subTest(command=command):
+                self.assertTrue(any(rule_matches(rule, command) for rule in self.RULES.deny), command)
+        spanned = "git -C /work/app.worktrees/task-1 config core.fsmonitor evil status"
+        self.assertTrue(any(rule_matches(rule, spanned) for rule in self.RULES.allow), "the allow rule's * spans the config call")
+        self.assertTrue(any(rule_matches(rule, spanned) for rule in self.RULES.deny), "and a deny rule catches it")
+
+    def test_no_command_an_agent_is_given_is_denied(self) -> None:
+        found = [(where, command) for where, command in skill_commands() if where.startswith(("agents/", "skills/"))]
+        for where, command in found:
+            if _REFUSED_BY_DESIGN.search(command) or _PERSONS_SESSION.search(command):
+                continue
+            for part in compound_parts(command):
+                with self.subTest(where=where, command=part):
+                    self.assertFalse([rule for rule in self.RULES.deny if rule_matches(rule, part)], part)
+        for command in _PLAIN_GIT:
+            if command.startswith("git config") or command.startswith("FOO=") or command in _DENY_RULE_FALSE_POSITIVES:
+                continue  # git config is denied to agents outright (reads too): no agent needs it
+            with self.subTest(command=command):
+                self.assertFalse([rule for rule in self.RULES.deny if rule_matches(rule, command)], command)
+
+    def test_the_deny_rules_known_limits(self) -> None:
+        """A rule's `*` matches any text, so a deny rule also matches a flag's name inside a quoted message or a pattern; and a
+        rule can't see inside a cluster of short options (`-nO`, `-ix`), which only the guard parses. Both are written down here."""
+        for command in _DENY_RULE_FALSE_POSITIVES:
+            with self.subTest(command=command):
+                self.assertTrue(any(rule_matches(rule, command) for rule in self.RULES.deny), command)
+                self.assertIs(guard.decide_command(command, WORKTREE, lookup).verdict, guard.Verdict.ALLOW)
+        for command in ("git grep -nO pattern", "git rebase -ix make main"):
+            with self.subTest(command=command):
+                self.assertFalse(any(rule_matches(rule, command) for rule in self.RULES.deny), command)
+                self.assertIs(guard.decide_command(command, WORKTREE, lookup).verdict, guard.Verdict.DENY)
+
     def test_the_read_only_git_agents_reach_for_is_allowed_in_worktrees_and_the_clone(self) -> None:
         for folder in ("/work/app.worktrees/task-1", "/work/app.worktrees/review-task-1-kyle.r1", "/work/app"):
             for sub in ("ls-files", "grep", "blame", "cat-file", "ls-tree", "merge-base", "rev-list", "describe", "show-ref", "remote get-url"):
@@ -408,6 +445,73 @@ class BackgroundPermissionsTest(unittest.TestCase):
                         "git -C /work/board ls-files"):
             with self.subTest(command=command):
                 self.assertFalse(any(rule_matches(rule, command) for rule in self.RULES.allow), command)
+
+
+# Git that runs a program the command doesn't name, or with configuration the command sets (the orchestrator's review of #26).
+_GIT_PROGRAMS = (
+    "git -c core.fsmonitor=evil status", "git -C /work/app.worktrees/task-1 -c core.pager=evil log", "git -ccore.pager=evil log",
+    "git --config-env=core.pager=EVIL log", "git -C /work/app.worktrees/task-1 --config-env core.pager=EVIL log",
+    "git --exec-path=/tmp/evil status", "git -C /work/app.worktrees/task-1 grep -Ovim pattern", "git grep -O pattern",
+    "git grep -nO pattern", "git grep --open-files-in-pager=vim x", "git grep --open-files-in-pager x",
+    "git fetch --upload-pack=evil origin", "git fetch --upload-pack evil origin", "git pull --upload-pack=evil origin main",
+    "git push --receive-pack=evil origin HEAD", "git push --exec=evil origin HEAD", "git ls-remote --upload-pack=evil origin",
+    "git clone -u evil https://x/y", "git clone -uevil https://x/y", "git ls-remote -u evil origin",
+    "git diff --ext-diff", "git -C /work/app.worktrees/task-1 diff --ext-diff HEAD", "git show --textconv HEAD:x", "git log -p --ext-diff",
+    "git clone -c core.hooksPath=/evil https://x/y", "git clone --config=core.hooksPath=/evil https://x/y", "git clone --template=/evil https://x/y",
+    "git init --template=/evil x", "git rebase -x make origin/main", "git rebase --exec=make origin/main", "git rebase -ix make main",
+    "git difftool", "git -C /work/app.worktrees/task-1 mergetool", "git submodule foreach ls", "git bisect run make",
+    "git filter-branch --tree-filter x", "git instaweb", "git config core.fsmonitor evil",
+    "git -C /work/app.worktrees/task-1 config core.fsmonitor evil status", "git config set core.pager evil", "git config --add alias.x '!evil'",
+    "git config --global asdlc.engineer kyle",
+    "GIT_PAGER=evil git log", "GIT_SSH_COMMAND=evil git -C /work/app.worktrees/task-1 fetch origin", "env GIT_EXTERNAL_DIFF=evil git diff",
+    "env -u HOME GIT_EDITOR=evil git commit", "export GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=evil git log",
+    "FOO=1 GIT_EDITOR=evil git commit", "GIT_DIR=/elsewhere/.git; git status", "sh -c 'git -c core.pager=evil log'",
+    "asdlc record-check TASK-1 --in /work/app.worktrees/task-1 --as kyle.w1 -- git -c core.pager=evil log",
+    "for f in a; do git -c core.pager=evil log; done",
+)
+# What workers, reviewers and people run, which must stay allowed.
+_PLAIN_GIT = (
+    "git push -u origin HEAD", "git -C /work/app.worktrees/task-1 push -u origin HEAD", "git grep -n pattern", "git grep -e -O",
+    "git config asdlc.engineer", "git config --get asdlc.board", "git config --global --get asdlc.engineer", "git config get asdlc.board",
+    "git config --list", "git diff --no-ext-diff", "git show --no-textconv HEAD:x", "git rebase origin/main", "git rebase -X ours origin/main",
+    "git -C /work/app.worktrees/task-1 commit -m 'use -c and --exec in docs' --trailer 'Asdlc-Worker: kyle.w1'",
+    "git log --grep=x -i", "git fetch origin", "git clone https://x/y", "git -C /work/app worktree add --detach /work/app.worktrees/r x",
+    "FOO=1 make test", "git log -O orderfile", "git commit -c HEAD", "git fetch -u origin",
+)
+
+
+# Allowed by the guard but matched by a deny rule, since a rule's `*` also matches text inside quotes or a pattern.
+_DENY_RULE_FALSE_POSITIVES = ("git grep -e -O", "git -C /work/app.worktrees/task-1 commit -m 'use -c and --exec in docs' --trailer 'Asdlc-Worker: kyle.w1'")
+
+
+class GitProgramTest(unittest.TestCase):
+    """The `*` in `git -C <worktree>/* <subcommand> *` lets options through: `-c core.fsmonitor=<cmd>`, `grep -O<program>` and the like
+    would run any program without a prompt, under rules asdlc wrote. The guard refuses them, with why."""
+
+    def test_denies_git_that_runs_a_program_or_sets_configuration(self) -> None:
+        for command in _GIT_PROGRAMS:
+            with self.subTest(command=command):
+                outcome = guard.decide_command(command, WORKTREE, lookup)
+                self.assertIs(outcome.verdict, guard.Verdict.DENY)
+                self.assertIn("makes git run a program this command doesn't name", outcome.reason)
+                self.assertIn("ask the person", outcome.reason)
+
+    def test_the_reason_names_the_form(self) -> None:
+        for command, says in (("git -c a=b log", "git -c"), ("git grep -Ovim x", "git grep -O"), ("GIT_PAGER=x git log", "setting GIT_PAGER"),
+                              ("git rebase -x make main", "git rebase --exec"), ("git clone -u x y", "git clone -u"), ("git config a.b c", "git config")):
+            with self.subTest(command=command):
+                self.assertIn(says, guard.decide_command(command, WORKTREE, lookup).reason)
+
+    def test_allows_plain_git(self) -> None:
+        for command in _PLAIN_GIT:
+            with self.subTest(command=command):
+                self.assertIs(guard.decide_command(command, WORKTREE, lookup).verdict, guard.Verdict.ALLOW)
+
+    def test_env_names(self) -> None:
+        self.assertEqual(guard.env_names(["A=1", "B=2", "git", "log", "C=3"]), ["A", "B"])
+        self.assertEqual(guard.env_names(["env", "-u", "HOME", "GIT_X=1", "git"]), ["GIT_X"])
+        self.assertEqual(guard.env_names(["export", "GIT_Y=1", "Z=2"]), ["GIT_Y", "Z"])
+        self.assertEqual(guard.env_names(["git", "log"]), [])
 
 
 class PushTest(unittest.TestCase):

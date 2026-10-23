@@ -19,6 +19,7 @@ You start in the tasks clone, and you stay there: nobody can answer a permission
 - git always with `-C` and the worktree, such as `git -C <worktree> status`, one command per Bash call. Never change directory first (no `cd`): Claude Code asks a person before any line that changes directory and runs git, and you have no person, so the whole line is refused.
 - List the worktree's files with `git -C <worktree> ls-files`, search them with `git -C <worktree> grep <pattern>`, and read each with the Read tool by its absolute path (Read takes a file, never a folder). Not every session has the Glob and Grep tools; these always work.
 - Never pipe a command's output into `python3`, `jq` or another program to pick it apart: read it yourself. A program with no allow rule is refused, and so is any line that includes one.
+- Run git plainly: no `-c`, no setting values with git's `config` subcommand, no `GIT_*` variables, no options that run a program (`grep -O`, `--ext-diff`, `--upload-pack`, `rebase -x`). The board guard and the deny rules refuse them. A deny rule matches text anywhere in the line, so a commit message that quotes such a flag (` -c `, `--exec`, ` config `) is refused too: reword the message.
 
 ## Rules for both phases
 

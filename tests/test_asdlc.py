@@ -753,7 +753,9 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual([f.level for f in asdlc.diagnose(facts()) if f.area == "permissions"], [asdlc.Level.PASS])
         broad = ["Bash(asdlc:*)", "Bash(asdlc-plugin:*)", "Bash(git:*)", "Bash(gh pr *)", "Bash(uv run:*)", "Bash(backlog *)", "Bash(npm *)", "Bash(npx *)",
                  "Bash(/home/kyle/src/asdlc/scripts/asdlc *)", "Bash(/home/kyle/src/asdlc/scripts/asdlc-plugin *)", "Edit(//home/kyle/*.worktrees/**)"]
-        self.assertNotIn("warn", self.levels(facts(claude_settings=settings(allow=broad, additionalDirectories=["~"]))))
+        self.assertNotIn("warn", self.levels(facts(claude_settings=settings(allow=broad, deny=list(asdlc.GIT_DENY), additionalDirectories=["~"]))))
+        (undenied,) = [f for f in self.only("warn", facts(claude_settings=settings(allow=broad, additionalDirectories=["~"]))) if f.area == "permissions"]
+        self.assertIn("Bash(git -C * -c*)", undenied.message, "broad allow rules without the git deny rules let -c through")
         (missing,) = [f for f in self.only("warn", facts(claude_settings=settings(allow=["Bash(asdlc *)", "Bash(git push *)"]))) if f.area == "permissions"]
         for named in ("asdlc permissions --write", "Bash(asdlc-plugin *)", "Bash(git -C /home/kyle/api.worktrees/* push *)", "Bash(gh pr create *)",
                       "Bash(npm test)", "Edit(//home/kyle/api.worktrees/**)", "/home/kyle/tasks.worktrees"):
@@ -798,6 +800,23 @@ CHANGES = ("--findings", "important=1", "--plan-matched", "yes")
 class PermissionRulesTest(unittest.TestCase):
     """I10, and the second review's Important 3: the narrow allow rules normal work needs, and merging them in."""
 
+    def test_deny_rules_for_git_that_runs_a_program(self) -> None:
+        """The orchestrator's review of #26: deny beats allow, so git with -c, grep -O, --upload-pack and the like is refused even
+        where an allow rule's `*` would match it."""
+        for rule in ("Bash(git -c*)", "Bash(git -C * -c*)", "Bash(git *grep* -O*)", "Bash(git * --upload-pack*)", "Bash(git * --ext-diff*)",
+                     "Bash(git -C * config *)", "Bash(env GIT_*)", "Bash(export GIT_*)"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, RULES.deny)
+        self.assertEqual(RULES.as_settings()["deny"], list(RULES.deny))
+        merged, added = asdlc.merge_permissions({"permissions": {"deny": ["Bash(rm *)"]}}, RULES)
+        self.assertEqual(merged["permissions"]["deny"], ["Bash(rm *)", *RULES.deny])
+        self.assertTrue(set(RULES.deny) <= set(added))
+        full = json.dumps({"permissions": RULES.as_settings()})
+        self.assertEqual(asdlc.missing_permissions([("local", full)], RULES, Path("/home/kyle")), ([], []))
+        without = json.dumps({"permissions": {**RULES.as_settings(), "deny": [], "defaultMode": "bypassPermissions"}})
+        self.assertEqual(asdlc.missing_permissions([("local", without)], RULES, Path("/home/kyle"))[0], list(RULES.deny),
+                         "deny rules are needed in every mode")
+
     def test_the_read_only_git_workers_and_reviewers_reach_for(self) -> None:
         """The first eval run: `git -C <worktree> ls-files` had no rule, so a background planner couldn't list its files."""
         for sub in ("ls-files", "grep", "blame", "cat-file", "ls-tree", "merge-base", "rev-list", "describe", "show-ref", "remote get-url"):
@@ -832,7 +851,7 @@ class PermissionRulesTest(unittest.TestCase):
         existing = {"model": "opus", "permissions": {"allow": ["Read(~/notes/**)", "Bash(asdlc *)"], "deny": ["Bash(rm *)"],
                                                      "additionalDirectories": ["/home/kyle/api.worktrees"]}}
         merged, added = asdlc.merge_permissions(existing, RULES)
-        self.assertEqual((merged["model"], merged["permissions"]["deny"]), ("opus", ["Bash(rm *)"]))
+        self.assertEqual((merged["model"], merged["permissions"]["deny"]), ("opus", ["Bash(rm *)", *RULES.deny]), "the person's deny rules kept, first")
         self.assertEqual(merged["permissions"]["allow"][:2], ["Read(~/notes/**)", "Bash(asdlc *)"])
         self.assertEqual(set(merged["permissions"]["allow"]), {"Read(~/notes/**)", *RULES.allow})
         self.assertEqual(merged["permissions"]["additionalDirectories"], ["/home/kyle/api.worktrees", "/home/kyle/tasks.worktrees"])

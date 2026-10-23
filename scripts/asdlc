@@ -3182,6 +3182,24 @@ WORKTREE_GIT = ("fetch", "status", "diff", "log", "show", "add", "commit", "push
                 "rev-parse", "branch", "symbolic-ref", "mv", "rm", "restore", "stash", "reset", *READ_ONLY_GIT)
 # What the reviewer runs in the registered clone itself: reads, and making and removing its review worktree.
 CLONE_GIT = ("fetch", "worktree", "show", "rev-parse", "symbolic-ref", *READ_ONLY_GIT)
+# Git that runs a program the command doesn't name, or with configuration the command sets. The `*` in the
+# allow rules above would let these through, so they are denied, and deny beats allow. The board guard
+# refuses the same forms with its reasons; these hold even if the hook isn't loaded. A `*` matches any
+# text, spaces included, so a rule can also match a commit message that quotes one of these flags.
+GIT_DENY = (
+    "Bash(git -c*)", "Bash(git -C * -c*)", "Bash(git --config-env*)", "Bash(git -C * --config-env*)",
+    "Bash(git --exec-path=*)", "Bash(git -C * --exec-path=*)",
+    "Bash(git *grep* -O*)", "Bash(git *grep* --open-files-in-pager*)",
+    "Bash(git * --upload-pack*)", "Bash(git * --receive-pack*)", "Bash(git * --exec*)",
+    "Bash(git *clone* -u*)", "Bash(git *ls-remote* -u*)", "Bash(git *clone* -c*)", "Bash(git *clone* --config*)", "Bash(git * --template*)",
+    "Bash(git * --ext-diff*)", "Bash(git * --textconv*)", "Bash(git *rebase* -x*)",
+    "Bash(git difftool*)", "Bash(git -C * difftool*)", "Bash(git mergetool*)", "Bash(git -C * mergetool*)",
+    "Bash(git *submodule* foreach*)", "Bash(git *bisect* run*)", "Bash(git *filter-branch*)", "Bash(git *instaweb*)",
+    "Bash(git config *)", "Bash(git -C * config *)",
+    # GIT_* set in front of git: an allow rule never matches past such an assignment, so it already prompts;
+    # these catch the forms that put the variable after a command word.
+    "Bash(env GIT_*)", "Bash(env * GIT_*)", "Bash(export GIT_*)",
+)
 # A verified command with any of these gets no rule of its own: a rule can't say what it would allow.
 _UNSAFE_IN_RULE = (("*", "a * would be a wildcard in the rule"), ("|", "a pipe"), (";", "a ;"), ("&&", "&&"), ("||", "||"),
                    ("`", "a backtick"), ("$(", "a command substitution"), (">", "a redirect"), ("<", "a redirect"), ("\n", "a line break"))
@@ -3195,9 +3213,10 @@ class Rules:
     allow: tuple[str, ...]
     directories: tuple[str, ...]
     skipped: tuple[tuple[str, str, str, str], ...] = ()  # (slug, command name, run line, why)
+    deny: tuple[str, ...] = GIT_DENY
 
     def as_settings(self) -> dict[str, list[str]]:
-        return {"allow": list(self.allow), "additionalDirectories": list(self.directories)}
+        return {"allow": list(self.allow), "deny": list(self.deny), "additionalDirectories": list(self.directories)}
 
 
 def unsafe_in_rule(run: str) -> str | None:
@@ -3250,7 +3269,7 @@ def merge_permissions(settings: object, rules: Rules) -> tuple[dict[str, object]
     if not isinstance(permissions, dict):
         raise AsdlcError(f"its permissions is {json.dumps(permissions)}, not an object: fix it (or remove it), then run asdlc permissions --write again")
     added = []
-    for key, wanted in (("allow", rules.allow), ("additionalDirectories", rules.directories)):
+    for key, wanted in (("allow", rules.allow), ("deny", rules.deny), ("additionalDirectories", rules.directories)):
         present = permissions.setdefault(key, [])
         if not isinstance(present, list) or not all(isinstance(entry, str) for entry in present):
             raise AsdlcError(f"its permissions.{key} is {json.dumps(present)}, not a list of strings: fix it, then run asdlc permissions --write again")
@@ -3327,6 +3346,7 @@ def _under(path: str, folders: Iterable[str], home: Path) -> bool:
 def missing_permissions(settings: Sequence[tuple[str, str]], rules: Rules, home: Path) -> tuple[list[str], list[str]]:
     """The needed rules and folders the settings files don't cover yet, and the files that aren't valid JSON."""
     allow: list[str] = []
+    deny: list[str] = []
     folders: list[str] = []
     modes: set[str] = set()
     broken = []
@@ -3339,11 +3359,12 @@ def missing_permissions(settings: Sequence[tuple[str, str]], rules: Rules, home:
         permissions = data.get("permissions", {}) if isinstance(data, dict) else {}
         if isinstance(permissions, dict):
             allow += [r for r in permissions.get("allow", []) if isinstance(r, str)]
+            deny += [r for r in permissions.get("deny", []) if isinstance(r, str)]
             folders += [d for d in permissions.get("additionalDirectories", []) if isinstance(d, str)]
             modes.add(str(permissions.get("defaultMode", "")))
+    missing = [rule for rule in rules.deny if rule not in deny]  # deny rules hold in every mode
     if "bypassPermissions" in modes:
-        return [], broken
-    missing = []
+        return missing, broken
     for rule in rules.allow:
         if rule in allow:
             covered = True
@@ -3363,10 +3384,10 @@ def _permission_findings(facts: Facts) -> list[Finding]:
     missing, broken = missing_permissions(facts.claude_settings, rules, facts.home)
     found = [Finding("permissions", Level.WARN, f"{where} is not valid JSON, so Claude Code ignores it: fix it") for where in broken]
     if missing:
-        return found + [Finding("permissions", Level.WARN, f"agents will stop at permission prompts: the settings that apply in the tasks clone don't "
-                                                           f"allow {', '.join(missing)}. Run asdlc permissions --write in your own terminal: it adds them "
+        return found + [Finding("permissions", Level.WARN, f"agents will stop at permission prompts, or run git with options no rule should let through: "
+                                                           f"the settings that apply in the tasks clone don't have {', '.join(missing)}. Run asdlc permissions --write in your own terminal: it adds them "
                                                            "to the tasks clone's .claude/settings.local.json, keeping what is there and backing it up first")]
-    return found + [Finding("permissions", Level.PASS, f"the {len(rules.allow)} allow rules and {len(rules.directories)} folders normal work needs are set")]
+    return found + [Finding("permissions", Level.PASS, f"the {len(rules.allow)} allow rules, {len(rules.deny)} deny rules and {len(rules.directories)} folders normal work needs are set")]
 
 
 def _mcp_findings(facts: Facts) -> list[Finding]:
@@ -3576,7 +3597,7 @@ def permissions(explicit_board: str | None, cwd: Path, write: bool, as_json: boo
     rules = permission_rules([(e.slug, e.path) for e in repos], board, commands, _plugin_roots(_plugin_facts(claude)))
     target = board / LOCAL_SETTINGS
     skipped = [f"  {slug} {name}: `{run}` ({why}); run it through asdlc record-check, which Bash(asdlc *) allows" for slug, name, run, why in rules.skipped]
-    report = {"settings": str(target), "allow": list(rules.allow), "directories": list(rules.directories),
+    report = {"settings": str(target), "allow": list(rules.allow), "deny": list(rules.deny), "directories": list(rules.directories),
               "skipped": [{"repository": slug, "command": name, "run": run, "why": why} for slug, name, run, why in rules.skipped]}
     if not write:
         _emit(report, as_json, [json.dumps({"permissions": rules.as_settings()}, indent=2), *(["verified commands with no rule of their own:", *skipped] if skipped else []),
