@@ -45,6 +45,22 @@ class RepoSlugTest(unittest.TestCase):
                 self.assertIsNone(slugs.repo_slug(remote))
 
 
+class GithubRepoTest(unittest.TestCase):
+    """The first eval run: a worker probed with `which gh`, which fails when gh is missing; the claim now says where to open a pull request."""
+
+    def test_a_github_remote_gives_owner_and_name(self) -> None:
+        for remote in ("git@github.com:Acme/Web-App.git", "https://github.com/acme/web-app", "ssh://git@github.com:22/acme/web-app.git",
+                       "https://kyle@github.com/acme/web-app.git", "https://github.com/acme/web-app/"):
+            with self.subTest(remote=remote):
+                self.assertIn(slugs.github_repo(remote), ("Acme/Web-App", "acme/web-app"))
+
+    def test_anything_else_gives_none(self) -> None:
+        for remote in ("https://gitlab.com/acme/web-app.git", "git@gitlab.example.com:acme/web-app.git", "/tmp/origins/acme/api.git",
+                       "https://github.com/acme", "https://github.com/group/acme/web-app", "https://notgithub.com/acme/web-app", ""):
+            with self.subTest(remote=remote):
+                self.assertIsNone(slugs.github_repo(remote))
+
+
 class SlugOfTest(unittest.TestCase):
     def test_reads_origin_from_a_real_repository(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

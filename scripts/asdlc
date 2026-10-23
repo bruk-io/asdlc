@@ -71,7 +71,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import assert_never
 
-from repo_slug import slug_of
+from repo_slug import github_repo, origin_url, slug_of
 
 MIN_BACKLOG = (1, 55, 1)  # 1.54 drops frontmatter keys it doesn't know on every edit
 BOARD_BRANCH = "main"
@@ -2373,8 +2373,8 @@ def _where(cwd: Path, task_id: str) -> Where:
     root = Path(top.stdout.strip()) if top.returncode == 0 else None
     marker = root / MARKER if root else None
     if marker is None or not marker.is_file():
-        raise AsdlcError(f"run asdlc record-check from {task_id}'s worktree, the one whose {MARKER} names it (asdlc claim printed it); "
-                         f"{root or cwd} is not a task's worktree, so the check was not run")
+        raise AsdlcError(f"give asdlc record-check {task_id}'s worktree with --in <worktree>, the one whose {MARKER} names it "
+                         f"(asdlc claim printed it); {root or cwd} is not a task's worktree, so the check was not run")
     try:
         recorded = str(json.loads(marker.read_text()).get("task", ""))
     except (ValueError, AttributeError):
@@ -2509,7 +2509,7 @@ def _claim_report(board: Board, task: Task, worker: str, cwd: Path, registry: Ma
     report: dict[str, object] = {
         "claimed": True, "task": task.id, "title": task.title, "worker": worker, "project": task.project or None,
         "parent": task.parent or None, "model": None, "effort": None, "repo": None, "worktree": None, "branch": None, "resumed_from": None,
-        "changes_requested": CHANGES_REQUESTED in task.labels, "note": None,
+        "changes_requested": CHANGES_REQUESTED in task.labels, "github": None, "note": None,
     }
     if isinstance(chosen, Route):
         report |= {"model": chosen.model, "effort": chosen.effort}
@@ -2521,10 +2521,24 @@ def _claim_report(board: Board, task: Task, worker: str, cwd: Path, registry: Ma
     match repo:
         case Path():
             path, resumed = make_worktree(repo, task, worker, board.path)
-            report |= {"repo": str(repo), "worktree": str(path), "branch": task.branch or branch_name(task), "resumed_from": resumed}
+            report |= {"repo": str(repo), "worktree": str(path), "branch": task.branch or branch_name(task), "resumed_from": resumed,
+                       "github": _github(repo)}
         case str() as why:
             report["note"] = f"on the board only: {why}, so no worktree was made"
     return report
+
+
+def _github(repo: Path) -> str | None:
+    """`owner/name` when a pull request can be opened from this machine with gh: gh is installed (or
+    $ASDLC_GH names it; an empty one means none) and the repository's origin is on GitHub. Agents read
+    it from the claim instead of probing for gh, which fails when it is missing."""
+    gh = os.environ.get("ASDLC_GH", shutil.which("gh") or "")
+    return pull_request_repo(gh, origin_url(repo) if gh else None)
+
+
+def pull_request_repo(gh: str, origin: str | None) -> str | None:
+    """`owner/name` for `gh pr create --repo` when there is a gh to run and the origin is on GitHub, else None."""
+    return github_repo(origin) if gh and origin else None
 
 
 def _claim_lines(report: Mapping[str, object]) -> list[str]:
@@ -2709,7 +2723,8 @@ def _review_report(board: Board, claimed: ReviewClaimed, registry: Mapping[str, 
         "claimed": True, "task": task.id, "title": task.title, "reviewer": task.reviewer, "kind": task.review_kind,
         "authors": sorted(authors(task)), "project": task.project, "parent": task.parent or None,
         "repo": str(entry.path) if entry else None, "default_branch": default_branch(entry.path) if entry else None,
-        "branch": branch, "pull_request": pull, "references": list(task.references), "waited": human(claimed.waited),
+        "branch": branch, "pull_request": pull, "github": _github(entry.path) if entry else None,
+        "references": list(task.references), "waited": human(claimed.waited),
         "model": REVIEW.model, "effort": REVIEW.effort, "route": REVIEW.reason, "policies": review_policies(board.path, task.project),
     }
 
@@ -3157,12 +3172,16 @@ BASE_RULES = (
     "Bash(backlog doc list *)", "Bash(backlog doc view *)", "Bash(backlog search *)",
     "Bash(gh pr create *)", "Bash(gh pr view *)", "Bash(gh pr comment *)",
 )
+# The read-only git a worker or reviewer reaches for to find its way around a repository, allowed in
+# task worktrees and the registered clone alike. Agents never `cd` (Claude Code prompts for `cd` with git
+# in one line whatever the rules say), so each is written `git -C <path> <subcommand>`.
+READ_ONLY_GIT = ("ls-files", "grep", "blame", "cat-file", "ls-tree", "merge-base", "rev-list", "describe", "show-ref", "remote get-url")
 # The git subcommands the worker and reviewer agents run in a task's or a review's worktree, as
 # `git -C <worktree> ...`. The board guard refuses pushes to a default branch and force pushes.
 WORKTREE_GIT = ("fetch", "status", "diff", "log", "show", "add", "commit", "push", "rebase", "merge", "switch", "checkout -b",
-                "rev-parse", "branch", "symbolic-ref", "mv", "rm", "restore", "stash", "reset")
-# What the reviewer runs in the registered clone itself.
-CLONE_GIT = ("fetch", "worktree", "show", "rev-parse", "symbolic-ref")
+                "rev-parse", "branch", "symbolic-ref", "mv", "rm", "restore", "stash", "reset", *READ_ONLY_GIT)
+# What the reviewer runs in the registered clone itself: reads, and making and removing its review worktree.
+CLONE_GIT = ("fetch", "worktree", "show", "rev-parse", "symbolic-ref", *READ_ONLY_GIT)
 # A verified command with any of these gets no rule of its own: a rule can't say what it would allow.
 _UNSAFE_IN_RULE = (("*", "a * would be a wildcard in the rule"), ("|", "a pipe"), (";", "a ;"), ("&&", "&&"), ("||", "||"),
                    ("`", "a backtick"), ("$(", "a command substitution"), (">", "a redirect"), ("<", "a redirect"), ("\n", "a line break"))
@@ -4839,11 +4858,14 @@ def init_board(directory: Path) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="asdlc", description="A shared Backlog.md board: claims, worktrees, routing, leads and orchestration.")
     parser.add_argument("--board", help="the board clone (else $ASDLC_BOARD, else git config asdlc.board, else the board clone you are in)")
+    parser.add_argument("--in", dest="folder", metavar="FOLDER", help=IN_HELP)
+    after = argparse.ArgumentParser(add_help=False)  # --in is accepted after the subcommand too
+    after.add_argument("--in", dest="folder", metavar="FOLDER", default=argparse.SUPPRESS, help=IN_HELP)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("init-board", help="create a board repository").add_argument("dir")
+    commands.add_parser("init-board", help="create a board repository", parents=[after]).add_argument("dir")
 
     def add(name: str, text: str, *, task: str | None = None, who: str | None = None, json_output: bool = False) -> argparse.ArgumentParser:
-        sub = commands.add_parser(name, help=text)
+        sub = commands.add_parser(name, help=text, parents=[after])
         if task:
             sub.add_argument("id", help=task)
         if who:
@@ -4870,12 +4892,13 @@ def _parser() -> argparse.ArgumentParser:
     reaping.add_argument("--older-than", help="the stale timeout, such as 2h (else stale_after in the board's asdlc.toml, else 2h)")
     reaping.add_argument("--now", help="the time to judge staleness at, as ISO 8601 (for tests and demonstrations)")
     add("accept", "a person's command: accept an intent and its draft children", task="the intent", json_output=True)
-    approving = commands.add_parser("approve", help="a person's command: approve the plans of tasks, size 2 and up, so their workers build them")
+    approving = commands.add_parser("approve", help="a person's command: approve the plans of tasks, size 2 and up, so their workers build them", parents=[after])
     approving.add_argument("ids", nargs="+", help="the tasks whose plans you approve")
     approving.add_argument("--plan-hash", action="append", default=[], help="the digest of each plan you were shown, in the order of the ids; "
                            "a plan changed since is refused")
     add("mine", "an engineer's workers' tasks, leads and reservations", who="the engineer, such as kyle", json_output=True)
-    commands.add_parser("record-check", help="run a check in the task's worktree and record it on the task: record-check <id> --as <worker> -- <command...>")
+    commands.add_parser("record-check", help="run a check in the task's worktree and record it on the task: "
+                        "record-check <id> --in <worktree> --as <worker> -- <command...>")
     finishing_work = add("finish", "hand your held task to review: In Review with its branch and pull request", task="the task", who=worker, json_output=True)
     finishing_work.add_argument("--branch", help="the task's branch (default: the one recorded when it was claimed)")
     finishing_work.add_argument("--pr", help="the pull request's URL, when there is one")
@@ -4902,35 +4925,72 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def record_check_arguments(words: Sequence[str]) -> tuple[str, str, list[str]] | None:
-    """`<id> --as <worker> -- <command...>`, in either order before the `--`; None when malformed."""
+@dataclass(frozen=True)
+class CheckRequest:
+    """What `record-check` was asked: the task, the worker, the check, and the worktree named with --in (or None)."""
+
+    task: str
+    worker: str
+    command: tuple[str, ...]
+    folder: str | None = None
+
+
+def record_check_arguments(words: Sequence[str]) -> CheckRequest | None:
+    """`<id> --as <worker> [--in <worktree>] -- <command...>`, in any order before the `--`; None when malformed."""
     if "--" not in words:
         return None
     split = list(words).index("--")
-    head, command = list(words[:split]), list(words[split + 1:])
-    worker = None
-    for index, word in enumerate(head):
-        if word == "--as" and index + 1 < len(head):
-            worker = head[index + 1]
-        elif word.startswith("--as="):
-            worker = word.partition("=")[2]
-    rest = [w for i, w in enumerate(head) if w != "--as" and not w.startswith("--as=") and not (i and head[i - 1] == "--as")]
-    if worker is None or len(rest) != 1 or not command:
+    head, command = list(words[:split]), tuple(words[split + 1:])
+    options: dict[str, str] = {}
+    rest: list[str] = []
+    index = 0
+    while index < len(head):
+        word = head[index]
+        if word in ("--as", "--in"):
+            if index + 1 >= len(head):
+                return None
+            options[word], index = head[index + 1], index + 2
+            continue
+        if word.startswith(("--as=", "--in=")):
+            options[word[:4]] = word.partition("=")[2]
+        else:
+            rest.append(word)
+        index += 1
+    if "--as" not in options or len(rest) != 1 or not command:
         return None
-    return rest[0], worker, command
+    return CheckRequest(rest[0], options["--as"], command, options.get("--in"))
 
 
 def command_index(argv: Sequence[str]) -> int | None:
-    """Where the subcommand is, skipping `--board <path>`."""
+    """Where the subcommand is, skipping `--board <path>` and `--in <folder>`."""
     index = 0
     while index < len(argv):
-        if argv[index] == "--board":
+        if argv[index] in ("--board", "--in"):
             index += 2
         elif argv[index].startswith("-"):
             index += 1
         else:
             return index
     return None
+
+
+IN_HELP = ("run as if from this folder (a task's worktree, a code repository or the tasks clone), "
+           "so no agent has to cd; record-check takes it after the task id too")
+
+
+def working_folder(folder: str | None, cwd: Path) -> Path:
+    """The folder a command runs as if from: --in when given, else the current directory.
+
+    Raises:
+        AsdlcError: --in names something that isn't a folder.
+    """
+    if folder is None:
+        return cwd
+    path = Path(folder).expanduser()
+    path = path if path.is_absolute() else cwd / path
+    if not path.is_dir():
+        raise AsdlcError(f"--in {folder}: {path} is not a folder; give the task's worktree (asdlc claim printed it) or a repository")
+    return path.resolve()
 
 
 def _route_command(board: Board, raw_id: str) -> None:
@@ -4966,7 +5026,6 @@ def _stopped(signum: int, frame: object) -> None:
 def main(argv: Sequence[str]) -> int:
     for stopping in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(stopping, _stopped)
-    cwd = Path.cwd()
     parser = _parser()
     split = command_index(argv)
     if split is not None and argv[split] == "board":  # the rest belongs to backlog, flags included
@@ -4976,7 +5035,9 @@ def main(argv: Sequence[str]) -> int:
     else:
         arguments, passthrough = parser.parse_args(argv), []
     as_json = getattr(arguments, "json", False)
+    request = record_check_arguments(passthrough) if arguments.command == "record-check" else None
     try:
+        cwd = working_folder(request.folder if request and request.folder else arguments.folder, Path.cwd())
         match arguments.command:
             case "init-board":
                 _check_backlog()
@@ -5066,12 +5127,11 @@ def main(argv: Sequence[str]) -> int:
                         f"{result['task']} passed review by @{reviewer} ({result['kind']}); it stays In Review for a person to merge")
                 _emit(result, as_json, [line])
             case "record-check":
-                found = record_check_arguments(passthrough)
-                if found is None:
-                    raise AsdlcError("say which task, which worker and which check: asdlc record-check TASK-1 --as kyle.w1 -- ./scripts/check")
+                if request is None:
+                    raise AsdlcError("say which task, which worktree, which worker and which check: "
+                                     "asdlc record-check TASK-1 --in <worktree> --as kyle.w1 -- ./scripts/check")
                 _check_backlog()
-                raw_id, raw_worker, command = found
-                return record_check(board, raw_id, worker_for(raw_worker, _engineer(cwd)), command, cwd)
+                return record_check(board, request.task, worker_for(request.worker, _engineer(cwd)), request.command, cwd)
             case "finish":
                 _check_backlog()
                 worker = worker_for(arguments.worker, _engineer(cwd))

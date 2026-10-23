@@ -9,6 +9,8 @@ An intent with children has exactly one lead: the orchestrator holding the atomi
 
 Keep everything on the board. Your claim can go stale and another orchestrator can take over; whatever is only in this conversation is lost to them. The orchestrator heartbeats the lead at the top of each round (`asdlc heartbeat <intent> --as <engineer>.lead`, orchestrate step 2), reading the intent's id from `asdlc mine --as <engineer> --json` each time rather than remembering it: when the person accepts the intent its id changes from `DRAFT-<n>` to `TASK-<n>`, and Backlog gives the old draft id to the next new draft. Give the lead up with `asdlc release <intent> --as <engineer>.lead` if your engineer stops the work.
 
+Run every command from the tasks clone, where your session started; `asdlc` finds the board from there. To read a code repository, use git with `-C` and its path, such as `git -C <repo> ls-files`, and the Glob, Grep and Read tools on absolute paths (`asdlc repos` gives the paths), never a `cd` first: Claude Code asks a person before any line that changes directory and runs git.
+
 You may run your own helper subagents for research or drafting. They follow the same rules.
 
 ## 1. The spec

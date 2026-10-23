@@ -43,6 +43,18 @@ def repo_slug(remote: str) -> str | None:
     return slug if owner and name and slug else None
 
 
+def github_repo(remote: str) -> str | None:
+    """`owner/name` when the remote is on github.com, as `gh --repo` takes it; None otherwise."""
+    url = remote.strip()
+    host = _SCHEME.sub("", url).split("/", 1)[0] if _SCHEME.match(url) else (url.split(":", 1)[0] if _SCP.match(url) else "")
+    if host.rpartition("@")[2].split(":", 1)[0].lower() not in ("github.com", "www.github.com"):
+        return None
+    parts = [part for part in remote_path(url).split("/") if part]
+    if len(parts) != 2 or not parts[1].removesuffix(".git"):
+        return None
+    return f"{parts[0]}/{parts[1].removesuffix('.git')}"
+
+
 def origin_url(repo: Path) -> str | None:
     """The `origin` remote's URL as git resolves it (insteadOf rules applied), or None."""
     done = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "origin"], capture_output=True, text=True)

@@ -1,0 +1,68 @@
+# Plan: background agents that never need a prompt or a `cd`
+
+- Spec: [`spec/agentic-sdlc-plugin.md`](../spec/agentic-sdlc-plugin.md), approved 2026-10-20 (#2)
+- Status: approved by the owner in the session on 2026-10-23, before building; it ships in the same pull request as the change.
+- Delivers: R12 (parallel workers each in their own worktree, which they must be able to work in unattended), R13 (one check command, recorded from wherever the worker is), R16 (a refusal says why and the route past it), and the stand-in evidence R14 asks for: the first real eval run's tool errors, fixed at their causes
+
+The first real run of the `approval-before-build` eval (plan/evals.md, "What the real transcripts showed") passed, but 14 of its 63 tool calls failed, and one planning worker wrote a plan with placeholder file paths because it couldn't list its worktree. Every error came from three causes in the plugin, not in the model: the agent files told workers to `cd <worktree> && ...`, which Claude Code always prompts for when the line also runs git (and nobody is there to answer a background worker's prompt); `asdlc permissions` had no rule for the read-only git commands a planner reaches for first (`git -C <worktree> ls-files`); and `asdlc record-check` worked only from inside the worktree. This change removes the need for `cd` altogether, allows the read-only git a worker or reviewer uses, and lets `asdlc-plugin` take the slug the orchestrator already has.
+
+## The first run's tool errors, by cause
+
+Case `approval-before-build`, trial 1, plugin `b2a2cff` (`.eval-results/20261023T051741Z-b2a2cff-with-plugin`), 63 calls, 14 errors, 7 of them permission denials:
+
+| # | Who | Call | Error | Cause |
+|---|---|---|---|---|
+| 1, 2 | both planners | `cd <worktree> && cat .asdlc-task && asdlc board task view ... && git ls-files \| head -50` | denied: "changes directory before running a version-control command" | `cd` with git in one line: Claude Code prompts for it whatever the allow rules say. worker.md said to run asdlc "from the worktree" |
+| 3, 4 | both planners | `git -C <worktree> ls-files` | denied: requires approval | no allow rule for `ls-files` (or any read-only git beyond status, diff, log, show) |
+| 5, 6 | both planners | Read on the worktree folder | EISDIR | no way left to list the files; nothing told them about Glob |
+| 7 | orchestrator | `asdlc mine --json \| python3 -c ...` | denied: python3 requires approval | piping asdlc's JSON through an interpreter no rule allows |
+| 8, 11 | both builders | `asdlc record-check ...` from the tasks clone | refused: not a task's worktree | record-check took the worktree only from the working directory |
+| 9, 13 | both builders | `cd <worktree> && asdlc record-check ... -- python3 -m unittest -q` | exit 1 | the deliberately failing test before the fix (the plan's red step): expected, not a defect |
+| 10, 12 | both builders | `cd <worktree> && git add ... && git commit ...` (one also `python3 -m unittest` bare) | denied | `cd` with git again; worker.md's commit step used `git -C`, but its record-check step had taught `cd` |
+| 14 | builder 1 | `git -C <worktree> push -u origin HEAD; which gh` | exit 1 | `which gh` exits 1 when gh is missing: the worker probed for something the claim could have told it |
+
+Not counted as errors, but the same causes: `asdlc-plugin status acme-api --json` (the slug, where it wanted a path) failed inside a compound line whose last command succeeded; the TASK-2 planner's first plan named `<module defining login(user, password)>` and the orchestrator had to send it back.
+
+## Files that change
+
+| File | New | What it holds | Requirements |
+|---|---|---|---|
+| `scripts/asdlc` | no | `READ_ONLY_GIT` (ls-files, grep, blame, cat-file, ls-tree, merge-base, rev-list, describe, show-ref, `remote get-url`) added to the worktree rules and the registered clone's, each with its bare form as before. A global `--in <folder>`, before or after the subcommand, that every command uses as its working directory, and `record-check <id> --in <worktree> --as <worker> -- <command>`; the refusal outside a worktree names `--in`. A `github` field on the claim and review-claim reports: the origin's `owner/name` when it is on GitHub and `gh` is installed, else null, from `github_repo` (pure) | R12, R13, R16 |
+| `scripts/repo_slug.py` | no | `github_repo(remote)`: `owner/name` for a github.com remote, else None | R12 |
+| `scripts/asdlc-plugin` | no | `status`, `scaffold` and `verify-command` take a repository path or a registered slug, and `check`/`publish --repo` too; `repo_argument` (pure) decides, and an unknown name is refused with the registered slugs | R16 |
+| `agents/worker.md` | no | Where each command runs: asdlc from anywhere, record-check with `--in`, git always as `git -C <worktree>`, one command per call, files listed and read with Glob, Grep and Read; never `cd`, never an interpreter in a pipe; the pull request with `gh pr create --repo <github>` only when the claim gave `github` | R12 |
+| `agents/reviewer.md` | no | The same for the reviewer: `git -C`, the file tools, no `cd`; comment on the pull request only when the claim gave `github` | R12, R15 |
+| `skills/orchestrate/SKILL.md` | no | Run every command from the tasks clone; `asdlc-plugin status` with the slug or the path; the launch prompt carries `github`; read JSON yourself rather than pipe it into an interpreter | R12 |
+| `skills/lead/SKILL.md`, `skills/onboard-repo/SKILL.md` | no | Where their commands run; `git -C` and the file tools to read a repository; `<repo>` may be the slug | R12 |
+| `tests/test_asdlc.py` | no | `--in` for record-check (from the tasks clone, before or after the id) and as a global option; the refusal names `--in`; `github_repo`; the claim report's `github` | R13 |
+| `tests/test_asdlc_plugin.py` | no | `repo_argument` over paths, registered slugs and unknown names; `status` by slug against a real registry | R16 |
+| `tests/test_guard_board.py` | no | The walk over every command in the skills and agents: no `cd` in any of them; every part of every agent command, and of the orchestrator's skills, covered by an allow rule, with no `cd` exemption; Claude Code's cd-with-git prompt modelled and asserted absent; the new read-only git allowed bare and with arguments, in worktrees and the clone, and still not the clone's writes | R12, R16 |
+| `README.md`, `docs/guide.md` | no | `--in`, the read-only git in the permissions list, `asdlc-plugin` taking a slug | - |
+| `CHANGELOG.md` | no | Unreleased: these fixes | - |
+| `plan/worker-permissions.md` | yes | This plan | - |
+
+Nothing under `evals/` changes (R23).
+
+## Order of work
+
+1. The transcript read and every error listed with its cause (above).
+2. Claude Code's permissions page (code.claude.com/docs/en/permissions) for how compound commands and `cd` are matched: each part of a compound line must be allowed on its own; `cd` into an additional directory is read-only; but `cd` with git in one line prompts whatever the rules say, and an allow rule can't change that. So the fix is to remove `cd`, not to allow it.
+3. `scripts/asdlc`: `--in`, the read-only git rules, `github`; their tests.
+4. `scripts/asdlc-plugin`: slugs; its tests.
+5. The agent files and skills; the walk's tests extended until they pass with no `cd` exemption.
+6. `./scripts/check`, including `scripts/eval validate`.
+7. One real run of `approval-before-build` against this branch's commit (`scripts/eval run --case approval-before-build --trials 1 --plugin <commit>`), compared with the first.
+
+## Risks
+
+- **`git grep -O<program>` runs a program.** The new `grep` rule allows it in a worktree, as the `*` in every existing `git -C <worktree>/* ...` rule already allows `-c` options before the subcommand. The rules make normal work prompt-free; they were never the boundary (the board guard, the sandbox and the worktree are). Noted, not changed here.
+- **A slug that is also a folder name.** `repo_argument` treats a word with no `/` that is a registered slug as the slug, else as a path; a path with a slash, `.` or `~` is always a path. A folder in the working directory named exactly like a registered slug is read as the slug, which is the repository it names anyway.
+- **`--in` on every command.** It changes only where the command looks for the board, the engineer and the code repository, as `cd` would; the guard reads the same command words, and record-check still refuses a folder that isn't the task's worktree.
+- **The eval suite pins asdlc's interfaces.** The change only adds (`--in`, a report field, more rules, a slug where a path was), so the cases' reference runs are unchanged; `scripts/eval validate` proves it.
+- **One trial.** A single run can't show a rate; it shows whether the causes above are gone. The report says so.
+
+## Proof
+
+- `./scripts/check` passes: artefacts, every test, and `scripts/eval validate`.
+- The walk: every command the agents and skills give passes the guard, none has a `cd`, and every part of every agent and orchestrator command is allowed by a rule `asdlc permissions` writes.
+- One real run of `approval-before-build`, natively, against this branch's commit: passed, with the tool calls, the errors by cause, the turns, the tokens and the cost next to the first run's (63 calls, 14 errors, 18 turns, $0.50).

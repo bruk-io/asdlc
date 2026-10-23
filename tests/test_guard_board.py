@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -253,6 +254,8 @@ _FILLED = {
 }
 _COMMAND = re.compile(r"^(asdlc|asdlc-plugin|backlog|git|gh|cd|uv run) \S")
 # What the skills name as a person's, or as never to do: the guard refuses these by design.
+# Commands a skill gives for a person's own session: setting their identity, and checking this plugin's own artefacts.
+_PERSONS_SESSION = re.compile(r"git config --global|scripts/artefacts\.py")
 _REFUSED_BY_DESIGN = re.compile(r"asdlc (accept|approve)\b|permissions --write|-s Done|gh pr merge|--approve|--request-changes|"
                                 r"--force|git push origin main")
 
@@ -300,6 +303,31 @@ class SkillCommandsTest(unittest.TestCase):
                 self.assertTrue(any(w == where and part in command for w, command in found), f"{where} gives no command with {part}")
 
 
+def compound_parts(command: str) -> list[str]:
+    """The subcommands of a compound line, split outside quotes on the separators code.claude.com's permissions page
+    names (`&&`, `||`, `;`, `|`, `|&`, `&` and newlines), each joined back as the shell would read it."""
+    lexer = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:  # unbalanced quotes: Claude Code can't parse it either, and asks
+        return [command]
+    parts: list[list[str]] = [[]]
+    for token in tokens:
+        if token and set(token) <= set(";&|"):
+            parts.append([])
+        else:
+            parts[-1].append(token)
+    return [shlex.join(words) if any(not re.fullmatch(r"[\w@%+=:,./<>*~-]+", w) for w in words) else " ".join(words) for words in parts]
+
+
+def prompts_for_cd_with_git(command: str) -> bool:
+    """Claude Code's rule that no allow rule overrides: a line that changes directory and runs git asks a person
+    (code.claude.com/docs/en/permissions, Read-only commands), so a background agent's line is refused."""
+    parts = compound_parts(command)
+    return any(p == "cd" or p.startswith("cd ") for p in parts) and any(re.match(r"git(\s|$)", p) for p in parts)
+
+
 def rule_matches(rule: str, command: str) -> bool:
     """A Bash allow rule against a simple command, as code.claude.com's permissions page describes it: a `*` matches any
     text; a trailing ` *` (or `:*`) that is the rule's only wildcard also matches the bare command; otherwise exact."""
@@ -335,17 +363,51 @@ class BackgroundPermissionsTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertFalse(any(rule_matches(rule, command) for rule in self.RULES.allow), command)
 
-    def test_every_command_the_agents_give_is_allowed(self) -> None:
-        found = [(where, command) for where, command in skill_commands() if where.startswith("agents/")]
-        self.assertGreater(len(found), 25)
+    def test_every_command_the_agents_and_the_orchestrator_give_is_allowed(self) -> None:
+        """The first real eval run: background workers were refused `git -C <worktree> ls-files` and every `cd <worktree> && ...`
+        line, so a planner wrote placeholder paths. Every part of every command the agents and the orchestrator's skills give
+        is now covered by a rule, with no exemption for `cd`."""
+        found = [(where, command) for where, command in skill_commands() if where.startswith(("agents/", "skills/"))]
+        self.assertGreater(len(found), 120)
         for where, command in found:
-            if _REFUSED_BY_DESIGN.search(command) or "${CLAUDE_PLUGIN_ROOT}" in command:
-                continue  # a person's or refused by design; the uv fallback when asdlc isn't on PATH, which doctor fails
-            for part in re.split(r"\s*(?:&&|\|\||;|\|)\s*", command):
-                if part.startswith("cd ") or not part or re.fullmatch(r"git -C \S+", part):
-                    continue  # a cd into a worktree, an additional directory, is read-only; a bare `git -C <path>` is prose
+            if _REFUSED_BY_DESIGN.search(command) or _PERSONS_SESSION.search(command):
+                continue  # a person's, refused by design, or only in a person's session
+            command = command.replace('"${CLAUDE_PLUGIN_ROOT}/scripts/', f"{ROOT}/scripts/").replace("${CLAUDE_PLUGIN_ROOT}", str(ROOT))
+            command = re.sub(rf"({re.escape(str(ROOT))}/scripts/[\w.-]+)\"", r"\1", command)
+            for part in compound_parts(command):
+                if not part or re.fullmatch(r"git -C \S+", part):
+                    continue  # a bare `git -C <path>` is prose
                 with self.subTest(where=where, command=part):
                     self.assertTrue(any(rule_matches(rule, part) for rule in self.RULES.allow), f"no allow rule covers: {part}")
+
+    def test_no_command_an_agent_is_given_changes_directory(self) -> None:
+        """Claude Code asks a person before a line that changes directory and runs git, whatever the rules allow, so a
+        background agent's `cd <worktree> && git ...` is refused. The agents, skills and team templates give no `cd` at all."""
+        found = [(where, command) for where, command in skill_commands() if where != "docs/guide.md"]  # the guide's are a person's
+        for where, command in found:
+            with self.subTest(where=where, command=command):
+                self.assertFalse(any(part.startswith("cd ") or part == "cd" for part in compound_parts(command)), command)
+                self.assertFalse(prompts_for_cd_with_git(command), command)
+
+    def test_the_cd_with_git_model_flags_the_first_runs_refused_lines(self) -> None:
+        for command in ("cd /work/app.worktrees/task-1 && cat .asdlc-task && asdlc board task view TASK-1 --plain && git ls-files | head -50",
+                        "cd /work/app.worktrees/task-1 && git add login.py test_login.py && git commit -q -m x"):
+            with self.subTest(command=command):
+                self.assertTrue(prompts_for_cd_with_git(command))
+        for command in ("git -C /work/app.worktrees/task-1 ls-files", "asdlc record-check TASK-1 --in /work/app.worktrees/task-1 --as kyle.w1 -- git status"):
+            with self.subTest(command=command):
+                self.assertFalse(prompts_for_cd_with_git(command))
+
+    def test_the_read_only_git_agents_reach_for_is_allowed_in_worktrees_and_the_clone(self) -> None:
+        for folder in ("/work/app.worktrees/task-1", "/work/app.worktrees/review-task-1-kyle.r1", "/work/app"):
+            for sub in ("ls-files", "grep", "blame", "cat-file", "ls-tree", "merge-base", "rev-list", "describe", "show-ref", "remote get-url"):
+                for command in (f"git -C {folder} {sub}", f"git -C {folder} {sub} x y"):
+                    with self.subTest(command=command):
+                        self.assertTrue(any(rule_matches(rule, command) for rule in self.RULES.allow), command)
+        for command in ("git -C /work/app commit -m x", "git -C /work/app push origin x", "git -C /work/app remote add evil x",
+                        "git -C /work/board ls-files"):
+            with self.subTest(command=command):
+                self.assertFalse(any(rule_matches(rule, command) for rule in self.RULES.allow), command)
 
 
 class PushTest(unittest.TestCase):
