@@ -53,35 +53,30 @@ Setting up takes about twenty minutes. `asdlc doctor` tells you when you're done
    ```
 
    It records the clone on this machine only and sets `asdlc.board` in that repository. Work is offered to you only in repositories registered here.
-5. Let background workers run without asking you (next section).
-6. Run `asdlc doctor`. Every line says pass, warn or FAIL, and each warning or failure says what to do. Fix the failures and run it again until it exits cleanly. Warnings are worth reading: a missing `gh` means your workers can't open pull requests, and a missing permission means a worker will stop at a prompt nobody answers.
+5. Let background workers run without asking you: `asdlc permissions --write` (next section).
+6. Run `asdlc doctor`. Every line says pass, warn or FAIL, and each warning or failure says what to do. Fix the failures and run it again until it exits cleanly. Warnings are worth reading: a missing `gh` means your workers can't open pull requests, and missing permissions mean a worker will stop at a prompt nobody answers.
 
 ## Permissions
 
-Workers and reviewers run as background subagents of your orchestrator. A background agent can't stop to ask you, so a command that would prompt for permission stalls or is refused, depending on your Claude Code version. Allow what they run, once, in your user settings, `~/.claude/settings.json` (merge it with what is there):
+Workers and reviewers run as background subagents of your orchestrator, and nobody is there to answer a permission prompt: a command that prompts stalls the worker or is refused. Normal work should never prompt. `asdlc permissions` prints the Claude Code allow rules it needs on this machine:
 
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(asdlc *)",
-      "Bash(asdlc-plugin *)",
-      "Bash(git *)",
-      "Bash(gh pr create *)",
-      "Bash(gh pr comment *)",
-      "Edit(~/src/*.worktrees/**)"
-    ],
-    "additionalDirectories": ["/home/kyle/src"]
-  }
-}
+- `asdlc` and `asdlc-plugin`, every subcommand (the board guard still refuses what is a person's, such as `asdlc accept`);
+- `backlog`'s read commands (`task list`, `task view`, `draft list`, `draft view`, `doc list`, `doc view`, `search`), since every change to the board goes through `asdlc board`;
+- `git`, all of it: workers run `git -C <worktree> ...`, which no narrower rule matches, and the board guard refuses pushes to a default branch and force pushes whatever this allows;
+- `gh pr create`, `gh pr view` and `gh pr comment`, for pull requests and review comments;
+- `uv run`, which runs the plugin's scripts when they aren't on your `PATH`;
+- each registered repository's verified commands from its plugin's `commands.toml` (each part of a command joined with `&&` gets a rule of its own, since Claude Code matches the parts separately);
+- edits in the worktree folders beside each registered clone and beside your tasks clone, and those folders as `additionalDirectories`, so agents can read and edit there.
+
+Add them to your user settings, `~/.claude/settings.json`, in your own terminal:
+
+```sh
+asdlc permissions --write
 ```
 
-- `Bash(asdlc *)` covers every asdlc command, including the repository's checks a worker runs through `asdlc record-check <task> --as <worker> -- <check>`, and `Bash(asdlc-plugin *)` the commands onboarding proves with `asdlc-plugin verify-command`. So a repository's check commands need no rules of their own as long as agents run them that way. The board guard still judges the command inside a recorded check.
-- `Bash(git *)` covers `git -C <worktree> ...` too, which a narrower rule such as `Bash(git push *)` wouldn't. The board guard refuses pushes to a default branch and force pushes, whatever this allows.
-- Task worktrees are made beside your clones, `<clone>.worktrees/<task>`, outside the tasks repository where your orchestrator session runs. `additionalDirectories` (an absolute path) lets agents read there, and the `Edit` rule lets them edit there; adjust both to where your clones live.
-- `asdlc doctor` checks these rules and folders and warns, naming what is missing.
+It keeps everything already in the file, adds only what is missing, and backs the file up first (`settings.json.<time>.bak`). Run it again after you register a repository or a repository's plugin changes its commands; `asdlc doctor` warns, naming the missing rules, whenever it is due. The board's guard only ever refuses or allows, never asks, so it adds no prompts of its own. The rule syntax is Claude Code's: <https://code.claude.com/docs/en/permissions>.
 
-Use `asdlc board` for every change to the board. If you have Backlog.md's own MCP server configured, the board guard refuses its writes, which never commit or push, and `asdlc doctor` warns about it; its reads are fine.
+asdlc works through the `backlog` CLI only. Don't add Backlog.md's MCP server: it writes the board's files without committing or pushing them and bypasses the board's rules, the guard's included. `asdlc doctor` warns when one is configured.
 
 ## A day with it
 

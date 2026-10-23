@@ -33,6 +33,7 @@ Usage:
   asdlc [--board <path>] review-next --as <reviewer> [--fallback] [--json]
   asdlc [--board <path>] review-done <id> --as <reviewer> --verdict clean|changes --notes <text> [--json]
   asdlc [--board <path>] doctor [--json]
+  asdlc [--board <path>] permissions [--write] [--json]      (--write is a person's command)
   asdlc [--board <path>] stats [--since <date>] [--json]
 
 The board is `--board`, else $ASDLC_BOARD, else `git config asdlc.board`, else the board
@@ -2687,6 +2688,7 @@ class Facts:
     leftovers: tuple[Path, ...] = ()
     published: tuple[PublishedCheck, ...] = ()
     home: Path = Path("~")
+    plugin_commands: tuple[tuple[str, str], ...] = ()  # (slug, commands.toml text) of each registered repository's plugin
     claude_settings: tuple[tuple[str, str], ...] = ()  # (path, text) of each Claude Code settings file that applies in the board clone
     mcp_configs: tuple[tuple[str, str], ...] = ()  # (path, text) of each file that configures MCP servers
 
@@ -2887,8 +2889,77 @@ def _published_findings(facts: Facts) -> list[Finding]:
             for p in facts.published]
 
 
-# The commands a background worker or reviewer runs without anyone to answer a prompt.
-NEEDED_COMMANDS = ("asdlc", "asdlc-plugin", "git", "gh pr create", "gh pr comment")
+# The Bash commands agents run in normal work, as prefix rules. backlog is read-only here:
+# every board change goes through asdlc board, so only reads are allowed directly.
+BASE_RULES = (
+    "Bash(asdlc *)", "Bash(asdlc-plugin *)",
+    "Bash(backlog task list *)", "Bash(backlog task view *)", "Bash(backlog draft list *)", "Bash(backlog draft view *)",
+    "Bash(backlog doc list *)", "Bash(backlog doc view *)", "Bash(backlog search *)",
+    "Bash(git *)", "Bash(gh pr create *)", "Bash(gh pr view *)", "Bash(gh pr comment *)", "Bash(uv run *)",
+)
+
+
+@dataclass(frozen=True)
+class Rules:
+    """The Claude Code permissions the pilot needs on this machine: allow rules and folders to add."""
+
+    allow: tuple[str, ...]
+    directories: tuple[str, ...]
+
+    def as_settings(self) -> dict[str, list[str]]:
+        return {"allow": list(self.allow), "additionalDirectories": list(self.directories)}
+
+
+def command_parts(run: str) -> list[str]:
+    """The simple commands in a `commands.toml` run line, since Claude Code matches each part of
+    a compound command on its own."""
+    parts, current, quote, index = [], "", "", 0
+    while index < len(run):
+        char = run[index]
+        if quote:
+            quote = "" if char == quote else quote
+        elif char in "'\"":
+            quote = char
+        elif run.startswith(("&&", "||"), index) or char in ";\n":
+            parts.append(current)
+            current, index = "", index + (1 if char in ";\n" else 2)
+            continue
+        current += char
+        index += 1
+    return [part.strip() for part in [*parts, current] if part.strip()]
+
+
+def permission_rules(repos: Sequence[tuple[str, Path]], board: Path | None, commands: Mapping[str, str]) -> Rules:
+    """The allow rules and folders for normal work: asdlc's own commands, backlog's reads, git, gh
+    for pull requests, uv, each registered repository's verified commands, and edits in the
+    worktrees beside each registered clone and beside the board (where onboarding works)."""
+    allow = list(BASE_RULES)
+    for slug, _ in repos:
+        try:
+            tables = tomllib.loads(commands.get(slug, ""))
+        except tomllib.TOMLDecodeError:
+            continue
+        for table in tables.values():
+            if isinstance(table, dict) and isinstance(table.get("run"), str):
+                allow += [f"Bash({part})" for part in command_parts(table["run"])]
+    folders = [f"{path}.worktrees" for _, path in repos] + ([f"{board}.worktrees"] if board else [])
+    allow += [f"Edit(/{folder}/**)" for folder in folders]
+    return Rules(tuple(dict.fromkeys(allow)), tuple(dict.fromkeys(folders)))
+
+
+def merge_permissions(settings: Mapping[str, object], rules: Rules) -> tuple[dict[str, object], list[str]]:
+    """The settings with the rules' allow entries and folders added where missing, everything else
+    kept as it was, and what was added. The input is not changed."""
+    merged = json.loads(json.dumps(settings))
+    permissions = merged.setdefault("permissions", {})
+    added = []
+    for key, wanted in (("allow", rules.allow), ("additionalDirectories", rules.directories)):
+        present = permissions.setdefault(key, [])
+        for entry in wanted:
+            if entry not in present:
+                present.append(entry)
+                added.append(entry)
+    return merged, added
 
 
 def _bash_prefix(rule: str) -> str | None:
@@ -2906,7 +2977,10 @@ def _bash_prefix(rule: str) -> str | None:
 
 
 def allows_command(rules: Iterable[str], command: str) -> bool:
-    return any((prefix := _bash_prefix(rule)) is not None and (prefix == "" or command == prefix or command.startswith(prefix + " ")) for rule in rules)
+    """Whether an allow rule approves the command: an exact rule for it, or a prefix rule it starts with."""
+    rules = list(rules)
+    return f"Bash({command})" in rules or any(
+        (prefix := _bash_prefix(rule)) is not None and (prefix == "" or command == prefix or command.startswith(prefix + " ")) for rule in rules)
 
 
 def _glob(pattern: str) -> re.Pattern[str]:
@@ -2951,20 +3025,17 @@ def _under(path: str, folders: Iterable[str], home: Path) -> bool:
     return False
 
 
-PERMISSIONS_SNIPPET = "docs/guide.md, Permissions, has the settings to copy"
-
-
-def _permission_findings(facts: Facts) -> list[Finding]:
-    """I10: background workers stop at a permission prompt nobody answers, so the allow rules they need must be set."""
+def missing_permissions(settings: Sequence[tuple[str, str]], rules: Rules, home: Path) -> tuple[list[str], list[str]]:
+    """The needed rules and folders the settings files don't cover yet, and the files that aren't valid JSON."""
     allow: list[str] = []
     folders: list[str] = []
     modes: set[str] = set()
-    found: list[Finding] = []
-    for where, text in facts.claude_settings:
+    broken = []
+    for where, text in settings:
         try:
             data = json.loads(text)
         except ValueError:
-            found.append(Finding("permissions", Level.WARN, f"{where} is not valid JSON, so Claude Code ignores it: fix it"))
+            broken.append(where)
             continue
         permissions = data.get("permissions", {}) if isinstance(data, dict) else {}
         if isinstance(permissions, dict):
@@ -2972,30 +3043,34 @@ def _permission_findings(facts: Facts) -> list[Finding]:
             folders += [d for d in permissions.get("additionalDirectories", []) if isinstance(d, str)]
             modes.add(str(permissions.get("defaultMode", "")))
     if "bypassPermissions" in modes:
-        return found + [Finding("permissions", Level.PASS, "defaultMode is bypassPermissions, so nothing prompts")]
-    missing = [f"Bash({command} *)" for command in NEEDED_COMMANDS if not allows_command(allow, command)]
+        return [], broken
+    missing = []
+    for rule in rules.allow:
+        if rule.startswith("Bash("):
+            command = rule[5:-1].removesuffix(" *")
+            covered = allows_command(allow, command)
+        else:
+            covered = "acceptEdits" in modes or rule in allow or allows_edit(allow, f"{rule[6:-4]}/task-1/file", home)
+        if not covered:
+            missing.append(rule)
+    missing += [folder for folder in rules.directories if not _under(folder, folders, home)]
+    return missing, broken
+
+
+def _permission_findings(facts: Facts) -> list[Finding]:
+    """I10: no permission prompts during normal work, so the allow rules asdlc permissions writes must be there."""
+    rules = permission_rules([(r.slug, r.path) for r in facts.repos if r.exists], facts.board, dict(facts.plugin_commands))
+    missing, broken = missing_permissions(facts.claude_settings, rules, facts.home)
+    found = [Finding("permissions", Level.WARN, f"{where} is not valid JSON, so Claude Code ignores it: fix it") for where in broken]
     if missing:
-        found.append(Finding("permissions", Level.WARN, f"no allow rule for {', '.join(missing)}, so a background worker or reviewer stops at a "
-                                                        f"permission prompt nobody answers: add them to permissions.allow in ~/.claude/settings.json "
-                                                        f"({PERMISSIONS_SNIPPET})"))
-    else:
-        found.append(Finding("permissions", Level.PASS, f"allow rules cover {', '.join(NEEDED_COMMANDS)}"))
-    for repo in (r for r in facts.repos if r.exists):
-        worktrees = f"{repo.path.parent}/{repo.path.name}.worktrees"
-        problems = []
-        if not _under(worktrees, folders, facts.home):
-            problems.append(f"add {repo.path.parent} (or {worktrees}) to permissions.additionalDirectories")
-        if "acceptEdits" not in modes and not allows_edit(allow, f"{worktrees}/task-1/file", facts.home):
-            problems.append(f"allow edits there, such as Edit(/{worktrees}/**)")
-        area = f"permissions {repo.slug}"
-        found.append(Finding(area, Level.WARN, f"workers edit task worktrees in {worktrees}, outside the board clone, and would stop at a prompt: "
-                                               f"{'; '.join(problems)} ({PERMISSIONS_SNIPPET})") if problems else
-                     Finding(area, Level.PASS, f"workers may read and edit {worktrees}"))
-    return found
+        return found + [Finding("permissions", Level.WARN, f"agents will stop at permission prompts: your Claude Code settings don't allow "
+                                                           f"{', '.join(missing)}. Run asdlc permissions --write in your own terminal to add them "
+                                                           "to ~/.claude/settings.json (it keeps what is there and backs the file up first)")]
+    return found + [Finding("permissions", Level.PASS, f"the {len(rules.allow)} allow rules and {len(rules.directories)} folders normal work needs are set")]
 
 
 def _mcp_findings(facts: Facts) -> list[Finding]:
-    """I8: a Backlog.md MCP server writes the board without pushing; the guard refuses its writes."""
+    """I8: asdlc works through the backlog CLI only; a Backlog.md MCP server bypasses the board's rules."""
     found = []
     for where, text in facts.mcp_configs:
         try:
@@ -3008,10 +3083,10 @@ def _mcp_findings(facts: Facts) -> list[Finding]:
         for group in servers:
             for name, config in (group.items() if isinstance(group, dict) else ()):
                 if "backlog" in f"{name} {json.dumps(config)}".casefold():
-                    found.append(Finding("backlog mcp", Level.WARN, f"the MCP server {name} in {where} is Backlog.md's: it writes the board without "
-                                                                    "committing or pushing, so the board guard refuses its writes. Change the board "
-                                                                    f"with asdlc board; remove the server (claude mcp remove {name}) unless you use "
-                                                                    "it only to read"))
+                    found.append(Finding("backlog mcp", Level.WARN, f"the MCP server {name} in {where} is Backlog.md's. asdlc works through "
+                                                                    "the backlog CLI only: the MCP server writes the board without committing or "
+                                                                    "pushing and bypasses the board's rules, the guard's included. Remove it: "
+                                                                    f"claude mcp remove {name}"))
     return found
 
 
@@ -3151,8 +3226,9 @@ def gather(explicit_board: str | None, cwd: Path) -> Facts:
     except (ValueError, AttributeError):
         name = None
     claude_settings, mcp_configs = _claude_files(board)
+    commands = tuple((r.slug, text) for r in facts.repos if (text := read(board / "plugins" / r.slug / "commands.toml")) is not None)
     return replace(
-        facts, board=board, claude_settings=claude_settings, mcp_configs=mcp_configs,
+        facts, board=board, claude_settings=claude_settings, mcp_configs=mcp_configs, plugin_commands=commands,
         devs=read(board / "devs" / f"{engineer.removeprefix('@')}.yaml") if engineer else None,
         dirty=_git(board, "status", "--porcelain", "--untracked-files=no").stdout.strip(),
         branch=_git(board, "branch", "--show-current").stdout.strip(),
@@ -3161,6 +3237,50 @@ def gather(explicit_board: str | None, cwd: Path) -> Facts:
         settings=read(board / "asdlc.toml"), marketplace=name if isinstance(name, str) else None,
         plugins=_plugin_facts(claude), leftovers=_leftovers(board, facts.repos), published=_published(board, facts.repos),
     )
+
+
+def _user_settings() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser() / "settings.json"
+
+
+def permissions(explicit_board: str | None, cwd: Path, write: bool, as_json: bool, now: datetime) -> int:
+    """Print the Claude Code allow rules normal work needs on this machine; with `write`, merge them into
+    the user's settings, keeping everything there and backing the file up first.
+
+    Raises:
+        AsdlcError: the registry or the settings file is unreadable, or the settings file isn't JSON.
+    """
+    try:
+        board: Path | None = resolve_board(explicit_board, cwd)
+    except AsdlcError:
+        board = None
+    repos = sorted(_registry().values(), key=lambda e: e.slug)
+    commands = {e.slug: text for e in repos if board and (path := board / "plugins" / e.slug / "commands.toml").is_file() for text in [path.read_text()]}
+    rules = permission_rules([(e.slug, e.path) for e in repos], board, commands)
+    target = _user_settings()
+    if not write:
+        _emit({"settings": str(target), **rules.as_settings(), "allow": list(rules.allow), "directories": list(rules.directories)}, as_json,
+              [json.dumps({"permissions": rules.as_settings()}, indent=2), f"(asdlc permissions --write merges these into {target})"])
+        return 0
+    text = target.read_text() if target.is_file() else "{}"
+    try:
+        current = json.loads(text)
+    except ValueError:
+        raise AsdlcError(f"{target} is not valid JSON, so asdlc won't rewrite it: fix it, then run asdlc permissions --write again") from None
+    if not isinstance(current, dict):
+        raise AsdlcError(f"{target} is not a JSON object of settings; nothing was changed")
+    merged, added = merge_permissions(current, rules)
+    if not added:
+        _emit({"settings": str(target), "added": []}, as_json, [f"{target} already allows everything normal work needs: nothing to add"])
+        return 0
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_file():
+        backup = target.with_name(f"{target.name}.{now.strftime('%Y%m%dT%H%M%S')}.bak")
+        shutil.copy2(target, backup)
+        _say(f"backed up {target} to {backup}")
+    target.write_text(json.dumps(merged, indent=2) + "\n")
+    _emit({"settings": str(target), "added": added}, as_json, [f"added to {target}:", *(f"  {entry}" for entry in added)])
+    return 0
 
 
 def doctor(explicit_board: str | None, cwd: Path, as_json: bool) -> int:
@@ -3516,6 +3636,8 @@ def _parser() -> argparse.ArgumentParser:
     reviewing.add_argument("--fallback", action="store_true",
                            help="also take this engineer's own work once it has waited longer than review_fallback_after (a same-machine review)")
     reviewing.add_argument("--now", help="the time to judge the wait at, as ISO 8601 (for tests and demonstrations)")
+    add("permissions", "the Claude Code allow rules normal work needs on this machine; --write adds them to your settings (a person's command)",
+        json_output=True).add_argument("--write", action="store_true", help="merge them into ~/.claude/settings.json, keeping what is there, after a backup")
     add("doctor", "check that this machine is ready: tools, identity, the board, settings, repositories, plugins and leftovers", json_output=True)
     measuring = add("stats", "how the pilot is going: claims, review times, round trips, races, onboardings", json_output=True)
     measuring.add_argument("--since", help="count from this date or time, as ISO 8601 (else from the board's start)")
@@ -3614,6 +3736,8 @@ def main(argv: Sequence[str]) -> int:
                 return register(arguments.register_board or arguments.board, cwd, as_json)
             case "doctor":
                 return doctor(arguments.board, cwd, as_json)
+            case "permissions":
+                return permissions(arguments.board, cwd, arguments.write, as_json, datetime.now())
         board = open_board(resolve_board(arguments.board, cwd))
         match arguments.command:
             case "route":

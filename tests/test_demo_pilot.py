@@ -107,11 +107,6 @@ class PilotReadinessTest(review.CrossMachineReviewTest):
         }
         for machine in (self.ann, self.kyle):
             state = write(machine.home / "claude-state.json", json.dumps(states[machine.name]))
-            # The permission rules docs/guide.md gives, so background workers never stop at a prompt.
-            write(machine.home / ".claude" / "settings.json", json.dumps({"permissions": {
-                "allow": ["Bash(asdlc *)", "Bash(asdlc-plugin *)", "Bash(git *)", "Bash(gh pr create *)", "Bash(gh pr comment *)",
-                          f"Edit(/{machine.home}/*.worktrees/**)"],
-                "additionalDirectories": [str(machine.home)]}}))
             machine.env |= {"PATH": path, "DEMO_CLAUDE_STATE": str(state), "REAL_CLAUDE": REAL_CLAUDE, "DEMO_GH_SIGNED_IN": "1",
                             "CLAUDE_CONFIG_DIR": str(machine.home / ".claude")}
 
@@ -145,6 +140,12 @@ class PilotReadinessTest(review.CrossMachineReviewTest):
     def test_review_across_machines_and_the_fallback(self) -> None:
         super().test_review_across_machines_and_the_fallback()
         self.assertIn("published plugins/acme-api", self.onboarded)
+
+        # Each person adds the permission rules normal work needs, once the repository's plugin is published.
+        added = {machine.name: machine.asdlc("permissions", "--write").stdout for machine in (self.kyle, self.ann)}
+        self.assertIn("Bash(python3 -m py_compile login.py)", added["kyle"])
+        self.assertIn("Bash(python3 -c \"import ast; ast.parse(open('login.py').read())\")", added["kyle"])
+        self.say(f"\n$ asdlc permissions --write   # on kyle's machine\n{added['kyle'].rstrip()}")
 
         # kyle's machine is ready.
         code, report, text = self.doctor(self.kyle)

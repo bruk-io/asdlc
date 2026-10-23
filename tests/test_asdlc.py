@@ -609,6 +609,10 @@ class EventLogTest(unittest.TestCase):
         self.assertEqual([e["outcome"] for e in asdlc.parse_events(text)], ["claimed"])
 
 
+COMMANDS_TOML = '[build]\nrun = "npm ci && npm run build"\nverified = 2026-10-20\n\n[test]\nrun = "npm test"\ncwd = "web"\nverified = 2026-10-20\n'
+RULES = asdlc.permission_rules((("acme-api", Path("/home/kyle/api")),), Path("/home/kyle/tasks"), {"acme-api": COMMANDS_TOML})
+
+
 def facts(**changes: object) -> object:
     """A machine where every check passes; each test breaks one thing."""
     board = Path("/home/kyle/tasks")
@@ -627,10 +631,8 @@ def facts(**changes: object) -> object:
             kit_files=frozenset(asdlc.AUTHORING_KIT)),
         published=(asdlc.PublishedCheck("acme-api", 0, "acme-api: clean"),),
         home=Path("/home/kyle"),
-        claude_settings=(("/home/kyle/.claude/settings.json", json.dumps({"permissions": {
-            "allow": ["Bash(asdlc *)", "Bash(asdlc-plugin *)", "Bash(git *)", "Bash(gh pr create *)", "Bash(gh pr comment *)",
-                      "Edit(~/*.worktrees/**)"],
-            "additionalDirectories": ["/home/kyle"]}})),),
+        plugin_commands=(("acme-api", COMMANDS_TOML),),
+        claude_settings=(("/home/kyle/.claude/settings.json", json.dumps({"permissions": RULES.as_settings()})),),
         mcp_configs=(("/home/kyle/.claude.json", json.dumps({"mcpServers": {"github": {"command": "gh-mcp"}}})),),
     )
     return asdlc.replace(healthy, **changes)
@@ -738,29 +740,29 @@ class DoctorTest(unittest.TestCase):
                       self.only("warn", facts(plugins=asdlc.replace(plugins, marketplaces=(frozendict({"name": "tasks"}),))))[0].message)
 
     def test_permissions_for_background_workers(self) -> None:
-        """I10: a background worker can't answer a permission prompt, so doctor checks the allow rules it needs."""
-        allow = ["Bash(asdlc:*)", "Bash(asdlc-plugin:*)", "Bash(git:*)", "Bash(gh pr *)", "Edit(//home/kyle/*.worktrees/**)"]
-        self.assertEqual(self.levels(facts(claude_settings=settings(allow=allow, additionalDirectories=["~"])))["pass"].count("permissions"), 1)
+        """I10: no permission prompts during normal work, so doctor checks the rules asdlc permissions writes."""
+        self.assertEqual([f.level for f in asdlc.diagnose(facts()) if f.area == "permissions"], [asdlc.Level.PASS])
+        legacy = ["Bash(asdlc:*)", "Bash(asdlc-plugin:*)", "Bash(git:*)", "Bash(gh pr *)", "Bash(uv run:*)", "Bash(backlog *)", "Bash(npm *)",
+                  "Edit(//home/kyle/*.worktrees/**)"]
+        self.assertNotIn("warn", self.levels(facts(claude_settings=settings(allow=legacy, additionalDirectories=["~"]))))
         self.assertNotIn("warn", self.levels(facts(claude_settings=settings(allow=["Bash"], defaultMode="acceptEdits", additionalDirectories=["/home"]))))
-        missing = self.only("warn", facts(claude_settings=settings(allow=["Bash(asdlc *)", "Bash(git push *)"])))
-        (rules,) = [f for f in missing if f.area == "permissions"]
-        for named in ("Bash(asdlc-plugin *)", "Bash(git *)", "Bash(gh pr create *)", "Bash(gh pr comment *)", "docs/guide.md"):
+        (missing,) = [f for f in self.only("warn", facts(claude_settings=settings(allow=["Bash(asdlc *)", "Bash(git push *)"]))) if f.area == "permissions"]
+        for named in ("asdlc permissions --write", "Bash(asdlc-plugin *)", "Bash(git *)", "Bash(gh pr create *)", "Bash(npm test)",
+                      "Edit(//home/kyle/api.worktrees/**)", "/home/kyle/tasks.worktrees"):
             with self.subTest(named=named):
-                self.assertIn(named, rules.message)
-        self.assertNotIn("Bash(asdlc *)", rules.message)
-        (folders,) = [f for f in missing if f.area == "permissions acme-api"]
-        self.assertIn("/home/kyle/api.worktrees", folders.message)
-        self.assertIn("additionalDirectories", folders.message)
+                self.assertIn(named, missing.message)
+        self.assertNotIn("Bash(asdlc *),", missing.message)
         broken = self.only("warn", facts(claude_settings=(("/home/kyle/.claude/settings.json", "{not json"),)))
         self.assertTrue(any("not valid JSON" in f.message for f in broken))
 
     def test_a_backlog_mcp_server_is_reported(self) -> None:
-        """I8: the guard refuses Backlog.md MCP writes, and doctor says when one is configured."""
+        """I8: asdlc works through the backlog CLI only, so doctor warns when Backlog.md's MCP server is configured."""
         configured = facts(mcp_configs=(("/home/kyle/.claude.json", json.dumps({"projects": {"/home/kyle/tasks": {"mcpServers": {
             "backlog": {"command": "backlog", "args": ["mcp", "start"]}}}}})), ("/home/kyle/tasks/.mcp.json", "{}")))
         (found,) = [f for f in self.only("warn", configured) if f.area == "backlog mcp"]
-        self.assertIn("backlog", found.message)
-        self.assertIn("asdlc board", found.message)
+        self.assertIn("CLI only", found.message)
+        self.assertIn("claude mcp remove backlog", found.message)
+
 
     def test_leftovers_say_how_to_remove_them(self) -> None:
         found = facts(leftovers=(Path("/home/kyle/tasks.worktrees/plugin-acme-api"), Path("/home/kyle/api.worktrees/asdlc-verify"),
@@ -780,6 +782,34 @@ class DoctorTest(unittest.TestCase):
 
 
 T0 = datetime(2026, 10, 22, 9, 0, tzinfo=UTC)
+
+
+class PermissionRulesTest(unittest.TestCase):
+    """I10: the Claude Code allow rules the pilot needs, and merging them into a person's settings."""
+
+    def test_the_rules(self) -> None:
+        for rule in ("Bash(asdlc *)", "Bash(asdlc-plugin *)", "Bash(backlog task list *)", "Bash(backlog task view *)", "Bash(git *)",
+                     "Bash(gh pr create *)", "Bash(gh pr view *)", "Bash(gh pr comment *)", "Bash(uv run *)", "Bash(npm ci)", "Bash(npm run build)",
+                     "Bash(npm test)", "Edit(//home/kyle/api.worktrees/**)", "Edit(//home/kyle/tasks.worktrees/**)"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, RULES.allow)
+        self.assertEqual(len(RULES.allow), len(set(RULES.allow)))
+        self.assertEqual(RULES.directories, ("/home/kyle/api.worktrees", "/home/kyle/tasks.worktrees"))
+        self.assertEqual(asdlc.command_parts("python3 -c \"import a; a.b()\" && make test; echo 'x || y'"),
+                         ['python3 -c "import a; a.b()"', "make test", "echo 'x || y'"])
+
+    def test_merging_keeps_everything_and_adds_only_what_is_missing(self) -> None:
+        existing = {"model": "opus", "permissions": {"allow": ["Read(~/notes/**)", "Bash(git *)"], "deny": ["Bash(rm *)"],
+                                                     "additionalDirectories": ["/home/kyle/api.worktrees"]}}
+        merged, added = asdlc.merge_permissions(existing, RULES)
+        self.assertEqual((merged["model"], merged["permissions"]["deny"]), ("opus", ["Bash(rm *)"]))
+        self.assertEqual(merged["permissions"]["allow"][:2], ["Read(~/notes/**)", "Bash(git *)"])
+        self.assertEqual(set(merged["permissions"]["allow"]), {"Read(~/notes/**)", *RULES.allow})
+        self.assertEqual(merged["permissions"]["additionalDirectories"], ["/home/kyle/api.worktrees", "/home/kyle/tasks.worktrees"])
+        self.assertNotIn("Bash(git *)", added)
+        self.assertIn("/home/kyle/tasks.worktrees", added)
+        self.assertEqual(asdlc.merge_permissions(merged, RULES)[1], [])
+        self.assertEqual(existing["permissions"]["allow"], ["Read(~/notes/**)", "Bash(git *)"], "the input is not changed")
 
 
 def at(minutes: float, task_id: str = "TASK-1", **fields: object) -> object:
@@ -2056,3 +2086,35 @@ class SameWorkerNameTest(unittest.TestCase):
         self.assertEqual(again.returncode, 1)
         self.assertIn("already claimed by @kyle.w1", again.stderr)
         self.assertIn("another session may be using that name", again.stderr)
+
+
+@needs_backlog
+class PermissionsCommandTest(unittest.TestCase):
+    """I10: asdlc permissions prints the rules; --write merges them into the person's settings, backing the file up first."""
+
+    def test_print_and_write(self) -> None:
+        team = Team(self, [], files={"plugins/acme-api/commands.toml": '[test]\nrun = "make test"\nverified = 2026-10-20\n'})
+        config = team.boards.root / "claude-config"
+        env = {"CLAUDE_CONFIG_DIR": str(config)}
+        shown = json.loads(team.ok("permissions", "--json", env=env).stdout)
+        self.assertIn("Bash(make test)", shown["allow"])
+        self.assertIn(f"{team.api}.worktrees", shown["directories"])
+        self.assertFalse((config / "settings.json").exists(), "printing writes nothing")
+        config.mkdir()
+        (config / "settings.json").write_text(json.dumps({"theme": "dark", "permissions": {"allow": ["Bash(git *)"]}}))
+        written = team.ok("permissions", "--write", env=env)
+        self.assertIn("settings.json", written.stdout)
+        settings = json.loads((config / "settings.json").read_text())
+        self.assertEqual(settings["theme"], "dark")
+        self.assertEqual(settings["permissions"]["allow"][0], "Bash(git *)")
+        self.assertIn("Bash(make test)", settings["permissions"]["allow"])
+        backups = list(config.glob("settings.json.*.bak"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(json.loads(backups[0].read_text()), {"theme": "dark", "permissions": {"allow": ["Bash(git *)"]}})
+        again = team.ok("permissions", "--write", env=env)
+        self.assertIn("nothing to add", again.stdout)
+        (config / "settings.json").write_text("{not json")
+        refused = team.run("permissions", "--write", env=env)
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("not valid JSON", refused.stderr)
+        self.assertEqual((config / "settings.json").read_text(), "{not json")

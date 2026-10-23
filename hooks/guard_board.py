@@ -9,15 +9,14 @@ Denied, each with the reason and the way that works instead:
   `asdlc board`, so each change is committed and pushed where every agent sees it.
 - Setting a task to To Do or Done, promoting a draft, archiving or demoting a task, or
   creating a task without `--draft` (it would start as accepted To Do work), with `backlog`
-  or `asdlc board`, and running `asdlc accept` or `asdlc approve`. Accepting work, approving
-  plans and closing work are a person's decisions. `asdlc release` and `asdlc reap`, the
+  or `asdlc board`, and running `asdlc accept`, `asdlc approve` or `asdlc permissions
+  --write`. Accepting work, approving plans, closing work and changing a person's Claude
+  Code settings are a person's decisions. `asdlc release` and `asdlc reap`, the
   tool's own ways of handing a claimed task back, are allowed.
 - Setting a task In Progress or In Review, changing a task's assignees, or adding or
   removing the review-passed or changes-requested labels, with `backlog` or `asdlc board`.
   Claims, `asdlc finish`, `asdlc release` and `asdlc review-done` do those, checking who
   holds the task, so a worker whose claim was reaped can't change someone else's task.
-- Writes through Backlog.md's MCP tools; their reads are allowed. They change the board's
-  files without committing or pushing.
 - Editing a file in a code repository that takes its work from a board (`git config
   asdlc.board` is set) outside a claimed task's worktree, the one with a `.asdlc-task`
   marker. Work starts with a claim, so no two agents change the same thing.
@@ -34,7 +33,8 @@ conditionals, `cd` and `git -C` (with `~` expanded), env assignments, `xargs`, a
 `sh -c`/`bash -lc`. The command `asdlc record-check` runs is judged like any other. A
 shell can always do something this doesn't recognise, so it is a guardrail, not a wall.
 When the guard can't tell (a `cd` to a variable, a request body it can't see), it allows,
-logs an error and says so. Every decision is logged.
+logs an error and says so. It only ever denies or allows, never asks, so it adds no
+permission prompts of its own. Every decision is logged.
 """
 
 import json
@@ -115,6 +115,11 @@ APPROVE_REFUSAL = (
     "plans and ask them to run asdlc approve <task id>... in their own terminal."
 )
 
+PERMISSIONS_REFUSAL = (
+    "asdlc permissions --write changes the person's own Claude Code settings, which is theirs to do: show them "
+    "asdlc permissions and ask them to run asdlc permissions --write in their own terminal."
+)
+
 
 # --- the logic -----------------------------------------------------------------------
 
@@ -136,28 +141,6 @@ def decide_file(path: Path, repo: Repo | None) -> Outcome:
             "claim a task first: asdlc next or asdlc claim, then work in the worktree it prints.",
         )
     return Outcome(Verdict.ALLOW, "not a board file, and not code outside a claimed worktree")
-
-
-_MCP_READS = frozenset({"view", "list", "search", "get", "read", "show", "overview", "guide", "instructions", "help", "board"})
-_MCP_WRITES = frozenset({"create", "edit", "update", "delete", "archive", "restore", "add", "remove", "rename", "upsert", "promote", "demote",
-                         "complete", "set", "move", "write"})
-MCP_REFUSAL = (
-    "Backlog.md's MCP server writes the board's files without committing or pushing them, and without asdlc's checks, so "
-    "other agents never see the change and the clone is left dirty. Change the board with asdlc board (for example: "
-    "asdlc board task edit TASK-1 --append-notes ...) or the asdlc command for the change: claim, finish, release, review-done. "
-    "Reading the board through the MCP server is fine."
-)
-
-
-def decide_mcp(tool: str) -> Outcome:
-    """A Backlog.md MCP tool: its reads are allowed, and everything else is refused, since it never pushes."""
-    server, _, name = tool.removeprefix("mcp__").partition("__")
-    if "backlog" not in server.casefold():
-        return Outcome(Verdict.ALLOW, "not a Backlog.md MCP tool")
-    words = set(name.casefold().split("_"))
-    if words & _MCP_READS and not words & _MCP_WRITES:
-        return Outcome(Verdict.ALLOW, f"{name} only reads the board")
-    return Outcome(Verdict.DENY, MCP_REFUSAL)
 
 
 def simple_commands(command: str) -> list[list[str]]:
@@ -470,6 +453,8 @@ def _decide_simple(words: Sequence[str], directory: Path | None, lookup: Lookup)
             return Outcome(Verdict.DENY, ACCEPT_REFUSAL)
         if subcommand == "approve":
             return Outcome(Verdict.DENY, APPROVE_REFUSAL)
+        if subcommand == "permissions" and "--write" in rest:
+            return Outcome(Verdict.DENY, PERMISSIONS_REFUSAL)
         if subcommand == "record-check" and "--" in rest:
             return decide_command(shlex.join(rest[rest.index("--") + 1:]), directory, lookup)
     elif name == "gh":
@@ -581,8 +566,6 @@ def main() -> int:
     tool_input = payload.get("tool_input") or {}
     if tool == "Bash":
         outcome = decide_command(str(tool_input.get("command", "")), cwd, repo_at)
-    elif tool.startswith("mcp__"):
-        outcome = decide_mcp(tool)
     else:
         raw = tool_input.get("file_path") or tool_input.get("notebook_path")
         if raw:
