@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### The test-edit guard on bug tasks, and repeated findings turned into rules ([plan](plan/bug-guard-and-repeat-findings.md))
+
+From the second review against the playbook (plays 04, 07 and 09).
+
+- The test-edit guard covers a `bug` task claimed on the board, not only `fix/` branches: a claim records the task's type in its worktree's `.asdlc-task`, and the guard refuses changes to tests that exist on the default branch there. It finds the repository from the path written to (the file's folder, or a command's `-C`, `--in` and absolute paths), since board workers stay in the tasks clone; before, it judged the tasks clone's branch and never fired on board work. It also sees `git -C <folder> checkout` and the like as writes, reads `--git-dir`, `--work-tree`, attached `-C`, relative folders and `~` paths, and judges `cp` and `install` by their destination only, so copying an existing test to start a new one is allowed.
+- `asdlc review-done` reports `repeats`: for each policy the verdict cites, the other tasks whose last review cited it too. The reviewer reads them and, when a finding is the same mistake, files one draft `rule-change` task naming the rule file and the line to add; the orchestrator tells the engineer, who adds the line through a pull request to the tasks repository and archives the draft, or archives it.
+- The team testing skill puts a reproducing test in a new file, since the guard keeps existing tests fixed while a bug is fixed.
+
 ### Background agents without prompts or `cd` ([plan](plan/worker-permissions.md))
 
 The first real eval run found 14 tool errors in 63 calls, nearly all from background workers refused a prompt nobody could answer.

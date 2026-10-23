@@ -7,7 +7,7 @@ description: The team's testing policy - which kind of test proves what, where d
 
 - Owner: the team. Changes arrive as pull requests to `plugins/team/` in the tasks repository, approved by whoever merges them.
 - Source: this skill, `rules/testing.md`, and one techniques file per language beside it.
-- Enforced by: the repository's own checks and CI. asdlc's test-edit guard stops a bug fix on a `fix/` branch from changing an existing test. The rest is advisory, and a reviewer holds it.
+- Enforced by: the repository's own checks and CI. asdlc's test-edit guard stops a bug fix (a `bug` task on the board, or a `fix/` branch) from changing an existing test. The rest is advisory, and a reviewer holds it.
 
 A test is evidence that something works, so it should prove one named thing, and its failure should say what broke. The evidence that a task is done comes from the toolchain, recorded on the task, never from an agent's account of it.
 
@@ -56,9 +56,9 @@ The commands are in the repository's plugin in the tasks repository, `plugins/<r
 
 ### Bugs
 
-1. Reproduce the bug as a failing test before changing any code, and confirm it fails for the expected reason, not a typo or a missing import.
+1. Reproduce the bug as a failing test before changing any code, in a new test file, and confirm it fails for the expected reason, not a typo or a missing import.
 2. Commit the failing test on its own.
-3. Fix the code without editing that test. On a `fix/` branch, asdlc's test-edit guard refuses changes to existing tests.
+3. Fix the code without editing that test or any other existing test. For a `bug` task on the board, or on a `fix/` branch, asdlc's test-edit guard refuses changes to test files that already exist on the default branch, which is why the reproducing test goes in a new file. If an existing test is itself wrong, say so on the task and ask the engineer.
 
 ### UI changes
 

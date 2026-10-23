@@ -1867,7 +1867,7 @@ def make_worktree(repo: Path, task: Task, worker: str, board: Path) -> tuple[Pat
             raise AsdlcError(f"claimed {task.id}, but {repo} has no origin/{base} to branch from, so no worktree was made")
         if not path.is_dir():
             raise AsdlcError(f"claimed {task.id}, but git could not add its worktree: {added.stderr.strip()}")
-    marker.write_text(json.dumps({"task": task.id, "worker": worker, "board": str(board)}, indent=2) + "\n")
+    marker.write_text(json.dumps({"task": task.id, "worker": worker, "board": str(board), "type": task.type}, indent=2) + "\n")
     exclude = Path(_git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()) / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
     if (updated := with_exclude(exclude.read_text() if exclude.exists() else "", MARKER)) is not None:
@@ -2774,6 +2774,18 @@ def review_next(board: Board, reviewer: str, engineer: str, now: datetime, fallb
                 _say(reason)
 
 
+def earlier_citations(tasks: Iterable[Task], task_id: str, policies: Sequence[str]) -> dict[str, tuple[str, ...]]:
+    """For each policy a verdict cites, the other tasks whose last review cited it too.
+
+    A mistake flagged twice gets its correction written into the agents' rules (playbook
+    plays 04 and 09, R10). Whether two findings are the same mistake is the reviewer's
+    judgement; this only finds where to look.
+    """
+    found = {policy: tuple(sorted((t.id for t in tasks if t.id != task_id and policy in t.review_policies), key=id_key))
+             for policy in policies}
+    return {policy: ids for policy, ids in found.items() if ids}
+
+
 def review_done(board: Board, raw_id: str, reviewer: str, verdict: ReviewVerdict, notes: str, record: ReviewRecord) -> dict[str, object]:
     """Record a review's findings on the task and act on the verdict: changes send it back to
     In Progress for the author's worker, clean leaves it In Review for a person to merge. The
@@ -2811,8 +2823,10 @@ def review_done(board: Board, raw_id: str, reviewer: str, verdict: ReviewVerdict
         _write_key(board, after, FINDINGS_KEY, yaml_quoted(f"important={record.important},nit={record.nit}"))
         _write_key(board, after, POLICIES_KEY, json.dumps(list(record.policies)) if record.policies else None)
         _write_key(board, after, PLAN_MATCHED_KEY, "yes" if record.plan_matched else "no")
+        repeats = earlier_citations(_tasks(board, folders=("tasks", "completed")), task_id, record.policies)
         result = {"task": task_id, "verdict": str(verdict), "reviewer": reviewer, "kind": task.review_kind,
                   "findings": {"important": record.important, "nit": record.nit}, "policies": list(record.policies), "plan_matched": record.plan_matched,
+                  "repeats": {policy: list(ids) for policy, ids in repeats.items()},
                   "status": IN_PROGRESS if verdict is ReviewVerdict.CHANGES else IN_REVIEW,
                   "workers": [w.removeprefix("@") for w in workers(task.assignees)]}
         return f"Review {task_id} by @{reviewer}: {verdict}", result
@@ -5152,7 +5166,12 @@ def main(argv: Sequence[str]) -> int:
                 line = (f"{result['task']}: changes requested by @{reviewer}; it is In Progress for @{', @'.join(result['workers']) or 'its author'} again"
                         if result["verdict"] == ReviewVerdict.CHANGES else
                         f"{result['task']} passed review by @{reviewer} ({result['kind']}); it stays In Review for a person to merge")
-                _emit(result, as_json, [line])
+                lines = [line]
+                if repeats := result["repeats"]:
+                    cited = "; ".join(f"{policy} ({', '.join(ids)})" for policy, ids in repeats.items())
+                    lines.append(f"Earlier reviews cited the same policy: {cited}. Read them: where a finding repeats the same mistake, "
+                                 "file a rule-change draft so the correction reaches the rules (the reviewer agent says how).")
+                _emit(result, as_json, lines)
             case "record-check":
                 if request is None:
                     raise AsdlcError("say which task, which worktree, which worker and which check: "
