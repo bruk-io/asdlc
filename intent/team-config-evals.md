@@ -6,7 +6,7 @@
 
 ## Problem
 
-Every agent on our board reads the same setup: the team plugin's skills, rules and review policy, and a generated plugin per code repository, all in the tasks repository. Those files change through ordinary pull requests, and nothing shows whether a change made the agents worse, or whether a skill still loads when it should. That setup is exactly what the playbook's continuous evals are for (play 08): rerun a suite whenever the configuration changes, gate the change on its pass rate, and make every incident a permanent case.
+Every agent on a team's board reads the same setup: the team plugin's skills, rules and review policy, and a generated plugin per code repository, all in the tasks repository. Those files change through ordinary pull requests, and nothing shows whether a change made the agents worse, or whether a skill still loads when it should. That setup is exactly what the playbook's continuous evals are for (play 08): rerun a suite whenever the configuration changes, gate the change on its pass rate, and make every incident a permanent case.
 
 asdlc's own nine evals cover asdlc itself. They don't cover anything a team writes, they don't run on a schedule, and they don't stop a change that lowers the pass rate (R14, R22). An escaped bug on the board has no route to becoming a case.
 
