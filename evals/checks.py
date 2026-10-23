@@ -58,6 +58,47 @@ def no_board_edits_by_hand(found: ev.Outcome, case: ev.Case) -> tuple[bool, str]
     return (False, f"board commits without asdlc's trailer: {bare}") if bare else (True, f"{len(found.new_commits)} board commits, all through asdlc")
 
 
+# The two refusals Claude Code writes as a tool's result when nobody can answer a permission
+# prompt, as the first real run of approval-before-build recorded them: the first for a call
+# that needed approval, the second for a tool or command the session may not use at all.
+_REFUSAL = re.compile(r"Permission for this tool use was denied\b|Permission to use [^\n]{1,500}? has been denied\b")
+# A simple command runs cd or git: after any VAR=value assignments, the program's name or path.
+_RUNS_CD = re.compile(r"^(?:\w+=\S*\s+)*cd\b")
+_RUNS_GIT = re.compile(r"^(?:\w+=\S*\s+)*(?:\S*/)?git\b")
+
+
+def _runs(line: str, program: re.Pattern[str]) -> bool:
+    return any(program.search(part.lstrip("({ ")) for part in ev.shell_segments(line))
+
+
+def no_permission_denials(found: ev.Outcome, case: ev.Case) -> tuple[bool, str]:
+    """No tool call, the orchestrator's or any subagent's, was refused for want of a permission,
+    and no Bash line changes directory and runs git, which Claude Code always asks about.
+
+    From the first real run of approval-before-build: background workers were refused
+    `cd <worktree> && ... git ...` and `git -C <worktree> ls-files`, with nobody there to
+    approve, and a planner wrote placeholder paths because it couldn't list its worktree.
+    Checks see the outcome, not the trial's counts, so the denials are counted from the
+    refusals the harness recorded as tool results; every denial in a session's
+    `permission_denials` is one of them.
+    """
+    calls = {e.id: e for e in found.events if e.kind == "tool" and e.id}
+    refused = [e for e in found.events if e.kind == "result" and _REFUSAL.match(e.text.lstrip())]
+    cd_git = [e for e in found.events if e.kind == "tool" and e.command and _runs(e.command, _RUNS_CD) and _runs(e.command, _RUNS_GIT)]
+    if not refused and not cd_git:
+        bash = sum(1 for e in found.events if e.kind == "tool" and e.command)
+        return True, f"no refusals among {len(calls)} tool calls; none of {bash} Bash lines runs cd and git together"
+
+    def shown(event: ev.Event) -> str:
+        call = calls.get(event.id, event)
+        what = call.command.splitlines()[0][:120] if call.command else call.name or "a tool"
+        return f"{'a subagent' if event.parent else 'the main agent'}: {what}"
+    refused_ids = {e.id for e in refused}
+    problems = [*(f"refused, {shown(e)}" for e in refused), *(f"cd and git, {shown(e)}" for e in cd_git if e.id not in refused_ids)]
+    more = f"; and {len(problems) - 6} more" if len(problems) > 6 else ""
+    return False, f"{len(refused)} permission refusals, {len(cd_git)} cd-and-git lines: {'; '.join(problems[:6])}{more}"
+
+
 def last_review(item: ev.BoardItem) -> str:
     """The newest "Review by" comment on an item, or empty."""
     comments = item.section("COMMENTS")

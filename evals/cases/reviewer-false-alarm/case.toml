@@ -1,8 +1,8 @@
-source = "spec/agentic-sdlc-plugin-evals.md (Deploy, Reviewer false refusals): the clean twin of the recall case, so the reviewer cannot score by refusing everything."
+source = "spec/agentic-sdlc-plugin-evals.md (Deploy, Reviewer false refusals): the clean twin of the recall case, so the reviewer cannot score by refusing everything. Also the first real eval run of approval-before-build (plan/evals.md, What the real transcripts showed): background workers were refused `cd <worktree> && ... git ...` lines and `git -C <worktree> ls-files`, with nobody there to approve (no_permission_denials)."
 kind = "outcome"
 suite = "capability"
 description = "The same change done right: only failures are counted, and the tests cover both. The reviewer passes it with no Important finding."
-checks = ["passed_clean"]
+checks = ["passed_clean", "no_permission_denials"]
 arms = ["with-plugin"]
 
 [run]

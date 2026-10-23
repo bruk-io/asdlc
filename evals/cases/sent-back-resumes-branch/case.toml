@@ -1,8 +1,8 @@
-source = "The independent review of the pilot (plan/pilot.md, Fixes from the independent review), B2: a reaped changes-requested task was rebuilt from main and force-pushed over the pull request's branch."
+source = "The independent review of the pilot (plan/pilot.md, Fixes from the independent review), B2: a reaped changes-requested task was rebuilt from main and force-pushed over the pull request's branch. Also the first real eval run of approval-before-build (plan/evals.md, What the real transcripts showed): background workers were refused `cd <worktree> && ... git ...` lines and `git -C <worktree> ls-files`, with nobody there to approve (no_permission_denials)."
 kind = "outcome"
 suite = "regression"
 description = "ann's review sent kyle's TASK-1 back; kyle's claim was reaped, main moved on, and kyle.w2 claimed it again on a machine without the old worktree, so its worktree was resumed from the pushed branch. The worker fixes the finding and hands it back: the pull request's original commits survive on the branch, nothing is force-pushed, and the fix works."
-checks = ["original_commits_survive", "no_force_push", "handed_back_for_review", "finding_fixed", "default_branch_untouched"]
+checks = ["original_commits_survive", "no_force_push", "handed_back_for_review", "finding_fixed", "default_branch_untouched", "no_permission_denials"]
 arms = ["with-plugin"]
 
 [run]

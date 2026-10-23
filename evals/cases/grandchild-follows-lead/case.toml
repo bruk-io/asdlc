@@ -1,8 +1,8 @@
-source = "The independent review's second round (plan/pilot.md, Second review round), Important 2: lead-of took the direct parent as the intent, so a grandchild's orchestrator didn't find the real lead."
+source = "The independent review's second round (plan/pilot.md, Second review round), Important 2: lead-of took the direct parent as the intent, so a grandchild's orchestrator didn't find the real lead. Also the first real eval run of approval-before-build (plan/evals.md, What the real transcripts showed): background workers were refused `cd <worktree> && ... git ...` lines and `git -C <worktree> ls-files`, with nobody there to approve (no_permission_denials)."
 kind = "outcome"
 suite = "regression"
 description = "An accepted intent led by ann has a child, and under it a grandchild in acme/api. kyle's orchestrator picks the grandchild: it works under ann's lead rather than claiming a lead of its own, and its worker's plan builds to the contract linked on the intent."
-checks = ["grandchild_claimed_and_planned", "no_second_lead", "plan_follows_the_contract", "nothing_built_yet"]
+checks = ["grandchild_claimed_and_planned", "no_second_lead", "plan_follows_the_contract", "nothing_built_yet", "no_permission_denials"]
 
 [run]
 model = "sonnet"
