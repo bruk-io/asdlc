@@ -58,23 +58,22 @@ Setting up takes about twenty minutes. `asdlc doctor` tells you when you're done
 
 ## Permissions
 
-Workers and reviewers run as background subagents of your orchestrator, and nobody is there to answer a permission prompt: a command that prompts stalls the worker or is refused. Normal work should never prompt. `asdlc permissions` prints the Claude Code allow rules it needs on this machine:
+Workers and reviewers run as background subagents of your orchestrator, and nobody is there to answer a permission prompt: a command that prompts stalls the worker or is refused. Normal work should never prompt, so `asdlc permissions` prints the Claude Code allow rules it needs on this machine, as narrow as the work allows:
 
-- `asdlc` and `asdlc-plugin`, every subcommand (the board guard still refuses what is a person's, such as `asdlc accept`);
-- `backlog`'s read commands (`task list`, `task view`, `draft list`, `draft view`, `doc list`, `doc view`, `search`), since every change to the board goes through `asdlc board`;
-- `git`, all of it: workers run `git -C <worktree> ...`, which no narrower rule matches, and the board guard refuses pushes to a default branch and force pushes whatever this allows;
-- `gh pr create`, `gh pr view` and `gh pr comment`, for pull requests and review comments;
-- `uv run`, which runs the plugin's scripts when they aren't on your `PATH`;
-- each registered repository's verified commands from its plugin's `commands.toml` (each part of a command joined with `&&` gets a rule of its own, since Claude Code matches the parts separately);
-- edits in the worktree folders beside each registered clone and beside your tasks clone, and those folders as `additionalDirectories`, so agents can read and edit there.
+- `asdlc` and `asdlc-plugin` by name, by the plugin's absolute path, and through `uv run --script <plugin>/scripts/asdlc` (the board guard still refuses what is a person's, such as `asdlc accept`);
+- `backlog`'s read commands only (`task list`, `task view`, `draft list`, `draft view`, `doc list`, `doc view`, `search`), since every change to the board goes through `asdlc board`;
+- the git subcommands agents run in a task's or a review's worktree, written as `git -C <clone>.worktrees/* <subcommand> *` (fetch, status, diff, log, show, add, commit, push, rebase, merge, switch, `checkout -b`, rev-parse, branch, symbolic-ref), and the few a reviewer runs in your registered clone (fetch, worktree, show, rev-parse, symbolic-ref). The board guard refuses pushes to a default branch and force pushes whatever these allow;
+- `gh pr create`, `gh pr view` and `gh pr comment`;
+- each registered repository's verified commands from its plugin's `commands.toml`, as exact rules. A command with a `*`, a pipe, `;`, `&&`, `||`, a backtick, `$(` or a redirect gets no rule, since a rule can't say what it would allow; the output lists them and why. Agents run those through `asdlc record-check`, which `asdlc *` covers;
+- edits in the worktree folders beside each registered clone and beside your tasks clone, and those folders as `additionalDirectories`.
 
-Add them to your user settings, `~/.claude/settings.json`, in your own terminal:
+Write them, in your own terminal, from your clone of the tasks repository:
 
 ```sh
 asdlc permissions --write
 ```
 
-It keeps everything already in the file, adds only what is missing, and backs the file up first (`settings.json.<time>.bak`). Run it again after you register a repository or a repository's plugin changes its commands; `asdlc doctor` warns, naming the missing rules, whenever it is due. The board's guard only ever refuses or allows, never asks, so it adds no prompts of its own. The rule syntax is Claude Code's: <https://code.claude.com/docs/en/permissions>.
+They go into that clone's own `.claude/settings.local.json`, which applies to sessions started in the tasks clone, your orchestrator's, and to the workers and reviewers it launches; nothing is added to your user settings, so no other project gets them. The file stays untracked (asdlc adds it to the clone's `.git/info/exclude`), so Claude Code applies it as your own without a trust prompt. The command keeps everything already in the file, adds only what is missing, backs the file up first (`settings.local.json.<time>.bak`), and writes it atomically. Run it again after you register a repository or a repository's plugin changes its commands; `asdlc doctor` warns, naming the missing rules, whenever it is due. Claude Code may warn at startup about the `git -C <folder>/* ...` rules, since their wildcard comes before the subcommand; they still apply. The board's guard only ever refuses or allows, never asks, so it adds no prompts of its own. The rule syntax is Claude Code's: <https://code.claude.com/docs/en/permissions>.
 
 asdlc works through the `backlog` CLI only. Don't add Backlog.md's MCP server: it writes the board's files without committing or pushing them and bypasses the board's rules, the guard's included. `asdlc doctor` warns when one is configured.
 
@@ -99,7 +98,7 @@ If you close the session, or start a new one, it picks up from the board: `asdlc
 Agents can't do these; the board guard refuses them, with the reason.
 
 1. **Accept work.** A lead writes an intent and its child tasks as drafts. When you agree with them, accept them all in your own terminal: `asdlc accept <intent id>`.
-2. **Approve plans of size 2 and up.** Your orchestrator shows you the plans; you approve them in your own terminal: `asdlc approve <task id>...`. It records your approval on the task, and until it is there a worker can't record a check or finish the task: `asdlc record-check` and `asdlc finish` refuse. A `size-1` task is small and mechanical, so its plan skips approval; the orchestrator notes why on the task, and the reviewer checks that it really was small.
+2. **Approve plans of size 2 and up.** Your orchestrator shows you the plans, each with its digest, and gives you the command: `asdlc approve TASK-7 TASK-9 --plan-hash <digest of 7> --plan-hash <digest of 9>`. It shows each plan again as it approves it, refuses one that changed since you were shown it, and records your approval with the plan's digest and the task's size. Until then a worker can't record a check or finish the task, and if the plan or the size changes after you approve, they refuse again until you approve the new one. A claim waiting for your approval is kept for `approval_wait` (a day by default) rather than reaped at `stale_after`. A `size-1` task is small and mechanical, so its plan skips approval; the orchestrator notes why on the task, and the reviewer checks that it really was small.
 3. **Merge the pull request.** When a review has passed (the task is labelled `review-passed`), read the review on the pull request and merge it yourself. Agents never approve, request changes on, or merge a pull request.
 4. **Mark it Done.** After the merge, in your own terminal: `asdlc board task edit <id> -s Done`.
 
@@ -119,7 +118,7 @@ Each attempt goes in this machine's log, `~/.local/state/asdlc/events.jsonl`, wh
 
 Another engineer's reviewer judged your task and found something Important. The task goes back In Progress, still assigned to the worker that built it, labelled `changes-requested`, with the findings in its comments and on the pull request. Your orchestrator hands it back to that same worker name, which may already be building something else: a worker name can hold a sent-back task alongside new work, and picks its own task up again. You only hear about it when the findings question the plan or the contract rather than the code.
 
-If nobody works on it for `stale_after` and its claim is reaped, it goes back to To Do still reserved for you, and the next claim resumes its branch from what was pushed, never from the default branch. Workers never force-push; the guard refuses it.
+If nobody works on it for `stale_after` and its claim is reaped, it goes back to To Do still reserved for you for one more `stale_after`, then open to anyone, and the next claim resumes its branch from what was pushed, never from the default branch. Workers never force-push; the guard refuses it.
 
 ### Reviewing others' work
 
@@ -132,7 +131,7 @@ With `review: true`, your orchestrator also claims reviews of other engineers' f
 
 ### When an asdlc command is interrupted
 
-Ctrl-C, closing the terminal or killing an agent mid-command is safe. A change that hadn't been pushed is dropped, at once or by the next asdlc command on that clone ("dropping 1 unpushed board change(s) an interrupted asdlc command left"); it was never pushed, so nobody saw it, and it is never pushed later. If you commit to your clone of the tasks repository by hand and don't push, asdlc stops and says so rather than push or drop your commit: push it or remove it.
+Ctrl-C, closing the terminal or killing an agent mid-command is safe. A change that hadn't been pushed is dropped, at once or by the next asdlc command on that clone ("dropping 1 unpushed board change(s) an interrupted asdlc command left"); it was never pushed, so nobody saw it, and it is never pushed later. Only `backlog/` is restored: an uncommitted edit of yours elsewhere in the clone is left alone, and asdlc names it and waits for you to commit or undo it. If you commit to your clone of the tasks repository by hand and don't push, asdlc stops and says so rather than push or drop your commit, and tells you how to keep it when an interrupted change sits under it.
 
 ### Known limits
 

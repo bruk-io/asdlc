@@ -55,7 +55,7 @@ A worker who finds the contract wrong doesn't work around it. It comments on its
 asdlc board task edit <task> --add-label contract-change --comment "<what must change and why>"
 ```
 
-Look for them each round: `asdlc board task list -p <intent> -l contract-change --plain`. Decide each one: change the contract document and say so in a comment on the task, or say no and why. Remove the label once it is answered. A change that affects other children gets a comment on each of them too. Escalate to your engineer when the change alters the spec or what the person accepted.
+Look for them each round: `asdlc board task list -l contract-change --plain` lists every task asking, at any depth, and `asdlc lead-of <task> --json` says which intent each one is under; answer those under yours. Decide each one: change the contract document and say so in a comment on the task, or say no and why. Remove the label once it is answered. A change that affects other children gets a comment on each of them too. Escalate to your engineer when the change alters the spec or what the person accepted.
 
 ## 5. Plans against the contract
 

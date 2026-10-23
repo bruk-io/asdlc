@@ -126,8 +126,8 @@ class TemplatesTest(unittest.TestCase):
 
     def test_settings_parse_and_say_what_they_do(self) -> None:
         text = (TEMPLATES / "asdlc.toml").read_text()
-        self.assertEqual(tomllib.loads(text), {"stale_after": "2h", "review_fallback_after": "30m"})
-        for key in ("stale_after", "review_fallback_after"):
+        self.assertEqual(tomllib.loads(text), {"stale_after": "2h", "review_fallback_after": "30m", "approval_wait": "24h"})
+        for key in ("stale_after", "review_fallback_after", "approval_wait"):
             before = text.split(f"\n{key} =")[0].rstrip().splitlines()[-1]
             self.assertTrue(before.startswith("#"), f"{key} has no comment saying what it does")
 

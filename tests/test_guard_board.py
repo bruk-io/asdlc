@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -22,8 +23,10 @@ def _repo(root: Path, **facts: object) -> object:
     return guard.Repo(root=root, **(values | facts))
 
 
+WORKTREE = Path("/work/app.worktrees/task-1")
 REPOS = {
     CODE: _repo(CODE, takes_board_work=True),
+    WORKTREE: _repo(WORKTREE, takes_board_work=True, has_marker=True, branch="task-1-x"),
     CODE / "feature": _repo(CODE, takes_board_work=True, branch="task-1-x"),
     CODE / "trunk": _repo(CODE, takes_board_work=True, branch="trunk", protected=frozenset({"main", "master", "trunk"})),
     BOARD: _repo(BOARD, is_board=True),
@@ -200,6 +203,90 @@ class BoardStatusTest(unittest.TestCase):
     def test_an_unparsable_command_that_may_touch_the_board_is_allowed_and_said(self) -> None:
         self.assertIs(verdict("backlog task edit 1 -s 'Done"), guard.Verdict.ERROR)
         self.assertIs(verdict("echo 'unbalanced"), guard.Verdict.ALLOW)
+
+
+class ReadOnlyTest(unittest.TestCase):
+    """Second review, Important 1: status, label and assignee rules apply to changes, never to listings."""
+
+    def test_listings_filtered_by_status_or_label_are_allowed(self) -> None:
+        for command in ("asdlc board task list -s 'In Progress' --plain", "asdlc board task list --status 'In Review' --plain",
+                        "backlog task list -s 'To Do' --plain", "asdlc board task list -l review-passed --plain",
+                        "asdlc board search login -s 'In Review'", "backlog task list --status=Done --plain", "asdlc board task list -a @kyle.w1",
+                        "asdlc board task view TASK-1 --plain", "backlog draft list --plain", "asdlc board task list -p TASK-1 -l contract-change --plain"):
+            with self.subTest(command=command):
+                self.assertIs(verdict(command), guard.Verdict.ALLOW)
+        for command in ("asdlc board task edit 1 -s 'In Review'", "backlog task create X --draft -s Done", "asdlc board draft create X -s 'In Progress'"):
+            with self.subTest(command=command):
+                self.assertIs(verdict(command), guard.Verdict.DENY)
+
+
+class SizeAndShortFlagsTest(unittest.TestCase):
+    """Second review: Important 4 (an approved plan's size is fixed) and Minor 5 (attached short flags)."""
+
+    def test_an_agent_cannot_resize_accepted_work(self) -> None:
+        for command in ("asdlc board task edit 1 --remove-label size-3 --add-label size-1", "asdlc board task edit TASK-1 -l size-1",
+                        "backlog task edit 1 --labels size-1,contract-change", "asdlc board task edit TASK-1 --clear-labels",
+                        "asdlc board task edit TASK-1 --add-label=size-2", "asdlc board task edit TASK-1 -lsize-1"):
+            with self.subTest(command=command):
+                outcome = guard.decide_command(command, PLAIN, lookup)
+                self.assertIs(outcome.verdict, guard.Verdict.DENY)
+                self.assertIn("approve", outcome.reason)
+        for command in ("asdlc board task create X --draft -p DRAFT-1 -l size-2", "asdlc board draft edit DRAFT-2 --add-label size-3",
+                        "asdlc board task edit DRAFT-2 --remove-label size-3 --add-label size-2", "asdlc board task edit 1 --add-label contract-change"):
+            with self.subTest(command=command):
+                self.assertIs(verdict(command), guard.Verdict.ALLOW)
+
+    def test_attached_short_flags(self) -> None:
+        for command in ("asdlc board task edit TASK-1 -a@kyle.w2", "asdlc board task edit TASK-1 -lreview-passed", "backlog task edit 1 -s'In Review'"):
+            with self.subTest(command=command):
+                self.assertIs(verdict(command), guard.Verdict.DENY)
+
+
+# Placeholders in the skills' and agents' commands, filled the way an agent would.
+_FILLED = {
+    "<task>": "TASK-1", "<task id>": "TASK-1", "<task-id>": "TASK-1", "<id>": "TASK-1", "<intent>": "TASK-3", "<intent-id>": "TASK-3",
+    "<intent id>": "TASK-3", "<child-id>": "TASK-3.1", "<other child>": "TASK-3.2", "<engineer>": "kyle", "<worker>": "kyle.w1",
+    "<reviewer>": "kyle.r1", "<N>": "1", "<n>": "1", "<worktree>": str(WORKTREE), "<repo>": str(CODE), "<review>": "/work/app.worktrees/review-task-1-kyle.r1",
+    "<branch>": "task-1-x", "<default branch>": "main", "<doc-id>": "doc-1",
+}
+_COMMAND = re.compile(r"^(asdlc|asdlc-plugin|backlog|git|gh|cd|uv run)\b")
+# What the skills name as a person's, or as never to do: the guard refuses these by design.
+_REFUSED_BY_DESIGN = re.compile(r"asdlc (accept|approve)\b|permissions --write|-s Done|gh pr merge|--approve|--request-changes|"
+                                r"--force|git push origin main")
+
+
+def skill_commands() -> list[tuple[str, str]]:
+    """Every shell command the plugin's skills, agents, commands, team templates and guide give, with its placeholders filled."""
+    files = [*ROOT.glob("skills/*/SKILL.md"), *ROOT.glob("agents/*.md"), *ROOT.glob("commands/*.md"),
+             *(ROOT / "templates" / "board" / "plugins" / "team").rglob("*.md"), ROOT / "docs" / "guide.md"]
+    found = []
+    for path in files:
+        text = path.read_text()
+        lines = []
+        for block in re.findall(r"```(?:sh|bash)?\n(.*?)```", text, re.S):
+            block = re.sub(r"\$\(cat <<'EOF'\n.*?\nEOF\n\)", '"x"', re.sub(r"\\\n\s*", " ", block), flags=re.S)
+            lines += [line.strip() for line in block.splitlines()]
+        lines += re.findall(r"`([^`\n]+)`", text)
+        for line in lines:
+            if _COMMAND.match(line):
+                for placeholder, value in _FILLED.items():
+                    line = line.replace(placeholder, value)
+                found.append((path.relative_to(ROOT).as_posix(), re.sub(r"<[^<>]*>", "x", line)))
+    return found
+
+
+class SkillCommandsTest(unittest.TestCase):
+    """Second review, Important 1: every command a skill or agent tells an agent to run passes the guard."""
+
+    def test_every_command_passes_unless_it_is_a_persons(self) -> None:
+        found = skill_commands()
+        self.assertGreater(len(found), 150)
+        for where, command in found:
+            with self.subTest(where=where, command=command):
+                outcome = guard.decide_command(command, BOARD, lookup)
+                if _REFUSED_BY_DESIGN.search(command):
+                    continue
+                self.assertIsNot(outcome.verdict, guard.Verdict.DENY, outcome.reason)
 
 
 class PushTest(unittest.TestCase):

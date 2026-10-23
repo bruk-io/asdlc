@@ -100,6 +100,9 @@ REVIEWER_KEY = "asdlc_reviewer"  # the reviewer holding a review claim; cleared 
 REVIEW_KIND_KEY = "asdlc_review_kind"  # cross-machine or same-machine, kept after the review for the person who merges
 BRANCH_KEY = "asdlc_branch"  # the task's branch, written by its first claim; every later claim resumes it
 APPROVED_KEY = "asdlc_plan_approved_by"  # the person who approved the plan, written only by asdlc approve
+APPROVED_HASH_KEY = "asdlc_plan_approved_hash"  # the digest of the plan text approved
+APPROVED_SIZE_KEY = "asdlc_plan_approved_size"  # the size label the task had when its plan was approved
+RESERVED_KEY = "asdlc_reserved_for_author"  # the engineer a released, sent-back task stays reserved for, for one more stale_after
 ACCEPTED_FROM_KEY = "asdlc_accepted_from"  # the draft id an accepted item had, written by asdlc accept
 TRAILER = "Asdlc-Transaction"  # on every board commit asdlc makes, so an unpushed one is known as its own
 PENDING = "asdlc-transaction.json"  # in the board clone's git folder while a change is being made
@@ -108,6 +111,7 @@ DRAFTS = "backlog/drafts/"
 DEFAULT_WORKERS = 3
 DEFAULT_STALE_AFTER = timedelta(hours=2)
 DEFAULT_REVIEW_FALLBACK_AFTER = timedelta(minutes=30)
+DEFAULT_APPROVAL_WAIT = timedelta(hours=24)
 REAPER = "@asdlc"
 CHECK_TAIL_LINES = 40
 
@@ -171,6 +175,10 @@ class Task:
     branch: str = ""  # from BRANCH_KEY
     plan_approved_by: str = ""  # from APPROVED_KEY
     accepted_from: str = ""  # from ACCEPTED_FROM_KEY
+    plan_hash: str = ""  # the digest of the plan section's text now, "" when there is no plan
+    approved_hash: str = ""  # from APPROVED_HASH_KEY
+    approved_size: str = ""  # from APPROVED_SIZE_KEY
+    reserved_for_author: str = ""  # from RESERVED_KEY
 
 
 def is_draft(task: Task) -> bool:
@@ -251,6 +259,24 @@ def _as_tuple(value: str | tuple[str, ...] | None) -> tuple[str, ...]:
             return ()
 
 
+_PLAN = re.compile(r"<!-- SECTION:PLAN:BEGIN -->(.*?)<!-- SECTION:PLAN:END -->", re.S)
+
+
+def plan_of(text: str) -> str:
+    """The task's plan section as Backlog writes it, or empty."""
+    found = _PLAN.search(text)
+    return found[1].strip() if found else ""
+
+
+def plan_digest(plan: str) -> str:
+    """A short digest of a plan's text, recorded with its approval so a changed plan is noticed."""
+    return hashlib.sha256(plan.strip().encode()).hexdigest()[:12]
+
+
+def size_of(task: Task) -> str:
+    return next((label for label in task.labels if label.startswith("size-")), "")
+
+
 def task_from(path: str, text: str) -> Task | None:
     fields = frontmatter(text)
     task_id = fields.get("id")
@@ -287,6 +313,10 @@ def task_from(path: str, text: str) -> Task | None:
         branch=text_field(BRANCH_KEY),
         plan_approved_by=text_field(APPROVED_KEY).removeprefix("@"),
         accepted_from=text_field(ACCEPTED_FROM_KEY).upper(),
+        plan_hash=plan_digest(plan) if (plan := plan_of(text)) else "",
+        approved_hash=text_field(APPROVED_HASH_KEY),
+        approved_size=text_field(APPROVED_SIZE_KEY),
+        reserved_for_author=text_field(RESERVED_KEY).removeprefix("@"),
     )
 
 
@@ -465,22 +495,28 @@ def holder_refusal(task: Task | None, task_id: str, worker: str, doing: str) -> 
 
 
 def approval_refusal(task: Task) -> str | None:
-    """Why a task can't be built or finished yet, or None: anything but size-1 waits for a person
-    to approve its plan with asdlc approve."""
-    if "size-1" in task.labels or task.plan_approved_by:
+    """Why a task can't be built or finished yet, or None. A plan approved with asdlc approve holds
+    only while the plan's text and the task's size are what was approved; anything but size-1
+    waits for a person's approval."""
+    size = size_of(task)
+    if task.plan_approved_by:
+        if task.approved_hash and task.approved_hash != task.plan_hash:
+            return (f"{task.id}'s plan changed since @{task.plan_approved_by} approved it, so it must be approved again: your engineer runs "
+                    f"asdlc approve {task.id} in their own terminal. Write a departure in the notes instead of the plan when the plan still holds")
+        if task.approved_size and task.approved_size != size:
+            return (f"{task.id} was {task.approved_size} when its plan was approved and is {size or 'unsized'} now, so the plan must be "
+                    f"approved again: your engineer runs asdlc approve {task.id} in their own terminal")
         return None
-    size = next((label for label in task.labels if label.startswith("size-")), "a task without a size-1 label")
-    return (f"{task.id}'s plan isn't approved yet: {size} work is built only after a person approves its plan. Write the plan on the task "
-            f"and stop; your engineer runs asdlc approve {task.id} in their own terminal")
+    if size == "size-1":
+        return None
+    return (f"{task.id}'s plan isn't approved yet: {size or 'a task without a size-1 label'} work is built only after a person approves its plan. "
+            f"Write the plan on the task and stop; your engineer runs asdlc approve {task.id} in their own terminal")
 
 
-_PLAN = re.compile(r"<!-- SECTION:PLAN:BEGIN -->(.*?)<!-- SECTION:PLAN:END -->", re.S)
-
-
-def plan_of(text: str) -> str:
-    """The task's plan section as Backlog writes it, or empty."""
-    found = _PLAN.search(text)
-    return found[1].strip() if found else ""
+def waiting_for_approval(task: Task) -> bool:
+    """A held task whose plan is written and waits for a person's approval."""
+    return (is_status(task, IN_PROGRESS) and bool(workers(task.assignees)) and bool(task.plan_hash)
+            and size_of(task) != "size-1" and approval_refusal(task) is not None)
 
 
 def finish_edit(task: Task, branch: str, pull: str | None, notes: str) -> list[str]:
@@ -846,6 +882,7 @@ class Settings:
 
     stale_after: timedelta = DEFAULT_STALE_AFTER
     review_fallback_after: timedelta = DEFAULT_REVIEW_FALLBACK_AFTER
+    approval_wait: timedelta = DEFAULT_APPROVAL_WAIT
 
 
 def parse_settings(text: str) -> Settings:
@@ -855,7 +892,7 @@ def parse_settings(text: str) -> Settings:
     except tomllib.TOMLDecodeError as error:
         raise AsdlcError(f"asdlc.toml on the board is not valid TOML: {error}") from None
     durations = {}
-    for key in ("stale_after", "review_fallback_after"):
+    for key in ("stale_after", "review_fallback_after", "approval_wait"):
         if key in data:
             if not isinstance(data[key], str):
                 raise AsdlcError(f"asdlc.toml: {key} is a duration in quotes, such as \"2h\"")
@@ -959,16 +996,29 @@ def lead_of(items: Sequence[Task], task_id: str) -> LeadOf:
         task = found[0]
     if task is None:
         raise AsdlcError(f"{task_id} is not a task or a draft on the board")
-    intent = task if task.type == "intent" else _find(items, task.parent) if task.parent else None
+    intent = intent_above(items, task)
     if intent is None:
         return LeadOf(task.id, None, None)
     return LeadOf(task.id, intent.id, intent.lead or None)
+
+
+def intent_above(items: Sequence[Task], task: Task) -> Task | None:
+    """The task itself when it is an intent, else the nearest intent up its parents, or None."""
+    seen: set[str] = set()
+    current: Task | None = task
+    while current is not None and current.id not in seen:
+        if current.type == "intent":
+            return current
+        seen.add(current.id)
+        current = _find(items, current.parent) if current.parent else None
+    return None
 
 
 class Hold(StrEnum):
     CLAIM = "claim"
     LEAD = "lead"
     REVIEW = "review"
+    RESERVATION = "reservation"  # a sent-back task kept for its author after its claim was released
 
 
 @dataclass(frozen=True)
@@ -979,23 +1029,39 @@ class Stale:
     idle: timedelta
 
 
-def stale_holds(items: Iterable[Task], touched: Mapping[str, datetime], now: datetime, after: timedelta) -> tuple[Stale, ...]:
-    """Workers' claims and leads whose task file has had no commit for longer than `after`."""
+def stale_holds(items: Iterable[Task], touched: Mapping[str, datetime], now: datetime, after: timedelta,
+                approval_wait: timedelta = DEFAULT_APPROVAL_WAIT) -> tuple[Stale, ...]:
+    """Claims, leads, review claims and authors' reservations whose task file has had no commit for
+    longer than `after`; a claim whose plan waits for a person's approval gets `approval_wait`."""
     found = []
     for task in items:
         last = touched.get(task.path)
-        if last is None or (idle := now - last) <= after:
+        if last is None:
             continue
+        idle = now - last
         if is_status(task, IN_PROGRESS) and (held := workers(task.assignees)):
-            found.append(Stale(task, Hold.CLAIM, held, idle))
+            if idle > (approval_wait if waiting_for_approval(task) else after):
+                found.append(Stale(task, Hold.CLAIM, held, idle))
+        if idle <= after:
+            continue
         if task.lead:
             found.append(Stale(task, Hold.LEAD, (f"@{task.lead}",), idle))
         if task.reviewer:
             found.append(Stale(task, Hold.REVIEW, (f"@{task.reviewer}",), idle))
+        if task.reserved_for_author and is_status(task, TO_DO) and not workers(task.assignees):
+            found.append(Stale(task, Hold.RESERVATION, (f"@{task.reserved_for_author}",), idle))
     return tuple(found)
 
 
-_HOLD_WORDS = frozendict({Hold.CLAIM: "claim", Hold.LEAD: "lead", Hold.REVIEW: "review claim"})
+_HOLD_WORDS = frozendict({Hold.CLAIM: "claim", Hold.LEAD: "lead", Hold.REVIEW: "review claim", Hold.RESERVATION: "reservation"})
+
+
+def reserved_author(task: Task) -> str:
+    """The engineer a released, sent-back task is kept for, when releasing it adds one; else ""."""
+    if CHANGES_REQUESTED not in task.labels:
+        return ""
+    added = sorted({owner_of(w) for w in workers(task.assignees)} - {p.removeprefix("@") for p in people(task.assignees)})
+    return added[0] if added else ""
 
 
 def kept_on_release(task: Task) -> tuple[str, ...]:
@@ -1009,6 +1075,10 @@ def kept_on_release(task: Task) -> tuple[str, ...]:
 
 def reap_comment(stale: Stale, after: timedelta) -> str:
     what = _HOLD_WORDS[stale.hold]
+    if stale.hold is Hold.RESERVATION:
+        return (f"Released by asdlc reap: the reservation for {stale.holders[0]} expired. A review sent this task back and its claim was "
+                f"released; it stayed reserved for its author's engineer for {human(stale.idle)} with no claim, longer than stale_after "
+                f"({human(after)}), so anyone may pick it up now. Its branch holds the work so far, and the newest 'Review by' comment the findings.")
     kept = kept_on_release(stale.task)
     keeping = f" It stays reserved for {', '.join(kept)}." if stale.hold is Hold.CLAIM and kept else ""
     if stale.hold is Hold.CLAIM and CHANGES_REQUESTED in stale.task.labels:
@@ -1030,7 +1100,8 @@ def mine_report(items: Sequence[Task], engineer: str, prefs: Prefs, waiting: Seq
     held = [
         row(t, workers=[w.removeprefix("@") for w in workers(t.assignees) if owner_of(w) == engineer],
             changes_requested=CHANGES_REQUESTED in t.labels and is_status(t, IN_PROGRESS), branch=t.branch or None,
-            size=next((label for label in t.labels if label.startswith("size-")), None), plan_approved_by=t.plan_approved_by or None)
+            size=size_of(t) or None, plan_hash=t.plan_hash or None, plan_approved_by=t.plan_approved_by or None,
+            approval_holds=approval_refusal(t) is None)
         for t in items if any(owner_of(w) == engineer for w in workers(t.assignees)) and not is_status(t, DONE)
     ]
     reviews = review_claims(items, engineer)
@@ -1368,9 +1439,9 @@ def _end(board: Board) -> None:
 
 def _require_ready(board: Board) -> None:
     """Raises: AsdlcError: the clone is off main, or has uncommitted changes to tracked files."""
-    if _pending(board) is not None:
-        _say("an earlier asdlc command was interrupted; undoing its unfinished change to the board's files")
-        _board_git(board, "reset", "--quiet", "--hard", "HEAD")
+    if _pending(board) is not None and _board_git(board, "status", "--porcelain", "--", "backlog").stdout.strip():
+        _say("an earlier asdlc command was interrupted; undoing its unfinished change to backlog/, and nothing else")
+        _board_git(board, "checkout", "--quiet", "HEAD", "--", "backlog", check=False)
         _board_git(board, "clean", "-fdq", "--", "backlog")
     branch = _board_git(board, "branch", "--show-current").stdout.strip()
     if branch != BOARD_BRANCH:
@@ -1449,21 +1520,31 @@ class Unpushed:
     own: bool  # asdlc made it: its trailer says so, or the interrupted change's marker covers it
 
 
-def unpushed_commits(log: str, interrupted: frozenset[str]) -> tuple[Unpushed, ...]:
-    """`git log --format=%H%x00%B%x01` over origin/main..HEAD, each commit marked as asdlc's own or not."""
+def unpushed_commits(log: str, interrupted: frozenset[str], files: Mapping[str, Sequence[str]]) -> tuple[Unpushed, ...]:
+    """`git log --format=%H%x00%B%x01` over origin/main..HEAD, each commit marked as asdlc's own or not.
+    A commit is asdlc's own when its trailer says so, or an interrupted change's marker covers it,
+    and it touches nothing outside backlog/: a person's commit is never taken for one."""
     found = []
     for entry in log.split("\x01"):
         sha, _, body = entry.strip("\n").partition("\x00")
-        if sha.strip():
-            own = bool(re.search(rf"(?m)^{TRAILER}: ", body)) or sha.strip() in interrupted
-            found.append(Unpushed(sha.strip(), body.strip().splitlines()[0] if body.strip() else "", own))
+        sha = sha.strip()
+        if sha:
+            marked = bool(re.search(rf"(?m)^{TRAILER}: ", body)) or sha in interrupted
+            only_board = all(path.startswith("backlog/") for path in files.get(sha, ()))
+            found.append(Unpushed(sha, body.strip().splitlines()[0] if body.strip() else "", marked and only_board))
     return tuple(found)
 
 
-def foreign_refusal(board: Path, foreign: Sequence[Unpushed]) -> str:
+def foreign_refusal(board: Path, foreign: Sequence[Unpushed], own: Sequence[Unpushed] = ()) -> str:
     listed = "; ".join(f"{c.sha[:12]} {c.subject}" for c in foreign)
-    return (f"the board clone at {board} has {len(foreign)} commit(s) on {BOARD_BRANCH} that aren't on origin and that asdlc didn't make "
-            f"({listed}). asdlc never pushes or drops them: push them yourself (git -C {board} push origin {BOARD_BRANCH}) or remove them "
+    head = (f"the board clone at {board} has {len(foreign)} commit(s) on {BOARD_BRANCH} that aren't on origin and that asdlc didn't make "
+            f"({listed}). asdlc never pushes or drops them")
+    if own:
+        return (f"{head}, and under them are {len(own)} unpushed change(s) an interrupted asdlc command left ({'; '.join(c.subject for c in own)}), "
+                "which must never be pushed. Keep yours and drop those: "
+                f"git -C {board} reset --hard origin/{BOARD_BRANCH} && git -C {board} cherry-pick {' '.join(c.sha[:12] for c in reversed(foreign))}, "
+                "then run the command again.")
+    return (f"{head}: push them yourself (git -C {board} push origin {BOARD_BRANCH}) or remove them "
             f"(git -C {board} reset --hard origin/{BOARD_BRANCH}), then run the command again.")
 
 
@@ -1482,9 +1563,12 @@ def _catch_up(board: Board) -> None:
     if base and _board_git(board, "cat-file", "-e", f"{base}^{{commit}}", check=False).returncode == 0:
         interrupted = frozenset(_board_git(board, "rev-list", f"{base}..HEAD").stdout.split())
     log = _board_git(board, "log", "--format=%H%x00%B%x01", f"origin/{BOARD_BRANCH}..HEAD").stdout
-    commits = unpushed_commits(log, interrupted)
+    shas = [entry.strip("\n").partition("\x00")[0].strip() for entry in log.split("\x01") if entry.strip()]
+    files = {sha: _board_git(board, "-c", "core.quotePath=false", "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha).stdout.splitlines()
+             for sha in shas}
+    commits = unpushed_commits(log, interrupted, files)
     if foreign := [c for c in commits if not c.own]:
-        raise AsdlcError(foreign_refusal(board.path, foreign))
+        raise AsdlcError(foreign_refusal(board.path, foreign, [c for c in commits if c.own]))
     if commits:
         _say(f"dropping {len(commits)} unpushed board change(s) an interrupted asdlc command left ({'; '.join(c.subject for c in commits)}); "
              "they were never pushed, so nobody saw them")
@@ -1842,6 +1926,9 @@ def lead(board: Board, raw_id: str, worker: str, new: bool = False) -> Led:
             now = f"; the {intent_id} on the board now is another intent, '{intent.title}'" if intent else ""
             raise AsdlcError(f"{intent_id} was accepted as {was[0].id}, which @{worker} leads: use {was[0].id}{now}. "
                              f"To lead that one, run asdlc lead {intent_id} --as {worker} --new")
+        if intent is None and (was := accepted_as(items, intent_id)):
+            led = f", led by @{was[0].lead}" if was[0].lead else ""
+            raise AsdlcError(f"{intent_id} was accepted as {was[0].id}{led}: use {was[0].id}")
         if intent is None:
             raise AsdlcError(f"{intent_id} is not a task or a draft on the board")
         if intent.type != "intent":
@@ -1885,24 +1972,34 @@ def heartbeat(board: Board, raw_id: str, worker: str, now: datetime) -> str:
     return _transact(board, step)
 
 
-def _reap_one(board: Board, found: Stale, now: datetime, after: timedelta) -> Stale | None:
+def _reap_one(board: Board, found: Stale, now: datetime, after: timedelta, approval_wait: timedelta = DEFAULT_APPROVAL_WAIT) -> Stale | None:
     """Release one stale hold, judged again on the current board: a heartbeat that landed first wins.
 
     Raises:
         AsdlcError: backlog failed, or the release could not be pushed.
     """
     def step(attempt: int) -> tuple[str | None, Stale | None]:
-        current = next((s for s in stale_holds(_items(board), _touched(board, "HEAD"), now, after)
+        current = next((s for s in stale_holds(_items(board), _touched(board, "HEAD"), now, after, approval_wait)
                         if s.task.id == found.task.id and s.hold is found.hold), None)
         if current is None:
             return None, None
         text = reap_comment(current, after)
         match current.hold:
             case Hold.CLAIM:
-                done = _board_backlog(board, ["task", "edit", current.task.id, "-s", TO_DO, "-a", ",".join(kept_on_release(current.task)),
+                kept = kept_on_release(current.task)
+                done = _board_backlog(board, ["task", "edit", current.task.id, "-s", TO_DO, "-a", ",".join(kept),
                                               "--comment", text, "--comment-author", REAPER])
                 if done.returncode != 0:
                     raise AsdlcError(f"backlog could not release {current.task.id}: {(done.stderr or done.stdout).strip()}")
+                if author := reserved_author(current.task):
+                    _write_key(board, current.task, RESERVED_KEY, author)
+            case Hold.RESERVATION:
+                author = f"@{current.task.reserved_for_author}"
+                kept = [a for a in people(current.task.assignees) if a != author]
+                done = _board_backlog(board, ["task", "edit", current.task.id, "-a", ",".join(kept), "--comment", text, "--comment-author", REAPER])
+                if done.returncode != 0:
+                    raise AsdlcError(f"backlog could not release the reservation on {current.task.id}: {(done.stderr or done.stdout).strip()}")
+                _write_key(board, current.task, RESERVED_KEY, None)
             case Hold.LEAD:
                 _write_key(board, current.task, LEAD_KEY, None)
                 _comment(board, current.task, text, REAPER)
@@ -1920,7 +2017,8 @@ def _reap_one(board: Board, found: Stale, now: datetime, after: timedelta) -> St
 def reap(board: Board, now: datetime, older_than: timedelta | None, as_json: bool) -> int:
     origin = _refresh(board)
     after = older_than or _settings(board).stale_after
-    released = [r for found in stale_holds(_items(board, origin), _touched(board, origin), now, after) if (r := _reap_one(board, found, now, after))]
+    wait = _settings(board).approval_wait
+    released = [r for found in stale_holds(_items(board, origin), _touched(board, origin), now, after, wait) if (r := _reap_one(board, found, now, after, wait))]
     rows = [{"id": s.task.id, "hold": str(s.hold), "holders": [h.removeprefix("@") for h in s.holders], "idle": human(s.idle),
              "kept": [p.removeprefix("@") for p in kept_on_release(s.task)] if s.hold is Hold.CLAIM else []} for s in released]
     lines = [f"released the {r['hold']} on {r['id']} held by {', '.join('@' + h for h in r['holders'])}: idle {r['idle']}" for r in rows]
@@ -1943,6 +2041,21 @@ def _promote(board: Board, draft_id: str) -> str:
     if done.returncode != 0 or len(added) != 1:
         raise AsdlcError(f"backlog could not promote {draft_id}: {(done.stderr or done.stdout).strip()}")
     return added.pop()
+
+
+def _beneath(items: Sequence[Task], task: Task, root: str) -> bool:
+    """Whether `root` is among the task's parents, at any depth."""
+    seen: set[str] = set()
+    current = task
+    while current.parent and current.parent not in seen:
+        if current.parent == root:
+            return True
+        seen.add(current.parent)
+        parent = _find(items, current.parent)
+        if parent is None:
+            return False
+        current = parent
+    return False
 
 
 def accept_comment(accepted: Mapping[str, str], engineer: str) -> str:
@@ -1968,7 +2081,8 @@ def accept(board: Board, raw_id: str, engineer: str) -> dict[str, object]:
             raise AsdlcError(f"{intent_id} is not a draft or a task on the board")
         if intent.type != "intent":
             raise AsdlcError(f"{intent_id} is a {intent.type or 'task'}, not an intent: asdlc accept takes an intent and accepts its draft children with it")
-        if not is_draft(intent) and not any(is_draft(t) and t.parent == intent.id for t in _items(board)):
+        items = _items(board)
+        if not is_draft(intent) and not any(is_draft(t) and _beneath(items, t, intent.id) for t in items):
             return None, {"intent": intent.id, "accepted": {}, "note": f"{intent.id} is already accepted and has no draft children: nothing to accept"}
         accepted: dict[str, str] = {}
         root = _promote(board, intent.id) if is_draft(intent) else intent.id
@@ -1978,6 +2092,7 @@ def accept(board: Board, raw_id: str, engineer: str) -> dict[str, object]:
         while level:
             below = []
             for old, new in level:
+                below += [(t.id, t.id) for t in _items(board) if not is_draft(t) and t.parent == new and t.id not in accepted.values()]
                 for child in sorted((t for t in _items(board) if is_draft(t) and t.parent == old), key=lambda t: id_key(t.id)):
                     if child.parent != new:
                         _write_key(board, child, "parent_task_id", new)
@@ -2004,11 +2119,14 @@ def accept(board: Board, raw_id: str, engineer: str) -> dict[str, object]:
     return _transact(board, step)
 
 
-def approve(board: Board, raw_id: str, engineer: str) -> str:
-    """Record a person's approval of a task's plan: asdlc_plan_approved_by and a comment, in one board commit.
+def approve(board: Board, raw_id: str, engineer: str, shown: str | None = None) -> str:
+    """Record a person's approval of a task's plan, with the plan's digest and the task's size, in one
+    board commit with a comment; the result shows the plan approved. `shown` is the digest of the
+    plan the person was shown: a plan changed since is refused.
 
     Raises:
-        AsdlcError: no such task, it is a draft or Done, it has no plan, or the change could not be pushed.
+        AsdlcError: no such task, it is a draft or Done, no worker holds it, it has no plan, the plan
+            changed since it was shown, or the change could not be pushed.
     """
     task_id = normalise_id(raw_id, _prefix(board))
 
@@ -2018,13 +2136,23 @@ def approve(board: Board, raw_id: str, engineer: str) -> str:
             raise AsdlcError(f"{task_id} is {'a draft: accept it first' if task else 'not a task on the board'}")
         if is_status(task, DONE):
             raise AsdlcError(f"{task_id} is Done; there is nothing left to approve")
-        if not plan_of((board.path / task.path).read_text()):
+        if not (is_status(task, IN_PROGRESS) and workers(task.assignees)):
+            raise AsdlcError(f"{task_id} is {task.status} and no longer held by a worker (its claim was released or reaped), so there is no "
+                             "plan waiting to be built: the next worker to claim it plans it again, and you approve that plan")
+        plan = plan_of((board.path / task.path).read_text())
+        if not plan:
             raise AsdlcError(f"{task_id} has no plan yet: its worker writes one in phase 1 (asdlc board task edit {task_id} --plan ...) before it is approved")
-        if task.plan_approved_by == engineer:
-            return None, f"@{engineer} already approved the plan of {task_id}"
+        digest = plan_digest(plan)
+        if shown and shown != digest:
+            raise AsdlcError(f"{task_id}'s plan changed since it was shown to you (shown {shown}, now {digest}): read it again and approve that")
+        shown_plan = f"{task_id}'s plan ({digest}, {size_of(task) or 'no size'}):\n{plan}\n"
+        if task.plan_approved_by == engineer and task.approved_hash == digest and task.approved_size == size_of(task):
+            return None, f"{shown_plan}@{engineer} already approved this plan of {task_id}"
         _write_key(board, task, APPROVED_KEY, engineer)
-        _comment(board, task, f"Plan approved by @{engineer}: its worker may build it.", f"@{engineer}")
-        return f"Approve the plan of {task_id}: @{engineer}", f"@{engineer} approved the plan of {task_id}"
+        _write_key(board, task, APPROVED_HASH_KEY, yaml_quoted(digest))
+        _write_key(board, task, APPROVED_SIZE_KEY, size_of(task) or None)
+        _comment(board, task, f"Plan approved by @{engineer} ({digest}, {size_of(task) or 'no size'}): its worker may build it.", f"@{engineer}")
+        return f"Approve the plan of {task_id}: @{engineer}", f"{shown_plan}@{engineer} approved the plan of {task_id}"
 
     return _transact(board, step)
 
@@ -2124,7 +2252,7 @@ def mine(board: Board, engineer: str, as_json: bool) -> int:
     report = mine_report(items, engineer, prefs, waiting)
     lines = [f"{engineer}: {report['active']} of {report['workers_cap']} workers busy building, {report['reviewing']} reviewing (the cap counts both)"]
     lines += [f"  {r['id']}\t{r['status']}{' (changes requested)' if r['changes_requested'] else ''}"
-              f"{' (plan approved by @' + r['plan_approved_by'] + ')' if r['plan_approved_by'] else ''}\t@{', @'.join(r['workers'])}\t{r['project'] or '-'}\t{r['title']}"
+              f"{(' (plan approved by @' + r['plan_approved_by'] + ')' if r['approval_holds'] else ' (plan changed since approval)') if r['plan_approved_by'] else ''}\t@{', @'.join(r['workers'])}\t{r['project'] or '-'}\t{r['title']}"
               for r in report["tasks"]]
     lines += [f"  review {r['id']}\t@{r['reviewer']}\t{r['kind']}\t{r['project'] or '-'}\t{r['title']}" for r in report["reviews"]]
     lines += [f"  lead {r['id']}{' (was ' + r['accepted_from'] + ')' if r['accepted_from'] else ''}\t{r['status']}\t@{r['lead']}\t{r['title']}" for r in report["leads"]]
@@ -2268,6 +2396,8 @@ def _claim_on_board(board: Board, task_id: str, worker: str, registry: Mapping[s
         if not task.branch:
             _write_key(board, task, BRANCH_KEY, branch)
         _write_key(board, task, HEARTBEAT_KEY, yaml_quoted(datetime.now(UTC).isoformat(timespec="seconds")))  # the claim is the first heartbeat
+        if task.reserved_for_author:
+            _write_key(board, task, RESERVED_KEY, None)
         return f"Claim {task_id} for @{worker}", Claimed(replace(task, status=IN_PROGRESS, assignees=assignees, branch=branch))
 
     return _transact(board, step)
@@ -2402,6 +2532,8 @@ def release(board: Board, raw_id: str, worker: str, cwd: Path) -> None:
         done = _board_backlog(board, ["task", "edit", task_id, "-s", TO_DO, "-a", ",".join(kept)])
         if done.returncode != 0:
             raise AsdlcError(f"backlog could not release {task_id}: {(done.stderr or done.stdout).strip()}")
+        if author := reserved_author(task):
+            _write_key(board, task, RESERVED_KEY, author)
         held_by = f"reserved for {', '.join(kept)}" if kept else "with no assignee"
         return f"Release {task_id} from @{worker}", f"released {task_id}; it is {TO_DO} {held_by}"
 
@@ -2487,6 +2619,9 @@ def review_next(board: Board, reviewer: str, engineer: str, now: datetime, fallb
     """Claim the review that has waited longest among those this reviewer may take."""
     origin = _refresh(board)
     prefs, settings, registry = _prefs(board, engineer), _settings(board), _registry()
+    if not (board.path / "plugins" / "team" / "review.md").is_file():
+        raise AsdlcError(f"the tasks repository has no plugins/team/review.md, the team's review policy, and a review needs one to judge by: "
+                         f"run asdlc init-board {board.path} (it adds only missing files), commit and push it, then claim again")
     if not prefs.review:
         reason = f"devs/{engineer}.yaml has review: false, so {engineer}'s orchestrator takes no reviews"
         _emit({"claimed": False, "reason": reason, "skipped": []}, as_json, [f"no review available: {reason}"])
@@ -2689,6 +2824,8 @@ class Facts:
     published: tuple[PublishedCheck, ...] = ()
     home: Path = Path("~")
     plugin_commands: tuple[tuple[str, str], ...] = ()  # (slug, commands.toml text) of each registered repository's plugin
+    plugin_roots: tuple[Path, ...] = ()  # where the asdlc plugin's scripts are: this script's and the installed plugin's
+    team_review_policy: bool = True  # the tasks repository has plugins/team/review.md
     claude_settings: tuple[tuple[str, str], ...] = ()  # (path, text) of each Claude Code settings file that applies in the board clone
     mcp_configs: tuple[tuple[str, str], ...] = ()  # (path, text) of each file that configures MCP servers
 
@@ -2792,7 +2929,22 @@ def _settings_findings(facts: Facts) -> list[Finding]:
         return [Finding("asdlc.toml", Level.FAIL, f"review_fallback_after ({human(settings.review_fallback_after)}) must be shorter than stale_after "
                                                   f"({human(settings.stale_after)}), so the author's machine can review a waiting task before "
                                                   "claims around it count as abandoned")]
-    return [Finding("asdlc.toml", Level.PASS, f"stale_after {human(settings.stale_after)}, review_fallback_after {human(settings.review_fallback_after)}")]
+    if settings.approval_wait < settings.stale_after:
+        return [Finding("asdlc.toml", Level.WARN, f"approval_wait ({human(settings.approval_wait)}) is shorter than stale_after ({human(settings.stale_after)}), "
+                                                  "so a claim waiting for a person's approval is released sooner than an idle one: make it longer")]
+    return [Finding("asdlc.toml", Level.PASS, f"stale_after {human(settings.stale_after)}, review_fallback_after {human(settings.review_fallback_after)}, "
+                                              f"approval_wait {human(settings.approval_wait)}")]
+
+
+def _policy_findings(facts: Facts) -> list[Finding]:
+    """A board made before the team review policy shipped has none, and reviewers won't review without one."""
+    if facts.board is None:
+        return []
+    if facts.team_review_policy:
+        return [Finding("review policy", Level.PASS, "plugins/team/review.md is in the tasks repository")]
+    return [Finding("review policy", Level.WARN, f"the tasks repository has no plugins/team/review.md, the team's review policy, so no review can be "
+                                                 f"claimed: run asdlc init-board {facts.board} to add it (it adds only missing files), then commit "
+                                                 "and push it")]
 
 
 def _repo_findings(facts: Facts, registry: str) -> list[Finding]:
@@ -2889,72 +3041,90 @@ def _published_findings(facts: Facts) -> list[Finding]:
             for p in facts.published]
 
 
-# The Bash commands agents run in normal work, as prefix rules. backlog is read-only here:
-# every board change goes through asdlc board, so only reads are allowed directly.
+# The Bash commands agents run in normal work, as narrow prefix rules. backlog is read-only
+# here: every board change goes through asdlc board.
 BASE_RULES = (
     "Bash(asdlc *)", "Bash(asdlc-plugin *)",
     "Bash(backlog task list *)", "Bash(backlog task view *)", "Bash(backlog draft list *)", "Bash(backlog draft view *)",
     "Bash(backlog doc list *)", "Bash(backlog doc view *)", "Bash(backlog search *)",
-    "Bash(git *)", "Bash(gh pr create *)", "Bash(gh pr view *)", "Bash(gh pr comment *)", "Bash(uv run *)",
+    "Bash(gh pr create *)", "Bash(gh pr view *)", "Bash(gh pr comment *)",
 )
+# The git subcommands the worker and reviewer agents run in a task's or a review's worktree, as
+# `git -C <worktree> ...`. The board guard refuses pushes to a default branch and force pushes.
+WORKTREE_GIT = ("fetch", "status", "diff", "log", "show", "add", "commit", "push", "rebase", "merge", "switch", "checkout -b",
+                "rev-parse", "branch", "symbolic-ref")
+# What the reviewer runs in the registered clone itself.
+CLONE_GIT = ("fetch", "worktree", "show", "rev-parse", "symbolic-ref")
+# A verified command with any of these gets no rule of its own: a rule can't say what it would allow.
+_UNSAFE_IN_RULE = (("*", "a * would be a wildcard in the rule"), ("|", "a pipe"), (";", "a ;"), ("&&", "&&"), ("||", "||"),
+                   ("`", "a backtick"), ("$(", "a command substitution"), (">", "a redirect"), ("<", "a redirect"), ("\n", "a line break"))
 
 
 @dataclass(frozen=True)
 class Rules:
-    """The Claude Code permissions the pilot needs on this machine: allow rules and folders to add."""
+    """The Claude Code permissions the pilot needs on this machine: allow rules, folders to add, and
+    the verified commands left out, each with why."""
 
     allow: tuple[str, ...]
     directories: tuple[str, ...]
+    skipped: tuple[tuple[str, str, str, str], ...] = ()  # (slug, command name, run line, why)
 
     def as_settings(self) -> dict[str, list[str]]:
         return {"allow": list(self.allow), "additionalDirectories": list(self.directories)}
 
 
-def command_parts(run: str) -> list[str]:
-    """The simple commands in a `commands.toml` run line, since Claude Code matches each part of
-    a compound command on its own."""
-    parts, current, quote, index = [], "", "", 0
-    while index < len(run):
-        char = run[index]
-        if quote:
-            quote = "" if char == quote else quote
-        elif char in "'\"":
-            quote = char
-        elif run.startswith(("&&", "||"), index) or char in ";\n":
-            parts.append(current)
-            current, index = "", index + (1 if char in ";\n" else 2)
-            continue
-        current += char
-        index += 1
-    return [part.strip() for part in [*parts, current] if part.strip()]
+def unsafe_in_rule(run: str) -> str | None:
+    """Why a run line can't be an exact allow rule, or None."""
+    return next((f"it has {why}" for token, why in _UNSAFE_IN_RULE if token in run), None)
 
 
-def permission_rules(repos: Sequence[tuple[str, Path]], board: Path | None, commands: Mapping[str, str]) -> Rules:
-    """The allow rules and folders for normal work: asdlc's own commands, backlog's reads, git, gh
-    for pull requests, uv, each registered repository's verified commands, and edits in the
-    worktrees beside each registered clone and beside the board (where onboarding works)."""
+def permission_rules(repos: Sequence[tuple[str, Path]], board: Path | None, commands: Mapping[str, str], roots: Sequence[Path] = ()) -> Rules:
+    """The allow rules and folders for normal work: asdlc's own commands (by name, by the plugin's
+    absolute path, and through `uv run --script`), backlog's reads, the git subcommands agents use in
+    worktrees and registered clones, gh for pull requests, each registered repository's simple
+    verified commands, and edits in the worktrees beside each registered clone and the tasks clone."""
     allow = list(BASE_RULES)
-    for slug, _ in repos:
+    for root in roots:
+        for script in ("asdlc", "asdlc-plugin"):
+            allow += [f"Bash({root}/scripts/{script} *)", f"Bash(uv run --script {root}/scripts/{script} *)"]
+    skipped = []
+    for slug, path in repos:
+        worktrees = f"{path}.worktrees"
+        allow += [f"Bash(git -C {worktrees}/* {sub} *)" for sub in WORKTREE_GIT]
+        allow += [f"Bash(git -C {path} {sub} *)" for sub in CLONE_GIT]
         try:
             tables = tomllib.loads(commands.get(slug, ""))
         except tomllib.TOMLDecodeError:
             continue
-        for table in tables.values():
-            if isinstance(table, dict) and isinstance(table.get("run"), str):
-                allow += [f"Bash({part})" for part in command_parts(table["run"])]
+        for name, table in tables.items():
+            if isinstance(table, dict) and isinstance(run := table.get("run"), str) and run.strip():
+                if why := unsafe_in_rule(run.strip()):
+                    skipped.append((slug, name, run.strip(), why))
+                else:
+                    allow.append(f"Bash({run.strip()})")
     folders = [f"{path}.worktrees" for _, path in repos] + ([f"{board}.worktrees"] if board else [])
     allow += [f"Edit(/{folder}/**)" for folder in folders]
-    return Rules(tuple(dict.fromkeys(allow)), tuple(dict.fromkeys(folders)))
+    return Rules(tuple(dict.fromkeys(allow)), tuple(dict.fromkeys(folders)), tuple(skipped))
 
 
-def merge_permissions(settings: Mapping[str, object], rules: Rules) -> tuple[dict[str, object], list[str]]:
+def merge_permissions(settings: object, rules: Rules) -> tuple[dict[str, object], list[str]]:
     """The settings with the rules' allow entries and folders added where missing, everything else
-    kept as it was, and what was added. The input is not changed."""
+    kept as it was, and what was added. The input is not changed.
+
+    Raises:
+        AsdlcError: the settings aren't an object, or their permissions, allow or additionalDirectories have the wrong shape.
+    """
+    if not isinstance(settings, dict):
+        raise AsdlcError("the settings file is not a JSON object of settings; nothing was changed")
     merged = json.loads(json.dumps(settings))
     permissions = merged.setdefault("permissions", {})
+    if not isinstance(permissions, dict):
+        raise AsdlcError(f"its permissions is {json.dumps(permissions)}, not an object: fix it (or remove it), then run asdlc permissions --write again")
     added = []
     for key, wanted in (("allow", rules.allow), ("additionalDirectories", rules.directories)):
         present = permissions.setdefault(key, [])
+        if not isinstance(present, list) or not all(isinstance(entry, str) for entry in present):
+            raise AsdlcError(f"its permissions.{key} is {json.dumps(present)}, not a list of strings: fix it, then run asdlc permissions --write again")
         for entry in wanted:
             if entry not in present:
                 present.append(entry)
@@ -3046,9 +3216,10 @@ def missing_permissions(settings: Sequence[tuple[str, str]], rules: Rules, home:
         return [], broken
     missing = []
     for rule in rules.allow:
-        if rule.startswith("Bash("):
-            command = rule[5:-1].removesuffix(" *")
-            covered = allows_command(allow, command)
+        if rule in allow:
+            covered = True
+        elif rule.startswith("Bash("):
+            covered = allows_command(allow, rule[5:-1].removesuffix(" *"))
         else:
             covered = "acceptEdits" in modes or rule in allow or allows_edit(allow, f"{rule[6:-4]}/task-1/file", home)
         if not covered:
@@ -3059,13 +3230,13 @@ def missing_permissions(settings: Sequence[tuple[str, str]], rules: Rules, home:
 
 def _permission_findings(facts: Facts) -> list[Finding]:
     """I10: no permission prompts during normal work, so the allow rules asdlc permissions writes must be there."""
-    rules = permission_rules([(r.slug, r.path) for r in facts.repos if r.exists], facts.board, dict(facts.plugin_commands))
+    rules = permission_rules([(r.slug, r.path) for r in facts.repos if r.exists], facts.board, dict(facts.plugin_commands), facts.plugin_roots)
     missing, broken = missing_permissions(facts.claude_settings, rules, facts.home)
     found = [Finding("permissions", Level.WARN, f"{where} is not valid JSON, so Claude Code ignores it: fix it") for where in broken]
     if missing:
-        return found + [Finding("permissions", Level.WARN, f"agents will stop at permission prompts: your Claude Code settings don't allow "
-                                                           f"{', '.join(missing)}. Run asdlc permissions --write in your own terminal to add them "
-                                                           "to ~/.claude/settings.json (it keeps what is there and backs the file up first)")]
+        return found + [Finding("permissions", Level.WARN, f"agents will stop at permission prompts: the settings that apply in the tasks clone don't "
+                                                           f"allow {', '.join(missing)}. Run asdlc permissions --write in your own terminal: it adds them "
+                                                           "to the tasks clone's .claude/settings.local.json, keeping what is there and backing it up first")]
     return found + [Finding("permissions", Level.PASS, f"the {len(rules.allow)} allow rules and {len(rules.directories)} folders normal work needs are set")]
 
 
@@ -3092,7 +3263,7 @@ def _mcp_findings(facts: Facts) -> list[Finding]:
 
 def diagnose(facts: Facts, registry: str = "the registry") -> tuple[Finding, ...]:
     """Every finding about this machine, in the order a person fixes them."""
-    return (*_tool_findings(facts), *_identity_findings(facts), *_board_findings(facts), *_settings_findings(facts),
+    return (*_tool_findings(facts), *_identity_findings(facts), *_board_findings(facts), *_settings_findings(facts), *_policy_findings(facts),
             *_repo_findings(facts, registry), *_plugin_findings(facts), *_permission_findings(facts), *_mcp_findings(facts),
             *_leftover_findings(facts), *_published_findings(facts))
 
@@ -3227,59 +3398,84 @@ def gather(explicit_board: str | None, cwd: Path) -> Facts:
         name = None
     claude_settings, mcp_configs = _claude_files(board)
     commands = tuple((r.slug, text) for r in facts.repos if (text := read(board / "plugins" / r.slug / "commands.toml")) is not None)
+    plugins = _plugin_facts(claude)
     return replace(
-        facts, board=board, claude_settings=claude_settings, mcp_configs=mcp_configs, plugin_commands=commands,
+        facts, board=board, claude_settings=claude_settings, mcp_configs=mcp_configs, plugin_commands=commands, plugin_roots=_plugin_roots(plugins),
         devs=read(board / "devs" / f"{engineer.removeprefix('@')}.yaml") if engineer else None,
         dirty=_git(board, "status", "--porcelain", "--untracked-files=no").stdout.strip(),
         branch=_git(board, "branch", "--show-current").stdout.strip(),
         origin=origin.stdout.strip() if origin.returncode == 0 else "",
         origin_error=_reachable(board) if origin.returncode == 0 else None,
         settings=read(board / "asdlc.toml"), marketplace=name if isinstance(name, str) else None,
-        plugins=_plugin_facts(claude), leftovers=_leftovers(board, facts.repos), published=_published(board, facts.repos),
+        team_review_policy=(board / "plugins" / "team" / "review.md").is_file(),
+        plugins=plugins, leftovers=_leftovers(board, facts.repos), published=_published(board, facts.repos),
     )
 
 
-def _user_settings() -> Path:
-    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser() / "settings.json"
+def _plugin_roots(plugins: PluginFacts) -> tuple[Path, ...]:
+    """This script's plugin folder and, when Claude Code lists it, the installed asdlc plugin's."""
+    installed = [Path(str(row.get("installPath"))) for row in plugins.installed if str(row.get("id", "")).startswith("asdlc@") and row.get("installPath")]
+    return tuple(dict.fromkeys([Path(__file__).resolve().parent.parent, *installed]))
+
+
+LOCAL_SETTINGS = ".claude/settings.local.json"
+
+
+def _write_atomically(target: Path, text: str) -> None:
+    """Write through a temporary file in the same folder and a rename, so the file is never half written."""
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(text)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def permissions(explicit_board: str | None, cwd: Path, write: bool, as_json: bool, now: datetime) -> int:
     """Print the Claude Code allow rules normal work needs on this machine; with `write`, merge them into
-    the user's settings, keeping everything there and backing the file up first.
+    the tasks clone's own `.claude/settings.local.json`, where orchestrator sessions and the workers
+    they launch run, keeping everything there, after a backup.
 
     Raises:
-        AsdlcError: the registry or the settings file is unreadable, or the settings file isn't JSON.
+        AsdlcError: no board, the registry or the settings file is unreadable, or the settings file has the wrong shape.
     """
-    try:
-        board: Path | None = resolve_board(explicit_board, cwd)
-    except AsdlcError:
-        board = None
+    board = resolve_board(explicit_board, cwd)
     repos = sorted(_registry().values(), key=lambda e: e.slug)
-    commands = {e.slug: text for e in repos if board and (path := board / "plugins" / e.slug / "commands.toml").is_file() for text in [path.read_text()]}
-    rules = permission_rules([(e.slug, e.path) for e in repos], board, commands)
-    target = _user_settings()
+    commands = {e.slug: path.read_text() for e in repos if (path := board / "plugins" / e.slug / "commands.toml").is_file()}
+    claude = (os.environ.get("ASDLC_CLAUDE") or "").strip() or shutil.which("claude")
+    rules = permission_rules([(e.slug, e.path) for e in repos], board, commands, _plugin_roots(_plugin_facts(claude)))
+    target = board / LOCAL_SETTINGS
+    skipped = [f"  {slug} {name}: `{run}` ({why}); run it through asdlc record-check, which Bash(asdlc *) allows" for slug, name, run, why in rules.skipped]
+    report = {"settings": str(target), "allow": list(rules.allow), "directories": list(rules.directories),
+              "skipped": [{"repository": slug, "command": name, "run": run, "why": why} for slug, name, run, why in rules.skipped]}
     if not write:
-        _emit({"settings": str(target), **rules.as_settings(), "allow": list(rules.allow), "directories": list(rules.directories)}, as_json,
-              [json.dumps({"permissions": rules.as_settings()}, indent=2), f"(asdlc permissions --write merges these into {target})"])
+        _emit(report, as_json, [json.dumps({"permissions": rules.as_settings()}, indent=2), *(["verified commands with no rule of their own:", *skipped] if skipped else []),
+                                f"(asdlc permissions --write merges these into {target})"])
         return 0
     text = target.read_text() if target.is_file() else "{}"
     try:
         current = json.loads(text)
     except ValueError:
         raise AsdlcError(f"{target} is not valid JSON, so asdlc won't rewrite it: fix it, then run asdlc permissions --write again") from None
-    if not isinstance(current, dict):
-        raise AsdlcError(f"{target} is not a JSON object of settings; nothing was changed")
-    merged, added = merge_permissions(current, rules)
+    try:
+        merged, added = merge_permissions(current, rules)
+    except AsdlcError as error:
+        raise AsdlcError(f"{target}: {error}") from None
+    exclude = Path(_git(board, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()) / "info" / "exclude"
+    if (updated := with_exclude(exclude.read_text() if exclude.exists() else "", f"{LOCAL_SETTINGS}*")) is not None:
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text(updated)  # untracked, so Claude Code applies it as the person's own file
     if not added:
-        _emit({"settings": str(target), "added": []}, as_json, [f"{target} already allows everything normal work needs: nothing to add"])
+        _emit(report | {"added": []}, as_json, [f"{target} already allows everything normal work needs: nothing to add", *skipped])
         return 0
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.is_file():
         backup = target.with_name(f"{target.name}.{now.strftime('%Y%m%dT%H%M%S')}.bak")
         shutil.copy2(target, backup)
         _say(f"backed up {target} to {backup}")
-    target.write_text(json.dumps(merged, indent=2) + "\n")
-    _emit({"settings": str(target), "added": added}, as_json, [f"added to {target}:", *(f"  {entry}" for entry in added)])
+    _write_atomically(target, json.dumps(merged, indent=2, ensure_ascii=False) + "\n")
+    lines = [f"added to {target}:", *(f"  {entry}" for entry in added)]
+    _emit(report | {"added": added}, as_json, lines + (["verified commands with no rule of their own:", *skipped] if skipped else []))
     return 0
 
 
@@ -3623,8 +3819,10 @@ def _parser() -> argparse.ArgumentParser:
     reaping.add_argument("--older-than", help="the stale timeout, such as 2h (else stale_after in the board's asdlc.toml, else 2h)")
     reaping.add_argument("--now", help="the time to judge staleness at, as ISO 8601 (for tests and demonstrations)")
     add("accept", "a person's command: accept an intent and its draft children", task="the intent", json_output=True)
-    commands.add_parser("approve", help="a person's command: approve the plans of tasks, size 2 and up, so their workers build them").add_argument(
-        "ids", nargs="+", help="the tasks whose plans you approve")
+    approving = commands.add_parser("approve", help="a person's command: approve the plans of tasks, size 2 and up, so their workers build them")
+    approving.add_argument("ids", nargs="+", help="the tasks whose plans you approve")
+    approving.add_argument("--plan-hash", action="append", default=[], help="the digest of each plan you were shown, in the order of the ids; "
+                           "a plan changed since is refused")
     add("mine", "an engineer's workers' tasks, leads and reservations", who="the engineer, such as kyle", json_output=True)
     commands.add_parser("record-check", help="run a check in the task's worktree and record it on the task: record-check <id> --as <worker> -- <command...>")
     finishing_work = add("finish", "hand your held task to review: In Review with its branch and pull request", task="the task", who=worker, json_output=True)
@@ -3636,8 +3834,8 @@ def _parser() -> argparse.ArgumentParser:
     reviewing.add_argument("--fallback", action="store_true",
                            help="also take this engineer's own work once it has waited longer than review_fallback_after (a same-machine review)")
     reviewing.add_argument("--now", help="the time to judge the wait at, as ISO 8601 (for tests and demonstrations)")
-    add("permissions", "the Claude Code allow rules normal work needs on this machine; --write adds them to your settings (a person's command)",
-        json_output=True).add_argument("--write", action="store_true", help="merge them into ~/.claude/settings.json, keeping what is there, after a backup")
+    add("permissions", "the Claude Code allow rules normal work needs on this machine; --write adds them to the tasks clone's local settings (a person's command)",
+        json_output=True).add_argument("--write", action="store_true", help="merge them into the tasks clone's .claude/settings.local.json, keeping what is there, after a backup")
     add("doctor", "check that this machine is ready: tools, identity, the board, settings, repositories, plugins and leftovers", json_output=True)
     measuring = add("stats", "how the pilot is going: claims, review times, round trips, races, onboardings", json_output=True)
     measuring.add_argument("--since", help="count from this date or time, as ISO 8601 (else from the board's start)")
@@ -3783,9 +3981,11 @@ def main(argv: Sequence[str]) -> int:
             case "approve":
                 _check_backlog()
                 engineer, failed = _engineer(cwd), 0
-                for raw_id in arguments.ids:
+                if arguments.plan_hash and len(arguments.plan_hash) != len(arguments.ids):
+                    raise AsdlcError(f"give one --plan-hash per task, in the same order: {len(arguments.ids)} task(s), {len(arguments.plan_hash)} hash(es)")
+                for raw_id, shown in zip(arguments.ids, arguments.plan_hash or [None] * len(arguments.ids)):
                     try:
-                        print(approve(board, raw_id, engineer))
+                        print(approve(board, raw_id, engineer, shown))
                     except AsdlcError as error:
                         failed += 1
                         _say(str(error))

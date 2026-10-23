@@ -39,13 +39,13 @@ EOF
 
 ### A size-1 task
 
-A `size-1` task is built by a small model that follows steps, not intent, and its plan is not approved by a person. Write its order of work as numbered steps, each one exact: the file, the change, the command to run. If you can't write it that way, the task isn't size-1: say so in the task's notes, so the orchestrator can resize it.
+A `size-1` task is built by a small model that follows steps, not intent, and its plan is not approved by a person. Write its order of work as numbered steps, each one exact: the file, the change, the command to run. If you can't write it that way, the task isn't size-1: say so in the task's notes, so the engineer can resize it; agents don't change the size of accepted work.
 
 ## Challenge it
 
 Before handing it over, ask what could break, which step carries the most risk, and which alternatives were rejected and why. Check it against the contract: names, endpoints and events as the contract has them. Refine it until someone who never saw this conversation could build the change from the task alone.
 
-Then stop. For a task of size 2 or more, the engineer reads the plan in their orchestrator's batch and approves it with `asdlc approve <task>` in their own terminal, which records the approval on the task; building starts only after that, and `asdlc record-check` and `asdlc finish` refuse until it is there.
+Then stop. For a task of size 2 or more, the engineer reads the plan in their orchestrator's batch and approves it with `asdlc approve <task>` in their own terminal, which records the approval with the plan's digest and the task's size; building starts only after that, and `asdlc record-check` and `asdlc finish` refuse until it is there, and again if the plan or the size changes after it.
 
 ## When the work drifts
 

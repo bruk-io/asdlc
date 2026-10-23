@@ -37,7 +37,7 @@ asdlc record-check <task> --as <worker> -- <the check command>
 
 Run it from the worktree (`cd <worktree> && asdlc record-check ...` in one command, or with the worktree as the working directory): it refuses anywhere else. If it says the plan isn't approved, stop: your orchestrator launched you too early.
 
-Then build what the approved plan says. Work in small steps, and record each meaningful check the same way, so the evidence comes from the toolchain. The check command is what the plan's proof names, or the repository's own (its plugin's `commands.toml`, its CLAUDE.md, README or build files say). If the work departs from the plan, update the plan on the task and say why in the notes.
+Then build what the approved plan says. Work in small steps, and record each meaningful check the same way, so the evidence comes from the toolchain. The check command is what the plan's proof names, or the repository's own (its plugin's `commands.toml`, its CLAUDE.md, README or build files say); a command joined with `&&` or a pipe goes through `sh -c '...'` inside `record-check`. The approval holds for the plan's text and the task's size: don't edit the plan once it is approved. A small departure goes in the notes, with why. If the plan itself must change, update it, stop, and say so in your final message: `record-check` and `finish` refuse until your engineer approves the new plan.
 
 ### Finish
 

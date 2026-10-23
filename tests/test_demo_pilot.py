@@ -144,7 +144,8 @@ class PilotReadinessTest(review.CrossMachineReviewTest):
         # Each person adds the permission rules normal work needs, once the repository's plugin is published.
         added = {machine.name: machine.asdlc("permissions", "--write").stdout for machine in (self.kyle, self.ann)}
         self.assertIn("Bash(python3 -m py_compile login.py)", added["kyle"])
-        self.assertIn("Bash(python3 -c \"import ast; ast.parse(open('login.py').read())\")", added["kyle"])
+        self.assertIn("build: `python3 -c \"import ast; ast.parse(open('login.py').read())\"` (it has a ;)", added["kyle"])
+        self.assertTrue((self.kyle.board / ".claude" / "settings.local.json").is_file())
         self.say(f"\n$ asdlc permissions --write   # on kyle's machine\n{added['kyle'].rstrip()}")
 
         # kyle's machine is ready.

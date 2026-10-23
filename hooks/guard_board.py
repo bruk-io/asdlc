@@ -193,23 +193,8 @@ def unwrap(words: Sequence[str]) -> list[str]:
     return words
 
 
-def status_set(arguments: Sequence[str]) -> str | None:
-    """The board status (To Do, In Progress, In Review or Done) a backlog command sets, if any."""
-    for index, word in enumerate(arguments):
-        value = None
-        if word in ("-s", "--status") and index + 1 < len(arguments):
-            value = arguments[index + 1]
-        elif word.startswith("--status="):
-            value = word.partition("=")[2]
-        elif word.startswith("-s") and not word.startswith("--") and len(word) > 2:
-            value = word[2:].removeprefix("=")
-        if value is not None and (named := STATUSES.get(re.sub(r"[\s_-]", "", value).casefold())):
-            return named
-    return None
-
-
 def _flag_values(arguments: Sequence[str], flags: frozenset[str]) -> list[str]:
-    """The values given to any of `flags`, as `-f v`, `--flag v` or `--flag=v`."""
+    """The values given to any of `flags`, as `-f v`, `-fv`, `--flag v` or `--flag=v`."""
     found = []
     for index, word in enumerate(arguments):
         flag, equals, value = word.partition("=")
@@ -217,7 +202,29 @@ def _flag_values(arguments: Sequence[str], flags: frozenset[str]) -> list[str]:
             found.append(value)
         elif word in flags and index + 1 < len(arguments):
             found.append(arguments[index + 1])
+        elif not word.startswith("--") and len(word) > 2 and word[:2] in flags:
+            found.append(word[2:].removeprefix("="))
     return found
+
+
+def status_set(arguments: Sequence[str]) -> str | None:
+    """The board status (To Do, In Progress, In Review or Done) a backlog command sets, if any."""
+    for value in _flag_values(arguments, frozenset({"-s", "--status"})):
+        if named := STATUSES.get(re.sub(r"[\s_-]", "", value).casefold()):
+            return named
+    return None
+
+
+def _action(arguments: Sequence[str]) -> tuple[str, str, list[str]]:
+    """A backlog command's entity, verb and the words after them: `task edit 1 -s x` is (task, edit, [1, -s, x])."""
+    words = [w for w in arguments]
+    positional = [index for index, word in enumerate(words) if not word.startswith("-")][:2]
+    if len(positional) < 2:
+        return (words[positional[0]] if positional else ""), "", words[positional[0] + 1:] if positional else []
+    return words[positional[0]], words[positional[1]], words[positional[1] + 1:]
+
+
+_CHANGES = frozenset({("task", "edit"), ("task", "create"), ("draft", "create"), ("draft", "edit")})
 
 
 IN_PROGRESS_REFUSAL = (
@@ -238,8 +245,35 @@ REVIEW_LABEL_REFUSAL = (
 )
 
 
+SIZE_REFUSAL = (
+    "a task's size decides whether its plan needs a person's approval and which model builds it, and an approval records the "
+    "size it approved: an agent doesn't change the size of accepted work. Ask the person to resize it; a resized task's plan "
+    "is approved again with asdlc approve. Change other labels with --add-label and --remove-label."
+)
+
+
+def _accepted_ids(rest: Sequence[str]) -> list[str]:
+    """The ids a `task edit` names that aren't drafts."""
+    ids = []
+    for word in rest:
+        if word.startswith("-"):
+            break
+        if not re.fullmatch(r"(?i)draft-\d+", word):
+            ids.append(word)
+    return ids
+
+
 def backlog_refusal(arguments: Sequence[str]) -> str | None:
-    match status_set(arguments):
+    """Why an agent may not run this backlog command, or None. Listings, views and searches are
+    never refused: the status, label and assignee rules apply only to commands that change a task."""
+    entity, verb, rest = _action(arguments)
+    if (entity, verb) in (("draft", "promote"), ("task", "promote")):
+        return "promoting a draft accepts it as work, which is a person's decision: ask the person to promote it."
+    if (entity, verb) in (("task", "archive"), ("task", "demote")):
+        return "archiving or demoting accepted work is a person's decision: ask the person."
+    if (entity, verb) not in _CHANGES:
+        return None
+    match status_set(rest):
         case "To Do" | "Done" as named:
             return (
                 f"setting a task to {named} is a person's decision: To Do accepts work, and Done closes it "
@@ -250,17 +284,16 @@ def backlog_refusal(arguments: Sequence[str]) -> str | None:
             return IN_PROGRESS_REFUSAL
         case "In Review":
             return IN_REVIEW_REFUSAL
-    pairs = set(zip(arguments, arguments[1:]))
-    if ("task", "archive") in pairs or ("task", "demote") in pairs:
-        return "archiving or demoting accepted work is a person's decision: ask the person."
-    if ("task", "edit") in pairs and _flag_values(arguments, _ASSIGNEE_FLAGS):
+    if (entity, verb) == ("task", "edit") and _flag_values(rest, _ASSIGNEE_FLAGS):
         return ASSIGNEE_REFUSAL
-    labels = {label.strip().lower() for value in _flag_values(arguments, _LABEL_FLAGS) for label in value.split(",")}
+    labels = {label.strip().lower() for value in _flag_values(rest, _LABEL_FLAGS) for label in value.split(",")}
     if labels & REVIEW_LABELS:
         return REVIEW_LABEL_REFUSAL
-    if ("draft", "promote") in pairs or ("task", "promote") in pairs:
-        return "promoting a draft accepts it as work, which is a person's decision: ask the person to promote it."
-    if ("task", "create") in pairs and "--draft" not in arguments:
+    if (entity, verb) == ("task", "edit") and _accepted_ids(rest):
+        replacing = _flag_values(rest, frozenset({"-l", "--label", "--labels"})) or "--clear-labels" in rest
+        if replacing or any(label.startswith("size-") for label in labels):
+            return SIZE_REFUSAL
+    if (entity, verb) == ("task", "create") and "--draft" not in rest:
         return (
             "a task created without --draft starts as accepted To Do work, and accepting work is a "
             "person's decision: add --draft, and the person promotes it."
