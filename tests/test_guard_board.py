@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -146,6 +147,14 @@ class BoardStatusTest(unittest.TestCase):
         reason = guard.decide_command("asdlc accept DRAFT-1", PLAIN, lookup).reason
         self.assertIn("person's decision", reason)
         self.assertIn("their own terminal", reason)
+
+    def test_denies_an_agent_approving_a_plan(self) -> None:
+        """I7: plan approval is the person's, recorded by asdlc approve."""
+        for command in ("asdlc approve TASK-3", "asdlc --board ../board approve 3 4", "bash -c 'asdlc approve 3'"):
+            with self.subTest(command=command):
+                outcome = guard.decide_command(command, PLAIN, lookup)
+                self.assertIs(outcome.verdict, guard.Verdict.DENY)
+                self.assertIn("their own terminal", outcome.reason)
 
     def test_allows_the_orchestrators_commands(self) -> None:
         for command in (
@@ -338,6 +347,32 @@ class ParsingTest(unittest.TestCase):
         self.assertEqual(guard.push_destinations(["--tags", "origin"], "dev"), frozenset())
 
 
+class BacklogMcpTest(unittest.TestCase):
+    """I8: Backlog.md's MCP tools change the board with no push and no checks, so the guard allows their reads and refuses their writes."""
+
+    def test_reads_are_allowed_and_writes_refused(self) -> None:
+        for tool in ("mcp__backlog__task_view", "mcp__backlog__task_list", "mcp__Backlog_md__task_search", "mcp__backlog__document_view",
+                     "mcp__backlog__document_list", "mcp__plugin_tasks_backlog__get_workflow_overview", "mcp__backlog__definition_of_done_defaults_get",
+                     "mcp__backlog__milestone_list", "mcp__github__create_issue", "mcp__memory__write"):
+            with self.subTest(tool=tool):
+                self.assertIs(guard.decide_mcp(tool).verdict, guard.Verdict.ALLOW)
+        for tool in ("mcp__backlog__task_create", "mcp__backlog__task_edit", "mcp__Backlog_md__task_archive", "mcp__backlog__task_delete",
+                     "mcp__backlog__task_restore", "mcp__backlog__document_create", "mcp__backlog__document_update", "mcp__backlog__milestone_add",
+                     "mcp__backlog__definition_of_done_defaults_upsert", "mcp__backlog__draft_promote", "mcp__BACKLOG__something_new"):
+            with self.subTest(tool=tool):
+                outcome = guard.decide_mcp(tool)
+                self.assertIs(outcome.verdict, guard.Verdict.DENY)
+                self.assertIn("asdlc board", outcome.reason)
+
+    def test_hooks_json_sends_backlog_mcp_tools_to_the_guard(self) -> None:
+        config = json.loads((ROOT / "hooks" / "hooks.json").read_text())
+        groups = [g for g in config["hooks"]["PreToolUse"] if any("guard_board.py" in h["command"] for h in g["hooks"])]
+        for tool in ("mcp__backlog__task_edit", "mcp__Backlog_md__task_create", "mcp__plugin_tasks_backlog__task_edit"):
+            with self.subTest(tool=tool):
+                self.assertTrue(any(re.search(g["matcher"], tool) for g in groups if not re.fullmatch(r"[\w\s,|-]*", g["matcher"])), tool)
+        self.assertFalse(any(re.search(g["matcher"], "mcp__github__create_issue") for g in groups if "mcp" in g["matcher"]))
+
+
 class GuardHookTest(unittest.TestCase):
     """The hook as Claude Code runs it, against real repositories."""
 
@@ -366,6 +401,12 @@ class GuardHookTest(unittest.TestCase):
 
     def log(self, project: Path) -> list[dict[str, str]]:
         return [json.loads(line) for line in (project / ".asdlc" / "hooks.jsonl").read_text().splitlines()]
+
+    def test_denies_a_backlog_mcp_write_and_logs_it(self) -> None:
+        done = self.run_hook(self.board, "mcp__backlog__task_edit", id="TASK-1", status="In Review")
+        self.assertEqual(self.decision(done), "deny")
+        self.assertEqual(self.log(self.board)[-1]["verdict"], "deny")
+        self.assertEqual(self.decision(self.run_hook(self.board, "mcp__backlog__task_view", id="TASK-1")), "allow")
 
     def test_denies_a_hand_edit_of_the_board_and_logs_it(self) -> None:
         done = self.run_hook(self.board, "Edit", file_path=str(self.board / "backlog" / "tasks" / "task-1 - x.md"))

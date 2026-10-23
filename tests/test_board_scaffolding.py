@@ -32,6 +32,7 @@ SCAFFOLDING = (
     "devs/example.yaml",
     "plugins/team/.claude-plugin/plugin.json",
     "plugins/team/README.md",
+    "plugins/team/review.md",
     "plugins/team/rules/testing-python.md",
     "plugins/team/rules/testing.md",
     "plugins/team/skills/testing/SKILL.md",
@@ -74,6 +75,20 @@ class TemplatesTest(unittest.TestCase):
     def test_every_file_is_there_and_nothing_else(self) -> None:
         shipped = sorted(p.relative_to(TEMPLATES).as_posix() for p in TEMPLATES.rglob("*") if p.is_file())
         self.assertEqual(shipped, sorted(SCAFFOLDING))
+
+    def test_the_team_review_policy_judges_team_code_not_asdlcs_own(self) -> None:
+        """I3: reviewers judge a team's code by the team's policy in the tasks repository, never by asdlc's own REVIEW.md."""
+        policy = (TEMPLATES / "plugins" / "team" / "review.md").read_text()
+        for needed in ("Bugs", "Security", "Compliance", "Important", "Nit", "at most five nits", "acceptance criteria", "contract",
+                       "size-1: plan approval skipped", "plugins/<repo-slug>/review.md"):
+            with self.subTest(needed=needed):
+                self.assertIn(needed, policy)
+        for asdlc_only in ("Python 3.15", "plan/<slug>.md", "R21", "R23", "./scripts/check"):
+            with self.subTest(asdlc_only=asdlc_only):
+                self.assertNotIn(asdlc_only, policy)
+        reviewer = (ROOT / "agents" / "reviewer.md").read_text()
+        self.assertNotIn("CLAUDE_PLUGIN_ROOT}/REVIEW.md", reviewer)
+        self.assertIn("policies", reviewer)
 
     def test_the_marketplace_lists_the_team_plugin(self) -> None:
         market = json.loads((TEMPLATES / ".claude-plugin" / "marketplace.json").read_text())

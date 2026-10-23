@@ -87,7 +87,9 @@ class CrossMachineReviewTest(unittest.TestCase):
     # What the worker and the reviewer agents would do, scripted.
 
     def build(self, machine: demo.Machine, task_id: str, worktree: Path, text: str, message: str) -> str:
-        """The worker's build and finish steps: commit, record a check, push the branch."""
+        """The worker's plan (approved by its engineer), then its build and finish steps: commit, record a check, push the branch."""
+        machine.asdlc("board", "task", "edit", task_id, "--plan", "1. Change login.py. Proof: it still parses.")
+        machine.asdlc("approve", task_id)
         (worktree / "login.py").write_text(text)
         machine.git(worktree, "commit", "--quiet", "-am", message)
         worker = json.loads((worktree / ".asdlc-task").read_text())["worker"]

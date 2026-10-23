@@ -626,8 +626,18 @@ def facts(**changes: object) -> object:
                        frozendict({"id": "authoring-kit@synced", "enabled": True, "version": "0.7.0"})),
             kit_files=frozenset(asdlc.AUTHORING_KIT)),
         published=(asdlc.PublishedCheck("acme-api", 0, "acme-api: clean"),),
+        home=Path("/home/kyle"),
+        claude_settings=(("/home/kyle/.claude/settings.json", json.dumps({"permissions": {
+            "allow": ["Bash(asdlc *)", "Bash(asdlc-plugin *)", "Bash(git *)", "Bash(gh pr create *)", "Bash(gh pr comment *)",
+                      "Edit(~/*.worktrees/**)"],
+            "additionalDirectories": ["/home/kyle"]}})),),
+        mcp_configs=(("/home/kyle/.claude.json", json.dumps({"mcpServers": {"github": {"command": "gh-mcp"}}})),),
     )
     return asdlc.replace(healthy, **changes)
+
+
+def settings(**permissions: object) -> tuple[tuple[str, str], ...]:
+    return (("/home/kyle/.claude/settings.json", json.dumps({"permissions": permissions})),)
 
 
 class DoctorTest(unittest.TestCase):
@@ -726,6 +736,31 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual([f.area for f in self.only("fail", facts(plugins=disabled))], ["team plugin"])
         self.assertIn("auto-update is off for tasks, the default for a marketplace you add yourself",
                       self.only("warn", facts(plugins=asdlc.replace(plugins, marketplaces=(frozendict({"name": "tasks"}),))))[0].message)
+
+    def test_permissions_for_background_workers(self) -> None:
+        """I10: a background worker can't answer a permission prompt, so doctor checks the allow rules it needs."""
+        allow = ["Bash(asdlc:*)", "Bash(asdlc-plugin:*)", "Bash(git:*)", "Bash(gh pr *)", "Edit(//home/kyle/*.worktrees/**)"]
+        self.assertEqual(self.levels(facts(claude_settings=settings(allow=allow, additionalDirectories=["~"])))["pass"].count("permissions"), 1)
+        self.assertNotIn("warn", self.levels(facts(claude_settings=settings(allow=["Bash"], defaultMode="acceptEdits", additionalDirectories=["/home"]))))
+        missing = self.only("warn", facts(claude_settings=settings(allow=["Bash(asdlc *)", "Bash(git push *)"])))
+        (rules,) = [f for f in missing if f.area == "permissions"]
+        for named in ("Bash(asdlc-plugin *)", "Bash(git *)", "Bash(gh pr create *)", "Bash(gh pr comment *)", "docs/guide.md"):
+            with self.subTest(named=named):
+                self.assertIn(named, rules.message)
+        self.assertNotIn("Bash(asdlc *)", rules.message)
+        (folders,) = [f for f in missing if f.area == "permissions acme-api"]
+        self.assertIn("/home/kyle/api.worktrees", folders.message)
+        self.assertIn("additionalDirectories", folders.message)
+        broken = self.only("warn", facts(claude_settings=(("/home/kyle/.claude/settings.json", "{not json"),)))
+        self.assertTrue(any("not valid JSON" in f.message for f in broken))
+
+    def test_a_backlog_mcp_server_is_reported(self) -> None:
+        """I8: the guard refuses Backlog.md MCP writes, and doctor says when one is configured."""
+        configured = facts(mcp_configs=(("/home/kyle/.claude.json", json.dumps({"projects": {"/home/kyle/tasks": {"mcpServers": {
+            "backlog": {"command": "backlog", "args": ["mcp", "start"]}}}}})), ("/home/kyle/tasks/.mcp.json", "{}")))
+        (found,) = [f for f in self.only("warn", configured) if f.area == "backlog mcp"]
+        self.assertIn("backlog", found.message)
+        self.assertIn("asdlc board", found.message)
 
     def test_leftovers_say_how_to_remove_them(self) -> None:
         found = facts(leftovers=(Path("/home/kyle/tasks.worktrees/plugin-acme-api"), Path("/home/kyle/api.worktrees/asdlc-verify"),
@@ -1487,6 +1522,8 @@ class MineAndRecordCheckTest(unittest.TestCase):
 
     def test_record_check_notes_the_command_and_keeps_its_exit_code(self) -> None:
         worktree = self.team.boards.root / "api.worktrees" / "task-1"
+        self.team.ok("board", "task", "edit", "TASK-1", "--plan", "1. Do it. Proof: the check.")
+        self.team.ok("approve", "TASK-1")
         done = _asdlc("record-check", "TASK-1", "--as", "kyle.w1", "--", "sh", "-c", "echo checked; exit 3", cwd=worktree, env=self.team.machine, engineer="kyle")
         self.assertEqual(done.returncode, 3, done.stderr)
         self.assertEqual(done.stdout, "checked\n")
@@ -1510,6 +1547,8 @@ class ReviewCommandTest(unittest.TestCase):
         engineer = asdlc.owner_of(worker)
         team.ok("claim", task_id, "--as", worker, engineer=engineer)
         number = task_id.rpartition("-")[2]
+        team.ok("board", "task", "edit", task_id, "--plan", "1. Limit it. Proof: the tests.", engineer=engineer)
+        team.ok("approve", task_id, engineer=engineer)
         team.ok("finish", task_id, "--as", worker, "--pr", f"https://github.com/acme/api/pull/{number}",
                 "--notes", "Built.", engineer=engineer)
 
@@ -1531,6 +1570,7 @@ class ReviewCommandTest(unittest.TestCase):
         )
         on_board = self.team.task("TASK-1")
         self.assertEqual((on_board.status, on_board.assignees, on_board.reviewer, on_board.review_kind), ("In Review", ("@ann.w1",), "kyle.r1", "cross-machine"))
+        self.assertEqual(first["policies"], [str(self.team.board / "plugins" / "team" / "review.md")], "I3: the team's review policy, never asdlc's REVIEW.md")
         self.assertIn("@kyle.r1 is reviewing TASK-1: a cross-machine review.", self.team.text("TASK-1"))
         self.assertEqual(_git(self.team.boards.origin, "log", "-1", "--format=%s", "main"), "Review TASK-1: @kyle.r1 (cross-machine)")
         self.assertEqual(self.review("kyle.r2")["task"], "TASK-2")
@@ -1845,3 +1885,161 @@ class InterruptedCommandTest(unittest.TestCase):
                         pass
             finally:
                 asdlc.LOCK_WAIT_SECONDS = waited
+
+
+@needs_backlog
+class HeartbeatLivenessTest(unittest.TestCase):
+    """I6: a claim is its first heartbeat, and a heartbeat on a task that has left In Progress is a quiet no-op."""
+
+    def test_heartbeats_follow_the_task(self) -> None:
+        team = Team(self, [_sized("Small", "size-1", "--project", "acme-api")])
+        team.ok("claim", "1", "--as", "kyle.w1")
+        self.assertTrue(team.task("TASK-1").heartbeat, "the claim is the first heartbeat")
+        team.ok("finish", "1", "--as", "kyle.w1", "--notes", "built")
+        done = team.ok("heartbeat", "1", "--as", "kyle.w1")
+        self.assertIn("TASK-1 is In Review", done.stdout)
+        self.assertIn("stop heartbeating it", done.stdout)
+        self.assertEqual(_git(team.boards.origin, "log", "-1", "--format=%s", "main"), "Finish TASK-1: @kyle.w1, In Review")
+        refused = team.run("heartbeat", "1", "--as", "kyle.w2")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("holds nothing to keep alive", refused.stderr)
+
+
+@needs_backlog
+class PlanApprovalTest(unittest.TestCase):
+    """I7: a size 2+ task is built and finished only after a person's recorded approval of its plan."""
+
+    def test_building_waits_for_asdlc_approve(self) -> None:
+        team = Team(self, [_sized("Rate limit", "size-2", "--project", "acme-api"), _sized("Typo", "size-1", "--project", "acme-api")])
+        worktree = Path(json.loads(team.ok("claim", "1", "--as", "kyle.w1", "--json").stdout)["worktree"])
+        check = _asdlc("record-check", "TASK-1", "--as", "kyle.w1", "--", "true", cwd=worktree, env=team.machine, engineer="kyle")
+        self.assertEqual(check.returncode, 1)
+        self.assertIn("asdlc approve TASK-1", check.stderr)
+        early = team.run("finish", "1", "--as", "kyle.w1", "--notes", "built")
+        self.assertEqual(early.returncode, 1)
+        self.assertIn("asdlc approve TASK-1", early.stderr)
+        no_plan = team.run("approve", "1")
+        self.assertEqual(no_plan.returncode, 1)
+        self.assertIn("no plan", no_plan.stderr)
+        team.ok("board", "task", "edit", "1", "--plan", "Files: limiter.py. Proof: the tests.")
+        self.assertIn("approved the plan of TASK-1", team.ok("approve", "1").stdout)
+        self.assertEqual(team.task("TASK-1").plan_approved_by, "kyle")
+        self.assertIn("Plan approved by @kyle", team.text("TASK-1"))
+        ok = _asdlc("record-check", "TASK-1", "--as", "kyle.w1", "--", "true", cwd=worktree, env=team.machine, engineer="kyle")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        team.ok("finish", "1", "--as", "kyle.w1", "--notes", "built")
+        team.ok("claim", "2", "--as", "kyle.w2")
+        team.ok("finish", "2", "--as", "kyle.w2", "--notes", "size-1: no approval needed")
+
+
+@needs_backlog
+class RecordCheckWhereTest(unittest.TestCase):
+    """I9: a recorded check ran in the task's own worktree, by its holder, and says where."""
+
+    def test_only_in_the_tasks_worktree(self) -> None:
+        team = Team(self, [_sized("One", "size-1", "--project", "acme-api"), _sized("Two", "size-1", "--project", "acme-api")])
+        one = Path(json.loads(team.ok("claim", "1", "--as", "kyle.w1", "--json").stdout)["worktree"])
+        two = Path(json.loads(team.ok("claim", "2", "--as", "kyle.w2", "--json").stdout)["worktree"])
+        ran = team.boards.root / "ran"
+        for where, says in ((team.board, "is not a task's worktree"), (team.api, "is not a task's worktree"), (two, "the worktree of TASK-2, not TASK-1")):
+            with self.subTest(where=where):
+                done = _asdlc("record-check", "TASK-1", "--as", "kyle.w1", "--", "touch", str(ran), cwd=where, env=team.machine, engineer="kyle")
+                self.assertEqual(done.returncode, 1)
+                self.assertIn(says, done.stderr)
+                self.assertFalse(ran.exists())
+        (one / "wip.py").write_text("x\n")
+        done = _asdlc("record-check", "TASK-1", "--as", "kyle.w1", "--", "true", cwd=one, env=team.machine, engineer="kyle")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        head = _git(one, "rev-parse", "HEAD")[:12]
+        self.assertIn(f"Check passed: `true` exited 0 at", team.text("TASK-1"))
+        self.assertIn(f"in {one} on task-1-one at {head} with uncommitted changes", team.text("TASK-1"))
+
+
+@needs_backlog
+class AcceptSubtreeTest(unittest.TestCase):
+    """I5: accept promotes the whole draft subtree under an intent, re-parenting each level."""
+
+    def test_three_levels(self) -> None:
+        team = Team(self, [])
+        team.ok("board", "task", "create", "Checkout", "--draft", "--type", "intent")
+        team.ok("board", "task", "create", "API part", "--draft", "-p", "DRAFT-1", "--project", "acme-api", "-l", "size-3")
+        team.ok("board", "task", "create", "API sub", "--draft", "-p", "DRAFT-2", "--project", "acme-api", "-l", "size-1")
+        team.ok("board", "task", "create", "API sub two", "--draft", "-p", "DRAFT-2", "--project", "acme-api", "-l", "size-1", "--dep", "DRAFT-3")
+        team.ok("board", "task", "create", "Other idea", "--draft")
+        report = json.loads(team.ok("accept", "DRAFT-1", "--json").stdout)
+        self.assertEqual(report["accepted"], {"DRAFT-1": "TASK-1", "DRAFT-2": "TASK-1.1", "DRAFT-3": "TASK-1.1.1", "DRAFT-4": "TASK-1.1.2"})
+        on_origin = team.boards.on_origin()
+        self.assertEqual({tid: on_origin[tid][0].parent for tid in ("TASK-1.1", "TASK-1.1.1", "TASK-1.1.2")},
+                         {"TASK-1.1": "TASK-1", "TASK-1.1.1": "TASK-1.1", "TASK-1.1.2": "TASK-1.1"})
+        self.assertEqual(on_origin["TASK-1.1.2"][0].dependencies, ("TASK-1.1.1",))
+        self.assertEqual({tid: on_origin[tid][0].accepted_from for tid in ("TASK-1", "TASK-1.1", "TASK-1.1.1")},
+                         {"TASK-1": "DRAFT-1", "TASK-1.1": "DRAFT-2", "TASK-1.1.1": "DRAFT-3"})
+        drafts = [path.name for path in (team.boards.clone("after") / "backlog" / "drafts").glob("*.md")]
+        self.assertEqual(len(drafts), 1, drafts)
+        self.assertIn("Other-idea", drafts[0])
+
+
+@needs_backlog
+class AcceptedIdsTest(unittest.TestCase):
+    """I4: after accept, a lead's old draft id still finds its task, and never an unrelated draft that reuses the id."""
+
+    def test_old_draft_ids_resolve_to_the_accepted_task(self) -> None:
+        team = Team(self, [])
+        team.ok("board", "task", "create", "Intent A", "--draft", "--type", "intent")
+        team.ok("lead", "DRAFT-1", "--as", "kyle.lead")
+        team.ok("board", "task", "create", "A1", "--draft", "-p", "DRAFT-1", "--project", "acme-api", "-l", "size-2")
+        team.ok("accept", "DRAFT-1")
+        self.assertIn("DRAFT-1 -> TASK-1", team.text("TASK-1"))
+        self.assertIn("DRAFT-2 -> TASK-1.1", team.text("TASK-1"))
+        team.ok("board", "task", "create", "Intent B", "--draft", "--type", "intent")
+        beat = team.ok("heartbeat", "DRAFT-1", "--as", "kyle.lead")
+        self.assertIn("DRAFT-1 was accepted as TASK-1", beat.stdout)
+        self.assertTrue(team.task("TASK-1").heartbeat)
+        self.assertEqual(_git(team.boards.origin, "log", "-1", "--format=%s", "main"), "Heartbeat TASK-1 from @kyle.lead")
+        stale = team.run("lead", "DRAFT-1", "--as", "kyle.lead")
+        self.assertEqual(stale.returncode, 1)
+        self.assertIn("DRAFT-1 was accepted as TASK-1", stale.stderr)
+        self.assertIn("Intent B", stale.stderr)
+        self.assertEqual(asdlc.task_from("x", team.text("DRAFT-1")).lead, "")
+        self.assertEqual(json.loads(team.ok("lead-of", "DRAFT-2", "--json").stdout), {"task": "TASK-1.1", "intent": "TASK-1", "lead": "kyle.lead"})
+        mine = json.loads(team.ok("mine", "--as", "kyle", "--json").stdout)
+        self.assertEqual([(r["id"], r["accepted_from"]) for r in mine["leads"]], [("TASK-1", "DRAFT-1")])
+        new = json.loads(team.ok("lead", "DRAFT-1", "--as", "kyle.lead", "--new", "--json").stdout)
+        self.assertEqual((new["intent"], new["mine"]), ("DRAFT-1", True))
+        self.assertEqual(asdlc.task_from("x", team.text("DRAFT-1")).title, "Intent B")
+
+
+@needs_backlog
+class ReviewSlotTest(unittest.TestCase):
+    """I2: with review on, asdlc next leaves a slot free for a review waiting for this engineer, so reviews never starve."""
+
+    def test_next_leaves_a_slot_for_a_waiting_review(self) -> None:
+        team = Team(self, [_sized(f"T{n}", "size-1", "--project", "acme-api") for n in (1, 2, 3, 4)],
+                    files={"devs/kyle.yaml": "name: kyle\nworkers: 2\nreview: true\n", "devs/lee.yaml": "name: lee\nworkers: 1\nreview: false\n"})
+        team.ok("claim", "1", "--as", "ann.w1", engineer="ann")
+        team.ok("finish", "1", "--as", "ann.w1", "--notes", "built", engineer="ann")
+        first = json.loads(team.ok("next", "--as", "kyle.w1", "--json").stdout)
+        self.assertEqual(first["task"], "TASK-2")
+        held = json.loads(team.ok("next", "--as", "kyle.w2", "--json").stdout)
+        self.assertFalse(held["claimed"])
+        self.assertIn("leaves one slot for the review of TASK-1", held["reason"])
+        mine = json.loads(team.ok("mine", "--as", "kyle", "--json").stdout)
+        self.assertEqual((mine["reviews_waiting"], mine["slot_left_for_review"]), (["TASK-1"], True))
+        other = json.loads(team.ok("next", "--as", "lee.w1", "--json", engineer="lee").stdout)
+        self.assertEqual(other["task"], "TASK-3", "an engineer who doesn't review keeps every slot for building")
+        self.assertEqual(json.loads(team.ok("review-next", "--as", "kyle.r1", "--json").stdout)["task"], "TASK-1")
+        none = json.loads(team.ok("next", "--as", "kyle.w2", "--json").stdout)
+        self.assertIn("the cap in devs/kyle.yaml (2)", none["reason"])
+
+
+@needs_backlog
+class ReviewPolicyTest(unittest.TestCase):
+    """I3: a review claim names the team's review policy and the repository plugin's own, from the tasks repository."""
+
+    def test_the_claim_names_the_policies_that_exist(self) -> None:
+        team = Team(self, [_sized("Rate limit", "size-1", "--project", "acme-api")], files={"plugins/acme-api/review.md": "# acme-api review\n"})
+        team.ok("claim", "1", "--as", "ann.w1", engineer="ann")
+        team.ok("finish", "1", "--as", "ann.w1", "--notes", "built", engineer="ann")
+        claimed = json.loads(team.ok("review-next", "--as", "kyle.r1", "--json").stdout)
+        self.assertEqual(claimed["policies"], [str(team.board / "plugins" / "team" / "review.md"), str(team.board / "plugins" / "acme-api" / "review.md")])
+        self.assertNotIn("REVIEW.md", claimed["route"])

@@ -100,6 +100,11 @@ ACCEPT_REFUSAL = (
     "person's decision: ask the person to run asdlc accept <intent-id> in their own terminal."
 )
 
+APPROVE_REFUSAL = (
+    "asdlc approve records a person's approval of a plan, and approving a plan is the person's decision: show them the "
+    "plans and ask them to run asdlc approve <task id>... in their own terminal."
+)
+
 
 # --- the logic -----------------------------------------------------------------------
 
@@ -121,6 +126,28 @@ def decide_file(path: Path, repo: Repo | None) -> Outcome:
             "claim a task first: asdlc next or asdlc claim, then work in the worktree it prints.",
         )
     return Outcome(Verdict.ALLOW, "not a board file, and not code outside a claimed worktree")
+
+
+_MCP_READS = frozenset({"view", "list", "search", "get", "read", "show", "overview", "guide", "instructions", "help", "board"})
+_MCP_WRITES = frozenset({"create", "edit", "update", "delete", "archive", "restore", "add", "remove", "rename", "upsert", "promote", "demote",
+                         "complete", "set", "move", "write"})
+MCP_REFUSAL = (
+    "Backlog.md's MCP server writes the board's files without committing or pushing them, and without asdlc's checks, so "
+    "other agents never see the change and the clone is left dirty. Change the board with asdlc board (for example: "
+    "asdlc board task edit TASK-1 --append-notes ...) or the asdlc command for the change: claim, finish, release, review-done. "
+    "Reading the board through the MCP server is fine."
+)
+
+
+def decide_mcp(tool: str) -> Outcome:
+    """A Backlog.md MCP tool: its reads are allowed, and everything else is refused, since it never pushes."""
+    server, _, name = tool.removeprefix("mcp__").partition("__")
+    if "backlog" not in server.casefold():
+        return Outcome(Verdict.ALLOW, "not a Backlog.md MCP tool")
+    words = set(name.casefold().split("_"))
+    if words & _MCP_READS and not words & _MCP_WRITES:
+        return Outcome(Verdict.ALLOW, f"{name} only reads the board")
+    return Outcome(Verdict.DENY, MCP_REFUSAL)
 
 
 def simple_commands(command: str) -> list[list[str]]:
@@ -400,6 +427,8 @@ def decide_command(command: str, cwd: Path, lookup: Lookup) -> Outcome:
                 return Outcome(Verdict.DENY, reason)
             if subcommand == "accept":
                 return Outcome(Verdict.DENY, ACCEPT_REFUSAL)
+            if subcommand == "approve":
+                return Outcome(Verdict.DENY, APPROVE_REFUSAL)
             if subcommand == "record-check" and "--" in rest:
                 inner = decide_command(shlex.join(rest[rest.index("--") + 1:]), directory, lookup)
                 if inner.verdict is not Verdict.ALLOW:
@@ -510,6 +539,8 @@ def main() -> int:
     tool_input = payload.get("tool_input") or {}
     if tool == "Bash":
         outcome = decide_command(str(tool_input.get("command", "")), cwd, repo_at)
+    elif tool.startswith("mcp__"):
+        outcome = decide_mcp(tool)
     else:
         raw = tool_input.get("file_path") or tool_input.get("notebook_path")
         if raw:

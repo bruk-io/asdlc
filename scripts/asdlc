@@ -143,7 +143,7 @@ SIZE_ROUTES: frozendict[str, Route | Refusal] = frozendict({
     "size-8": Refusal("size-8 is too big for one change: split it before it starts"),
 })
 # A review is judgement over one finished task's diff, whatever the task's size.
-REVIEW = Route("sonnet", "medium", "a review: judgement over one task's diff against its plan, its acceptance criteria and REVIEW.md")
+REVIEW = Route("sonnet", "medium", "a review: judgement over one task's diff against its plan, its acceptance criteria and the team's review policy")
 
 
 @dataclass(frozen=True)
@@ -461,6 +461,25 @@ def holder_refusal(task: Task | None, task_id: str, worker: str, doing: str) -> 
     return None
 
 
+def approval_refusal(task: Task) -> str | None:
+    """Why a task can't be built or finished yet, or None: anything but size-1 waits for a person
+    to approve its plan with asdlc approve."""
+    if "size-1" in task.labels or task.plan_approved_by:
+        return None
+    size = next((label for label in task.labels if label.startswith("size-")), "a task without a size-1 label")
+    return (f"{task.id}'s plan isn't approved yet: {size} work is built only after a person approves its plan. Write the plan on the task "
+            f"and stop; your engineer runs asdlc approve {task.id} in their own terminal")
+
+
+_PLAN = re.compile(r"<!-- SECTION:PLAN:BEGIN -->(.*?)<!-- SECTION:PLAN:END -->", re.S)
+
+
+def plan_of(text: str) -> str:
+    """The task's plan section as Backlog writes it, or empty."""
+    found = _PLAN.search(text)
+    return found[1].strip() if found else ""
+
+
 def finish_edit(task: Task, branch: str, pull: str | None, notes: str) -> list[str]:
     """The backlog edit that hands a held task to review: In Review, its branch and pull request
     among its references (once), the changes-requested label gone, the worker's notes appended."""
@@ -587,6 +606,18 @@ def review_claims(tasks: Iterable[Task], engineer: str) -> tuple[Task, ...]:
 def busy(tasks: Sequence[Task], engineer: str) -> int:
     """What counts against the `workers` cap: workers building and reviewers reviewing."""
     return len(active_workers(tasks, engineer)) + len(review_claims(tasks, engineer))
+
+
+def build_refusal(cap: int, held: int, reviews_held: int, waiting: Sequence[str], engineer: str) -> str | None:
+    """Why `next` may not start another build now, or None. An engineer who reviews keeps one
+    slot for a review waiting for them while none of their reviewers holds one, so building
+    never takes every slot and reviews never starve."""
+    if held >= cap:
+        return f"{engineer}'s workers and reviewers hold {held} task(s), the cap in devs/{engineer}.yaml ({cap})"
+    if waiting and not reviews_held and held + 1 >= cap:
+        return (f"{engineer}'s next build leaves one slot for the review of {', '.join(waiting)} waiting for them "
+                f"(devs/{engineer}.yaml has review: true): run asdlc review-next first")
+    return None
 
 
 # --- review: claims, the fallback and verdicts -------------------------------------------
@@ -888,13 +919,41 @@ class LeadOf:
     lead: str | None
 
 
+def holds(task: Task, worker: str) -> bool:
+    """Whether the worker holds the task's claim, the intent's lead, or the task's review."""
+    return f"@{worker}" in task.assignees or task.lead == worker or task.reviewer == worker
+
+
+def accepted_as(items: Iterable[Task], draft_id: str, worker: str | None = None) -> tuple[Task, ...]:
+    """The items asdlc accept promoted from a draft with this id (held by `worker`, when given).
+    Backlog reuses a draft's id once it is promoted, so an old draft id can name a new draft."""
+    return tuple(t for t in items if t.accepted_from == draft_id and (worker is None or holds(t, worker)))
+
+
+def held_item(items: Sequence[Task], task_id: str, worker: str) -> tuple[Task | None, str]:
+    """The item the worker means by `task_id`, and a note when it was found by an old draft id: the
+    item with that id when the worker holds it, else the item accepted from that draft id that the
+    worker holds, else the item with that id (for the caller to refuse)."""
+    task = _find(items, task_id)
+    if task is not None and holds(task, worker):
+        return task, ""
+    if len(found := accepted_as(items, task_id, worker)) == 1:
+        return found[0], f"{task_id} was accepted as {found[0].id}: use {found[0].id} from now on"
+    return task, ""
+
+
 def lead_of(items: Sequence[Task], task_id: str) -> LeadOf:
-    """The lead of a task's parent intent, or of the intent itself.
+    """The lead of a task's parent intent, or of the intent itself. A draft id that no longer
+    exists finds the task asdlc accept promoted it to.
 
     Raises:
-        AsdlcError: no task or draft has that id.
+        AsdlcError: no task or draft has that id, or an old draft id became several tasks.
     """
     task = _find(items, task_id)
+    if task is None and len(found := accepted_as(items, task_id)) > 1:
+        raise AsdlcError(f"{task_id} was accepted more than once, as {', '.join(t.id for t in found)}: use the task's own id")
+    if task is None and found:
+        task = found[0]
     if task is None:
         raise AsdlcError(f"{task_id} is not a task or a draft on the board")
     intent = task if task.type == "intent" else _find(items, task.parent) if task.parent else None
@@ -960,8 +1019,8 @@ def reap_comment(stale: Stale, after: timedelta) -> str:
     )
 
 
-def mine_report(items: Sequence[Task], engineer: str, prefs: Prefs) -> dict[str, object]:
-    """The engineer's workers' tasks, leads and reservations, for the orchestrator."""
+def mine_report(items: Sequence[Task], engineer: str, prefs: Prefs, waiting: Sequence[str] = ()) -> dict[str, object]:
+    """The engineer's workers' tasks, leads and reservations, and the reviews waiting for them, for the orchestrator."""
     def row(task: Task, **extra: object) -> dict[str, object]:
         return {"id": task.id, "title": task.title, "status": task.status, "project": task.project, "parent": task.parent, **extra}
 
@@ -980,8 +1039,10 @@ def mine_report(items: Sequence[Task], engineer: str, prefs: Prefs) -> dict[str,
         "tasks": sorted(held, key=lambda r: id_key(str(r["id"]))),
         "changes_requested": [r for r in sorted(held, key=lambda r: id_key(str(r["id"]))) if r["changes_requested"]],
         "reviews": [row(t, reviewer=t.reviewer, kind=t.review_kind) for t in sorted(reviews, key=lambda t: id_key(t.id))],
-        "leads": [row(t, lead=t.lead) for t in items if t.lead and owner_of(t.lead) == engineer],
+        "leads": [row(t, lead=t.lead, accepted_from=t.accepted_from or None) for t in items if t.lead and owner_of(t.lead) == engineer],
         "reserved": [row(t) for t in items if is_status(t, TO_DO) and reserved_for(t, engineer) and not workers(t.assignees)],
+        "reviews_waiting": list(waiting) if prefs.review else [],
+        "slot_left_for_review": bool(prefs.review and waiting and not reviews),
     }
 
 
@@ -1759,16 +1820,24 @@ class Led:
     lost: bool = False  # another orchestrator's lead landed first, just now
 
 
-def lead(board: Board, raw_id: str, worker: str) -> Led:
+def lead(board: Board, raw_id: str, worker: str, new: bool = False) -> Led:
     """Claim the lead on an intent, accepted or still a draft: the first orchestrator to ask gets it.
 
+    A draft id this worker's lead was accepted from is refused unless `new` says the draft that
+    now has the id is the one meant: Backlog reuses draft ids once they are promoted.
+
     Raises:
-        AsdlcError: no such intent, it is Done, or the claim could not be pushed.
+        AsdlcError: no such intent, it is Done, an old draft id, or the claim could not be pushed.
     """
     intent_id = normalise_id(raw_id, _prefix(board))
 
     def step(attempt: int) -> tuple[str | None, Led]:
-        intent = _find(_items(board), intent_id)
+        items = _items(board)
+        intent = _find(items, intent_id)
+        if not new and (intent is None or intent.lead != worker) and (was := accepted_as(items, intent_id, worker)):
+            now = f"; the {intent_id} on the board now is another intent, '{intent.title}'" if intent else ""
+            raise AsdlcError(f"{intent_id} was accepted as {was[0].id}, which @{worker} leads: use {was[0].id}{now}. "
+                             f"To lead that one, run asdlc lead {intent_id} --as {worker} --new")
         if intent is None:
             raise AsdlcError(f"{intent_id} is not a task or a draft on the board")
         if intent.type != "intent":
@@ -1794,16 +1863,20 @@ def heartbeat(board: Board, raw_id: str, worker: str, now: datetime) -> str:
     Raises:
         AsdlcError: the worker holds neither, or the heartbeat could not be pushed.
     """
-    task_id = normalise_id(raw_id, _prefix(board))
+    asked = normalise_id(raw_id, _prefix(board))
 
     def step(attempt: int) -> tuple[str | None, str]:
-        task = _find(_items(board), task_id)
+        task, note = held_item(_items(board), asked, worker)
+        task_id = task.id if task is not None else asked
+        note = f"{note}. " if note else ""
+        if task is not None and f"@{worker}" in task.assignees and not is_status(task, IN_PROGRESS) and worker not in (task.lead, task.reviewer):
+            return None, f"{note}{task_id} is {task.status}: @{worker} has nothing to keep alive on it any more, so stop heartbeating it"
         if task is None or not (task.lead == worker or task.reviewer == worker or (f"@{worker}" in task.assignees and is_status(task, IN_PROGRESS))):
             held = "is not on the board" if task is None else f"is {task.status}, assigned to {', '.join(task.assignees) or 'nobody'}, led by {'@' + task.lead if task.lead else 'nobody'}, reviewed by {'@' + task.reviewer if task.reviewer else 'nobody'}"
             raise AsdlcError(f"{task_id} {held}, so @{worker} holds nothing to keep alive; it may have been reaped. asdlc mine --as {owner_of(worker)} shows what your workers hold")
         stamp = now.astimezone(UTC).isoformat(timespec="seconds")
         _write_key(board, task, HEARTBEAT_KEY, yaml_quoted(stamp))
-        return f"Heartbeat {task_id} from @{worker}", f"{task_id} kept alive for @{worker} at {stamp}"
+        return f"Heartbeat {task_id} from @{worker}", f"{note}{task_id} kept alive for @{worker} at {stamp}"
 
     return _transact(board, step)
 
@@ -1868,9 +1941,17 @@ def _promote(board: Board, draft_id: str) -> str:
     return added.pop()
 
 
-def accept(board: Board, raw_id: str) -> dict[str, object]:
-    """Promote an intent draft and all its draft children in one board commit, keeping the
-    children under the intent and their dependencies on each other.
+def accept_comment(accepted: Mapping[str, str], engineer: str) -> str:
+    """The comment on an accepted intent mapping each draft id to its task id, since Backlog reuses draft ids."""
+    pairs = "\n".join(f"- {old} -> {new}" for old, new in accepted.items())
+    return (f"Accepted by @{engineer}. Draft ids are reused once promoted, so refer to these by their new ids "
+            f"(asdlc_accepted_from on each keeps the old one):\n\n{pairs}")
+
+
+def accept(board: Board, raw_id: str, engineer: str) -> dict[str, object]:
+    """Promote an intent draft and every draft under it, at any depth, in one board commit:
+    each level re-parented under its newly accepted parent, dependencies on each other remapped,
+    each promoted item marked with the draft id it had, and the mapping commented on the intent.
 
     Raises:
         AsdlcError: no such intent, backlog failed, or the change could not be pushed.
@@ -1878,31 +1959,68 @@ def accept(board: Board, raw_id: str) -> dict[str, object]:
     intent_id = normalise_id(raw_id, _prefix(board))
 
     def step(attempt: int) -> tuple[str | None, dict[str, object]]:
-        items = _items(board)
-        intent = _find(items, intent_id)
+        intent = _find(_items(board), intent_id)
         if intent is None:
             raise AsdlcError(f"{intent_id} is not a draft or a task on the board")
         if intent.type != "intent":
             raise AsdlcError(f"{intent_id} is a {intent.type or 'task'}, not an intent: asdlc accept takes an intent and accepts its draft children with it")
-        children = sorted((t for t in items if is_draft(t) and t.parent == intent.id), key=lambda t: id_key(t.id))
-        if not is_draft(intent) and not children:
+        if not is_draft(intent) and not any(is_draft(t) and t.parent == intent.id for t in _items(board)):
             return None, {"intent": intent.id, "accepted": {}, "note": f"{intent.id} is already accepted and has no draft children: nothing to accept"}
         accepted: dict[str, str] = {}
-        parent = accepted[intent.id] = _promote(board, intent.id) if is_draft(intent) else intent.id
-        for child in children:
-            if child.parent != parent:
-                _write_key(board, child, "parent_task_id", parent)
-                _board_git(board, "commit", "--quiet", "--no-verify", "-am", f"Put {child.id} under {parent}")
-            accepted[child.id] = _promote(board, child.id)
+        root = _promote(board, intent.id) if is_draft(intent) else intent.id
+        if root != intent.id:
+            accepted[intent.id] = root
+        level = [(intent.id, root)]
+        while level:
+            below = []
+            for old, new in level:
+                for child in sorted((t for t in _items(board) if is_draft(t) and t.parent == old), key=lambda t: id_key(t.id)):
+                    if child.parent != new:
+                        _write_key(board, child, "parent_task_id", new)
+                        _board_git(board, "commit", "--quiet", "--no-verify", "-am", f"Put {child.id} under {new}")
+                    accepted[child.id] = _promote(board, child.id)
+                    below.append((child.id, accepted[child.id]))
+            level = below
         for new_id in accepted.values():
             task = _find(_tasks(board), new_id)
             if task is not None and any(d in accepted for d in task.dependencies):
                 done = _board_backlog(board, ["task", "edit", new_id, "--dep", ",".join(accepted.get(d, d) for d in task.dependencies)])
                 if done.returncode != 0:
                     raise AsdlcError(f"backlog could not carry {new_id}'s dependencies over: {(done.stderr or done.stdout).strip()}")
-        accepted = {old: new for old, new in accepted.items() if old != new}
-        note = f"accepted {parent} ({intent.title}) and {len(children)} child task(s)"
-        return f"Accept {parent}: {intent.title}, with {len(children)} child task(s)", {"intent": parent, "accepted": accepted, "note": note}
+        top = _find(_tasks(board), root)
+        if top is not None:
+            _comment(board, top, accept_comment(accepted, engineer), f"@{engineer}")
+        for old, new_id in accepted.items():
+            if (task := _find(_tasks(board), new_id)) is not None:
+                _write_key(board, task, ACCEPTED_FROM_KEY, old)
+        children = len(accepted) - (1 if intent.id in accepted else 0)
+        note = f"accepted {root} ({intent.title}) and {children} task(s) under it"
+        return f"Accept {root}: {intent.title}, with {children} task(s) under it", {"intent": root, "accepted": accepted, "note": note}
+
+    return _transact(board, step)
+
+
+def approve(board: Board, raw_id: str, engineer: str) -> str:
+    """Record a person's approval of a task's plan: asdlc_plan_approved_by and a comment, in one board commit.
+
+    Raises:
+        AsdlcError: no such task, it is a draft or Done, it has no plan, or the change could not be pushed.
+    """
+    task_id = normalise_id(raw_id, _prefix(board))
+
+    def step(attempt: int) -> tuple[str | None, str]:
+        task = _find(_items(board), task_id)
+        if task is None or is_draft(task):
+            raise AsdlcError(f"{task_id} is {'a draft: accept it first' if task else 'not a task on the board'}")
+        if is_status(task, DONE):
+            raise AsdlcError(f"{task_id} is Done; there is nothing left to approve")
+        if not plan_of((board.path / task.path).read_text()):
+            raise AsdlcError(f"{task_id} has no plan yet: its worker writes one in phase 1 (asdlc board task edit {task_id} --plan ...) before it is approved")
+        if task.plan_approved_by == engineer:
+            return None, f"@{engineer} already approved the plan of {task_id}"
+        _write_key(board, task, APPROVED_KEY, engineer)
+        _comment(board, task, f"Plan approved by @{engineer}: its worker may build it.", f"@{engineer}")
+        return f"Approve the plan of {task_id}: @{engineer}", f"@{engineer} approved the plan of {task_id}"
 
     return _transact(board, step)
 
@@ -1987,13 +2105,27 @@ def whoami(explicit_board: str | None, cwd: Path, as_json: bool) -> int:
     return 0
 
 
+def _waiting_reviews(board: Board, ref: str, tasks: Sequence[Task], engineer: str, now: datetime) -> tuple[str, ...]:
+    """The In Review tasks this engineer's reviewer could claim now, fallback included."""
+    reviewing = Reviewing(engineer, f"{engineer}.r0", frozenset(_registry()), now, _settings(board).review_fallback_after, fallback=True)
+    unclaimed = [t for t in tasks if is_status(t, IN_REVIEW) and not t.reviewer]
+    ready, _ = review_candidates(tasks, reviewing, _entered_review(board, ref, unclaimed)) if unclaimed else ((), ())
+    return tuple(t.id for t in ready)
+
+
 def mine(board: Board, engineer: str, as_json: bool) -> int:
-    report = mine_report(_items(board, _refresh(board)), engineer, _prefs(board, engineer))
+    origin = _refresh(board)
+    items, prefs = _items(board, origin), _prefs(board, engineer)
+    waiting = _waiting_reviews(board, origin, [t for t in items if not is_draft(t)], engineer, datetime.now(UTC)) if prefs.review else ()
+    report = mine_report(items, engineer, prefs, waiting)
     lines = [f"{engineer}: {report['active']} of {report['workers_cap']} workers busy building, {report['reviewing']} reviewing (the cap counts both)"]
     lines += [f"  {r['id']}\t{r['status']}{' (changes requested)' if r['changes_requested'] else ''}\t@{', @'.join(r['workers'])}\t{r['project'] or '-'}\t{r['title']}" for r in report["tasks"]]
     lines += [f"  review {r['id']}\t@{r['reviewer']}\t{r['kind']}\t{r['project'] or '-'}\t{r['title']}" for r in report["reviews"]]
-    lines += [f"  lead {r['id']}\t{r['status']}\t@{r['lead']}\t{r['title']}" for r in report["leads"]]
+    lines += [f"  lead {r['id']}{' (was ' + r['accepted_from'] + ')' if r['accepted_from'] else ''}\t{r['status']}\t@{r['lead']}\t{r['title']}" for r in report["leads"]]
     lines += [f"  reserved {r['id']}\t{r['project'] or '-'}\t{r['title']}" for r in report["reserved"]]
+    if report["reviews_waiting"]:
+        lines.append(f"  reviews waiting for you: {', '.join(report['reviews_waiting'])}"
+                     + ("; asdlc next leaves a slot for one" if report["slot_left_for_review"] else ""))
     _emit(report, as_json, lines)
     return 0
 
@@ -2040,8 +2172,8 @@ def record_check(board: Board, raw_id: str, worker: str, command: Sequence[str],
     """
     task_id = normalise_id(raw_id, _prefix(board))
     where = _where(cwd, task_id)
-    tasks = _tasks(board, _refresh(board))
-    if refusal := holder_refusal(_find(tasks, task_id), task_id, worker, "record checks on it"):
+    task = _find(_tasks(board, _refresh(board)), task_id)
+    if refusal := holder_refusal(task, task_id, worker, "record checks on it") or approval_refusal(task):
         raise AsdlcError(f"{refusal}. The check was not run")
     try:
         done = subprocess.run(list(command), cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -2081,6 +2213,8 @@ def finish(board: Board, raw_id: str, worker: str, branch: str | None, pull: str
         if refusal := holder_refusal(task, task_id, worker, "finish it"):
             raise AsdlcError(refusal)
         assert task is not None
+        if refusal := approval_refusal(task):
+            raise AsdlcError(refusal)
         if branch and task.branch and branch != task.branch:
             raise AsdlcError(f"{task_id}'s branch is {task.branch}, recorded when it was first claimed, not {branch}: push {task.branch} and finish with it")
         chosen = task.branch or branch or branch_name(task)
@@ -2126,6 +2260,7 @@ def _claim_on_board(board: Board, task_id: str, worker: str, registry: Mapping[s
         branch = task.branch or branch_name(task)
         if not task.branch:
             _write_key(board, task, BRANCH_KEY, branch)
+        _write_key(board, task, HEARTBEAT_KEY, yaml_quoted(datetime.now(UTC).isoformat(timespec="seconds")))  # the claim is the first heartbeat
         return f"Claim {task_id} for @{worker}", Claimed(replace(task, status=IN_PROGRESS, assignees=assignees, branch=branch))
 
     return _transact(board, step)
@@ -2220,8 +2355,8 @@ def next_task(board: Board, worker: str, engineer: str, cwd: Path, as_json: bool
         if not remaining:
             _emit({"claimed": False, "reason": "no work available", "skipped": reported}, as_json, ["no work available"])
             return 0
-        if (held := busy(tasks, engineer)) >= prefs.workers:
-            reason = f"{engineer}'s workers and reviewers hold {held} task(s), the cap in devs/{engineer}.yaml ({prefs.workers})"
+        waiting = _waiting_reviews(board, origin, tasks, engineer, datetime.now(UTC)) if prefs.review else ()
+        if reason := build_refusal(prefs.workers, busy(tasks, engineer), len(review_claims(tasks, engineer)), waiting, engineer):
             _record("next", worker, None, Attempt.REFUSED, reason)
             _emit({"claimed": False, "reason": reason, "skipped": reported}, as_json, [f"no work available: {reason}"])
             return 0
@@ -2242,10 +2377,13 @@ def release(board: Board, raw_id: str, worker: str, cwd: Path) -> None:
     Raises:
         AsdlcError: the worker holds neither, or the change can't be pushed.
     """
-    task_id = normalise_id(raw_id, _prefix(board))
+    asked = normalise_id(raw_id, _prefix(board))
+    task_id = asked
 
     def step(attempt: int) -> tuple[str | None, str]:
-        task = _find(_items(board), task_id)
+        nonlocal task_id
+        task, _ = held_item(_items(board), asked, worker)
+        task_id = task.id if task is not None else asked
         if task is not None and task.lead == worker:
             _write_key(board, task, LEAD_KEY, None)
             _comment(board, task, f"@{worker} gave up the lead on {task_id}; another orchestrator may claim it with asdlc lead.", f"@{worker}")
@@ -2253,7 +2391,7 @@ def release(board: Board, raw_id: str, worker: str, cwd: Path) -> None:
         if task is None or f"@{worker}" not in task.assignees or not is_status(task, IN_PROGRESS):
             held = "is not on the board" if task is None else f"is {task.status}, assigned to {', '.join(task.assignees) or 'nobody'}"
             raise AsdlcError(f"{task_id} {held}; only @{worker}'s own In Progress task can be released by @{worker}")
-        kept = people(task.assignees)
+        kept = kept_on_release(task)
         done = _board_backlog(board, ["task", "edit", task_id, "-s", TO_DO, "-a", ",".join(kept)])
         if done.returncode != 0:
             raise AsdlcError(f"backlog could not release {task_id}: {(done.stderr or done.stdout).strip()}")
@@ -2319,7 +2457,13 @@ def _claim_review(board: Board, task_id: str, reviewing: Reviewing) -> ReviewCla
     return _transact(board, step)
 
 
-def _review_report(claimed: ReviewClaimed, registry: Mapping[str, Registered]) -> dict[str, object]:
+def review_policies(board: Path, project: str) -> list[str]:
+    """The review policies in the tasks repository that apply to a task: the team's, then its repository plugin's."""
+    found = [board / "plugins" / "team" / "review.md", *([board / "plugins" / project / "review.md"] if project else [])]
+    return [str(path) for path in found if path.is_file()]
+
+
+def _review_report(board: Board, claimed: ReviewClaimed, registry: Mapping[str, Registered]) -> dict[str, object]:
     task = claimed.task
     branch, pull = review_refs(task.references)
     entry = registry.get(task.project)
@@ -2328,7 +2472,7 @@ def _review_report(claimed: ReviewClaimed, registry: Mapping[str, Registered]) -
         "authors": sorted(authors(task)), "project": task.project, "parent": task.parent or None,
         "repo": str(entry.path) if entry else None, "default_branch": default_branch(entry.path) if entry else None,
         "branch": branch, "pull_request": pull, "references": list(task.references), "waited": human(claimed.waited),
-        "model": REVIEW.model, "effort": REVIEW.effort, "route": REVIEW.reason,
+        "model": REVIEW.model, "effort": REVIEW.effort, "route": REVIEW.reason, "policies": review_policies(board.path, task.project),
     }
 
 
@@ -2363,7 +2507,7 @@ def review_next(board: Board, reviewer: str, engineer: str, now: datetime, fallb
         tried.add(remaining[0].id)
         match _attempt("review-next", reviewer, remaining[0].id, lambda: _claim_review(board, remaining[0].id, reviewing)):
             case ReviewClaimed() as claimed:
-                report = _review_report(claimed, registry)
+                report = _review_report(board, claimed, registry)
                 _emit(report, as_json, [
                     f"claimed the review of {report['task']} for @{reviewer} ({report['kind']}; {REVIEW.model}, {REVIEW.effort})",
                     f"branch {report['branch'] or '-'}, pull request {report['pull_request'] or '-'}",
@@ -2536,6 +2680,9 @@ class Facts:
     plugins: PluginFacts = PluginFacts()
     leftovers: tuple[Path, ...] = ()
     published: tuple[PublishedCheck, ...] = ()
+    home: Path = Path("~")
+    claude_settings: tuple[tuple[str, str], ...] = ()  # (path, text) of each Claude Code settings file that applies in the board clone
+    mcp_configs: tuple[tuple[str, str], ...] = ()  # (path, text) of each file that configures MCP servers
 
 
 AUTHORING_KIT = ("skills/choosing-extension-types/SKILL.md", "skills/authoring-skills/SKILL.md", "skills/authoring-hooks/SKILL.md",
@@ -2734,10 +2881,139 @@ def _published_findings(facts: Facts) -> list[Finding]:
             for p in facts.published]
 
 
+# The commands a background worker or reviewer runs without anyone to answer a prompt.
+NEEDED_COMMANDS = ("asdlc", "asdlc-plugin", "git", "gh pr create", "gh pr comment")
+
+
+def _bash_prefix(rule: str) -> str | None:
+    """The command prefix a Bash allow rule approves ("" for every command), or None when it isn't a prefix rule."""
+    found = re.fullmatch(r"Bash(?:\((.*)\))?", rule.strip())
+    if not found:
+        return None
+    inner = (found[1] or "").strip()
+    if inner in ("", "*"):
+        return ""
+    for suffix in (":*", " *"):
+        if inner.endswith(suffix) and "*" not in inner[:-len(suffix)]:
+            return inner[:-len(suffix)].strip()
+    return None
+
+
+def allows_command(rules: Iterable[str], command: str) -> bool:
+    return any((prefix := _bash_prefix(rule)) is not None and (prefix == "" or command == prefix or command.startswith(prefix + " ")) for rule in rules)
+
+
+def _glob(pattern: str) -> re.Pattern[str]:
+    out, index = "", 0
+    while index < len(pattern):
+        if pattern.startswith("**", index):
+            out, index = out + ".*", index + 2
+        elif pattern[index] == "*":
+            out, index = out + "[^/]*", index + 1
+        elif pattern[index] == "?":
+            out, index = out + "[^/]", index + 1
+        else:
+            out, index = out + re.escape(pattern[index]), index + 1
+    return re.compile(out)
+
+
+def allows_edit(rules: Iterable[str], path: str, home: Path) -> bool:
+    """Whether an Edit allow rule anchored at the root (//) or the home folder (~/) covers the path."""
+    for rule in rules:
+        found = re.fullmatch(r"Edit(?:\((.*)\))?", rule.strip())
+        if not found:
+            continue
+        pattern = (found[1] or "").strip()
+        if pattern in ("", "*", "**", "//**"):
+            return True
+        if pattern.startswith("//"):
+            pattern = pattern[1:]
+        elif pattern.startswith("~/"):
+            pattern = f"{home}{pattern[1:]}"
+        else:
+            continue
+        if _glob(pattern).fullmatch(path):
+            return True
+    return False
+
+
+def _under(path: str, folders: Iterable[str], home: Path) -> bool:
+    for folder in folders:
+        expanded = f"{home}{folder[1:]}" if folder == "~" or folder.startswith("~/") else folder
+        if path == expanded.rstrip("/") or path.startswith(expanded.rstrip("/") + "/"):
+            return True
+    return False
+
+
+PERMISSIONS_SNIPPET = "docs/guide.md, Permissions, has the settings to copy"
+
+
+def _permission_findings(facts: Facts) -> list[Finding]:
+    """I10: background workers stop at a permission prompt nobody answers, so the allow rules they need must be set."""
+    allow: list[str] = []
+    folders: list[str] = []
+    modes: set[str] = set()
+    found: list[Finding] = []
+    for where, text in facts.claude_settings:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            found.append(Finding("permissions", Level.WARN, f"{where} is not valid JSON, so Claude Code ignores it: fix it"))
+            continue
+        permissions = data.get("permissions", {}) if isinstance(data, dict) else {}
+        if isinstance(permissions, dict):
+            allow += [r for r in permissions.get("allow", []) if isinstance(r, str)]
+            folders += [d for d in permissions.get("additionalDirectories", []) if isinstance(d, str)]
+            modes.add(str(permissions.get("defaultMode", "")))
+    if "bypassPermissions" in modes:
+        return found + [Finding("permissions", Level.PASS, "defaultMode is bypassPermissions, so nothing prompts")]
+    missing = [f"Bash({command} *)" for command in NEEDED_COMMANDS if not allows_command(allow, command)]
+    if missing:
+        found.append(Finding("permissions", Level.WARN, f"no allow rule for {', '.join(missing)}, so a background worker or reviewer stops at a "
+                                                        f"permission prompt nobody answers: add them to permissions.allow in ~/.claude/settings.json "
+                                                        f"({PERMISSIONS_SNIPPET})"))
+    else:
+        found.append(Finding("permissions", Level.PASS, f"allow rules cover {', '.join(NEEDED_COMMANDS)}"))
+    for repo in (r for r in facts.repos if r.exists):
+        worktrees = f"{repo.path.parent}/{repo.path.name}.worktrees"
+        problems = []
+        if not _under(worktrees, folders, facts.home):
+            problems.append(f"add {repo.path.parent} (or {worktrees}) to permissions.additionalDirectories")
+        if "acceptEdits" not in modes and not allows_edit(allow, f"{worktrees}/task-1/file", facts.home):
+            problems.append(f"allow edits there, such as Edit(/{worktrees}/**)")
+        area = f"permissions {repo.slug}"
+        found.append(Finding(area, Level.WARN, f"workers edit task worktrees in {worktrees}, outside the board clone, and would stop at a prompt: "
+                                               f"{'; '.join(problems)} ({PERMISSIONS_SNIPPET})") if problems else
+                     Finding(area, Level.PASS, f"workers may read and edit {worktrees}"))
+    return found
+
+
+def _mcp_findings(facts: Facts) -> list[Finding]:
+    """I8: a Backlog.md MCP server writes the board without pushing; the guard refuses its writes."""
+    found = []
+    for where, text in facts.mcp_configs:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        servers = [data.get("mcpServers", {})] + [p.get("mcpServers", {}) for p in (data.get("projects") or {}).values() if isinstance(p, dict)]
+        for group in servers:
+            for name, config in (group.items() if isinstance(group, dict) else ()):
+                if "backlog" in f"{name} {json.dumps(config)}".casefold():
+                    found.append(Finding("backlog mcp", Level.WARN, f"the MCP server {name} in {where} is Backlog.md's: it writes the board without "
+                                                                    "committing or pushing, so the board guard refuses its writes. Change the board "
+                                                                    f"with asdlc board; remove the server (claude mcp remove {name}) unless you use "
+                                                                    "it only to read"))
+    return found
+
+
 def diagnose(facts: Facts, registry: str = "the registry") -> tuple[Finding, ...]:
     """Every finding about this machine, in the order a person fixes them."""
     return (*_tool_findings(facts), *_identity_findings(facts), *_board_findings(facts), *_settings_findings(facts),
-            *_repo_findings(facts, registry), *_plugin_findings(facts), *_leftover_findings(facts), *_published_findings(facts))
+            *_repo_findings(facts, registry), *_plugin_findings(facts), *_permission_findings(facts), *_mcp_findings(facts),
+            *_leftover_findings(facts), *_published_findings(facts))
 
 
 def doctor_lines(findings: Sequence[Finding]) -> list[str]:
@@ -2825,6 +3101,16 @@ def _published(board: Path, repos: Sequence[RepoFacts]) -> tuple[PublishedCheck,
     return tuple(checks)
 
 
+def _claude_files(board: Path | None) -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]]:
+    """The Claude Code settings files that apply in a session in the board clone, and the files that configure MCP servers."""
+    config = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
+    user_json = config / ".claude.json" if os.environ.get("CLAUDE_CONFIG_DIR") else Path.home() / ".claude.json"
+    settings = [config / "settings.json", *([board / ".claude" / "settings.json", board / ".claude" / "settings.local.json"] if board else [])]
+    mcp = [user_json, *([board / ".mcp.json"] if board else [])]
+    read = lambda paths: tuple((str(p), p.read_text()) for p in paths if p.is_file())  # noqa: E731
+    return read(settings), read(mcp)
+
+
 def gather(explicit_board: str | None, cwd: Path) -> Facts:
     """Look at this machine without changing anything."""
     engineer = _git(cwd, "config", "--get", "asdlc.engineer").stdout.strip()
@@ -2834,6 +3120,8 @@ def gather(explicit_board: str | None, cwd: Path) -> Facts:
         backlog=_tool("backlog", "--version", binary=_backlog_binary()), asdlc=_tool("asdlc"), asdlc_plugin=_tool("asdlc-plugin"),
         gh=_tool("gh", "--version"), gh_signed_in=None, claude=Tool(claude), npx=_tool("npx"), engineer=engineer, board=None,
     )
+    claude_settings, mcp_configs = _claude_files(None)
+    facts = replace(facts, home=Path.home(), claude_settings=claude_settings, mcp_configs=mcp_configs)
     if facts.gh.path:
         try:
             signed = subprocess.run([facts.gh.path, "auth", "status"], capture_output=True, timeout=30, stdin=subprocess.DEVNULL).returncode == 0
@@ -2856,8 +3144,10 @@ def gather(explicit_board: str | None, cwd: Path) -> Facts:
         name = json.loads(market).get("name") if market else None
     except (ValueError, AttributeError):
         name = None
+    claude_settings, mcp_configs = _claude_files(board)
     return replace(
-        facts, board=board, devs=read(board / "devs" / f"{engineer.removeprefix('@')}.yaml") if engineer else None,
+        facts, board=board, claude_settings=claude_settings, mcp_configs=mcp_configs,
+        devs=read(board / "devs" / f"{engineer.removeprefix('@')}.yaml") if engineer else None,
         dirty=_git(board, "status", "--porcelain", "--untracked-files=no").stdout.strip(),
         branch=_git(board, "branch", "--show-current").stdout.strip(),
         origin=origin.stdout.strip() if origin.returncode == 0 else "",
@@ -3194,13 +3484,16 @@ def _parser() -> argparse.ArgumentParser:
     add("register", "register the code repository you are in on this machine and on the board", json_output=True).add_argument(
         "--board", dest="register_board", help="the board clone to use for this repository (sets git config asdlc.board)")
     add("repos", "the code repositories registered on this machine", json_output=True)
-    add("lead", "claim the lead on an intent", task="the intent", who="the orchestrator's name, such as kyle.lead", json_output=True)
+    add("lead", "claim the lead on an intent", task="the intent", who="the orchestrator's name, such as kyle.lead", json_output=True).add_argument(
+        "--new", action="store_true", help="the draft that has this id now is the one meant, even though a lead of yours was accepted from it")
     add("lead-of", "the lead of a task's parent intent", task="the task or intent", json_output=True)
     add("heartbeat", "keep a claim or a lead alive", task="the task or intent", who=worker)
     reaping = add("reap", "release claims and leads with no board update for the stale timeout", json_output=True)
     reaping.add_argument("--older-than", help="the stale timeout, such as 2h (else stale_after in the board's asdlc.toml, else 2h)")
     reaping.add_argument("--now", help="the time to judge staleness at, as ISO 8601 (for tests and demonstrations)")
     add("accept", "a person's command: accept an intent and its draft children", task="the intent", json_output=True)
+    commands.add_parser("approve", help="a person's command: approve the plans of tasks, size 2 and up, so their workers build them").add_argument(
+        "ids", nargs="+", help="the tasks whose plans you approve")
     add("mine", "an engineer's workers' tasks, leads and reservations", who="the engineer, such as kyle", json_output=True)
     commands.add_parser("record-check", help="run a check in the task's worktree and record it on the task: record-check <id> --as <worker> -- <command...>")
     finishing_work = add("finish", "hand your held task to review: In Review with its branch and pull request", task="the task", who=worker, json_output=True)
@@ -3333,7 +3626,7 @@ def main(argv: Sequence[str]) -> int:
                     case "release":
                         release(board, arguments.id, worker, cwd)
                     case "lead":
-                        led = _attempt("lead", worker, normalise_id(arguments.id, _prefix(board)), lambda: lead(board, arguments.id, worker))
+                        led = _attempt("lead", worker, normalise_id(arguments.id, _prefix(board)), lambda: lead(board, arguments.id, worker, arguments.new))
                         _emit({"intent": led.intent, "lead": led.lead, "mine": led.mine, "reason": led.reason}, as_json, [led.reason])
                         return 0 if led.mine else 1
                     case "heartbeat":
@@ -3347,11 +3640,21 @@ def main(argv: Sequence[str]) -> int:
                 return reap(board, _when(arguments.now), parse_duration(arguments.older_than) if arguments.older_than else None, as_json)
             case "accept":
                 _check_backlog()
-                result = accept(board, arguments.id)
+                result = accept(board, arguments.id, _engineer(cwd))
                 lines = [str(result["note"]), *(f"  {old} -> {new}" for old, new in result["accepted"].items())]
                 _emit(result, as_json, lines)
             case "mine":
                 return mine(board, engineer_name(arguments.worker), as_json)
+            case "approve":
+                _check_backlog()
+                engineer, failed = _engineer(cwd), 0
+                for raw_id in arguments.ids:
+                    try:
+                        print(approve(board, raw_id, engineer))
+                    except AsdlcError as error:
+                        failed += 1
+                        _say(str(error))
+                return 1 if failed else 0
             case "review-next":
                 _check_backlog()
                 reviewer = reviewer_for(arguments.worker, _engineer(cwd))

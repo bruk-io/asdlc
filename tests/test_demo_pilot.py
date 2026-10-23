@@ -107,7 +107,13 @@ class PilotReadinessTest(review.CrossMachineReviewTest):
         }
         for machine in (self.ann, self.kyle):
             state = write(machine.home / "claude-state.json", json.dumps(states[machine.name]))
-            machine.env |= {"PATH": path, "DEMO_CLAUDE_STATE": str(state), "REAL_CLAUDE": REAL_CLAUDE, "DEMO_GH_SIGNED_IN": "1"}
+            # The permission rules docs/guide.md gives, so background workers never stop at a prompt.
+            write(machine.home / ".claude" / "settings.json", json.dumps({"permissions": {
+                "allow": ["Bash(asdlc *)", "Bash(asdlc-plugin *)", "Bash(git *)", "Bash(gh pr create *)", "Bash(gh pr comment *)",
+                          f"Edit(/{machine.home}/*.worktrees/**)"],
+                "additionalDirectories": [str(machine.home)]}}))
+            machine.env |= {"PATH": path, "DEMO_CLAUDE_STATE": str(state), "REAL_CLAUDE": REAL_CLAUDE, "DEMO_GH_SIGNED_IN": "1",
+                            "CLAUDE_CONFIG_DIR": str(machine.home / ".claude")}
 
     def plugin(self, machine: review.demo.Machine, *args: str) -> str:
         done = run_script("scripts/asdlc-plugin", *args, env=machine.env)
