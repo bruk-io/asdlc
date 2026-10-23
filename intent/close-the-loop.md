@@ -6,9 +6,9 @@
 
 ## Problem
 
-`asdlc stats` gives every stage a number: time to first review, first-pass check success, rework cycles, escaped bugs, gate waits. Nobody watches them. If reviews start waiting twice as long, or more bugs escape, we find out only if someone happens to run `stats` and notices. So what we have is a line that ends at Done, not a loop.
+`asdlc stats` gives every stage a number: time to first review, first-pass check success, rework cycles, escaped bugs, gate waits. Nothing watches them. If a team's reviews start waiting twice as long, or more bugs escape, it finds out only if someone happens to run `stats` and notices. So asdlc gives a team a line that ends at Done, not a loop.
 
-The playbook closes the loop (play 12, our spec's R19): a deterministic script watches a few metrics against bands kept in versioned config, and a breach is diagnosed and written up as an intent that goes back to the start of the loop, where a person decides what to do with it.
+The playbook closes the loop (play 12, R19 in asdlc's spec): a deterministic script watches a few metrics against bands kept in versioned config, and a breach is diagnosed and written up as an intent that goes back to the start of the loop, where a person decides what to do with it.
 
 ## Proposed outcome
 
