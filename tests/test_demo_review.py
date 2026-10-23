@@ -137,7 +137,8 @@ class CrossMachineReviewTest(unittest.TestCase):
         busy = kyle.json("mine", "--as", "kyle")
         self.assertEqual(([r["id"] for r in busy["reviews"]], busy["tasks"]), (["TASK-1"], []))
         findings = "[Bugs, Important] login.py:2 limit(user) runs before check(user), so failed and successful logins count alike; count failures only."
-        sent = kyle.json("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "changes", "--notes", findings)
+        sent = kyle.json("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "changes", "--findings", "important=1", "--policy", "Bugs",
+                         "--plan-matched", "yes", "--notes", findings)
         self.assertEqual((sent["status"], sent["workers"]), ("In Progress", ["ann.w1"]))
         self.say(f"2. kyle.r1's review-next claims TASK-1 ({review['kind']}; {review['model']}/{review['effort']}), in kyle's clone at "
                  f"{Path(str(review['repo'])).relative_to(self.root)}. It fetches {branch}, reads the diff against origin/{review['default_branch']} "
@@ -156,7 +157,8 @@ class CrossMachineReviewTest(unittest.TestCase):
         again = kyle.json("review-next", "--as", "kyle.r1")
         self.assertEqual(again["task"], "TASK-1")
         self.assertIn("+    if not ok:", self.diff(kyle, again))
-        kyle.json("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "clean", "--notes", "No findings: failures only are counted.")
+        kyle.json("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "clean", "--findings", "important=0,nit=0", "--plan-matched", "yes",
+                  "--notes", "No findings: failures only are counted.")
         final = self.task(kyle, "TASK-1")
         self.assertRegex(final, r"Status: \W*In Review")
         self.assertIn("review-passed", final)
@@ -178,7 +180,8 @@ class CrossMachineReviewTest(unittest.TestCase):
         waited = early.stderr.split("it has waited ")[1].split(" for one")[0]
         late = ann.json("review-next", "--as", "ann.r1", "--fallback", "--now", (now + timedelta(minutes=35)).isoformat())
         self.assertEqual((late["task"], late["kind"], late["repo"]), ("TASK-2", "same-machine", str(self.api["ann"])))
-        ann.json("review-done", "TASK-2", "--as", "ann.r1", "--verdict", "clean", "--notes", "No findings.")
+        ann.json("review-done", "TASK-2", "--as", "ann.r1", "--verdict", "clean", "--findings", "important=0,nit=0", "--plan-matched", "yes",
+                 "--notes", "No findings.")
         marked = self.task(kyle, "TASK-2")
         self.assertIn("same-machine review: it waited", marked)
         self.assertIn("Review by @ann.r1 (same-machine): clean.", marked)

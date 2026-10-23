@@ -127,7 +127,7 @@ With `review: true`, your orchestrator also claims reviews of other engineers' f
 ### Seeing how it's going
 
 - `asdlc mine --as <you>`: your workers' tasks, reviews, leads and reserved work.
-- `asdlc stats [--since 2026-11-01]`: tasks claimed, in review and done; how long work takes from claim to review and from review to Done; how long reviews wait; round trips; the share of same-machine reviews; lost races; onboardings; and size-1 tasks that skipped plan approval.
+- `asdlc stats [--since 2026-11-01] [--stage plan|design|build|test|deploy|maintain|coordination]`: the playbook's numbers by stage, each beside the playbook's own name for it, and the ones the board can't measure, with what they need. "What the numbers mean", below, defines each one.
 
 ### When an asdlc command is interrupted
 
@@ -138,6 +138,69 @@ Ctrl-C, closing the terminal or killing an agent mid-command is safe. A change t
 - In a registered clone, every Claude Code session with the asdlc plugin is guarded: it can't edit code outside a claimed task's worktree, and there is no switch to turn that off for one session. To work on a registered clone with Claude outside the board, unset its board for that while (`git -C ~/src/api config --unset asdlc.board`) and run `asdlc register` there again afterwards.
 - The `asdlc` and `asdlc-plugin` on your `PATH` come from your clone of the plugin's repository, and the skills and agents from the installed plugin. If the two are at different releases, a skill can ask for a command the script doesn't have, or the reverse. Keep the clone at the plugin's release (`git -C ~/src/asdlc pull` when the plugin updates); `asdlc doctor` doesn't compare them yet.
 - The guard parses shell commands, so it is a guardrail, not a wall: a determined script can get past it. When it can't tell what a command does (a `cd` to a variable, say), it allows it and says so.
+
+## What the numbers mean
+
+`asdlc stats` reads the board's history (every commit on the tasks repository's `main`), the tasks' own notes and comments, this machine's event log, the hook decision logs on this machine and, for merge times, `gh` when it is installed and signed in. It changes nothing on the board. It caches the history it has parsed, by commit, in your tasks clone's `.asdlc/stats/` (ignored by git), so later runs read only new commits. `--since <date>` counts what happened from then on; each number says what its moment is (a claim, a verdict, a Done commit). `--json` gives the same numbers under `stages.<stage>.metrics`, each with `play`, `playbook` (the playbook's name for it), `source` and, for one that can't be computed, `measured: false` and `needs`.
+
+**Commit times come from different machines.** A board commit is stamped by the clock of the machine that made it, and a span that starts on one machine and ends on another (In Review on ann's, the review claim on kyle's) is off by however far apart their clocks are. Keep machines on network time; read a span of a few minutes with that in mind. Where an order matters more than a length (the spec came before or after a plan, a bug was filed after a task was Done), stats uses the order of commits, which every machine agrees on. Times inside notes (when a check ran) and the intent's start come from the machine that wrote them.
+
+### Plan (plays 01 and 10)
+
+- **Conversation to committed intent** (play 01, leading): from when the conversation began, which the `capture-intent` skill records with `asdlc intent-started`, to the commit that created the intent's draft. Intents with no start recorded are listed; they predate this, or the session didn't note the time.
+- **Survival rate** (play 01, lagging): intent drafts accepted, out of those accepted, archived or deleted. A draft still open isn't counted.
+- **Post-spec churn** (play 01): commits that change an intent's title, description or acceptance criteria after the first commit of a spec document linked on it (`--add-doc`, a document of type `specification` or titled "Spec"). Comments, statuses, leads and ticked boxes don't count.
+- **Draft to accept wait** (play 10): the intent draft's first commit to the commit that accepted it, a person's gate.
+
+### Design (play 02)
+
+- **Intent to spec**: the intent's first commit, or its acceptance when it was accepted before the spec, to the first commit of its spec document.
+- **Spec rework**: commits to the spec documents after the first plan was written on any task under the intent.
+
+### Build (plays 03 and 06)
+
+- **Claim to In Review**: a task's first claim to its first move to In Review.
+- **Merged from the first pass** (play 03): tasks Done whose first review verdict was clean, out of the Done tasks that were reviewed.
+- **Approval to merge**: the last plan approval to the pull request's merge time from `gh pr view --json mergedAt` when gh can say, else the task's Done commit; the line says how many came from each.
+- **Rework cycles**: changes-requested verdicts per reviewed task.
+- **Diff still matches the plan**: the reviews that recorded `--plan-matched yes`, out of those that recorded it either way.
+- **Plan written to approved**: the first commit with a plan on the task to its first `asdlc approve`, a person's gate.
+- **Small tasks that skipped approval**: claimed `size-1` tasks with no approval, out of every claimed task, naming any whose notes don't say why.
+- **Concurrent claims per engineer** (play 06): over the time each engineer's workers held at least one task In Progress, the most they held at once and the time-weighted median.
+- **Done per engineer per week** (play 06): tasks Done, by the engineer whose workers built them and by ISO week, beside that engineer's rework rate (changes-requested verdicts per reviewed task of theirs).
+
+### Test (plays 07 and 08)
+
+- **First-pass check success** (play 07): of each task's first `record-check` after a change (a check on a later commit than the worker's baseline, or with uncommitted changes), the share that passed. The baseline, which the worker records before changing anything, is counted apart: a red baseline means the task started from a broken branch.
+- **Checks per task** and **failed checks**: the `record-check` notes on each task, and how many exited non-zero.
+- **Eval pass rate** (play 08): not measured until there is an eval suite whose results are recorded per change.
+
+### Deploy (plays 05, 09 and 10)
+
+- **Time to first review**: each move to In Review to the next review claim. Tasks waiting now, with nobody reviewing them, are named.
+- **Review duration**: a review claim to its verdict.
+- **Changes fixed by the worker alone**: of the rounds where a review asked for changes and the task came back, the share where every commit since the review carries the `Asdlc-Worker` trailer the worker agent signs with (`record-check` notes it on a sent-back task; merges don't count). A commit without it is a person's.
+- **Defects caught before merge**: Important findings per reviewed task, from `review-done --findings important=<n>,nit=<n>`.
+- **Findings citing a policy** (play 05, lagging): per policy or rule named with `review-done --policy`, how many reviews cited it, by ISO week. As agents learn a policy, its line should fall.
+- **Defects escaped**: bug tasks whose `--ref` names a task that was Done when the bug was filed, by the week it was filed.
+- **Same-machine reviews**: review claims taken by the author's own machine after the fallback, out of all review claims.
+- **In Review to Done**: a task's first move to In Review to its Done commit.
+- **Gate waits** (play 10): accept (draft to accept), approval (plan written to approved) and merge (a clean verdict to the merge, from gh when it can say, else the Done commit): the time work waits for a person.
+- **Guard refusals by rule** (play 10): the board guard's and the test-edit guard's refusals in the hook decision logs on this machine (`.asdlc/hooks.jsonl` in your tasks clone and in each registered repository), counted by the rule that refused.
+
+### Maintain (play 12)
+
+Not measured until play 12, closing the loop on metrics, is built: it needs detection bands over these numbers in versioned config, and each diagnosis written as an intent.
+
+### Coordination
+
+Lost races per claim (this machine's event log), holds reaped by `asdlc reap` by kind (claims, leads, reviews and reservations released), tasks released by hand, and each repository's onboarding with the time from the newest claim in that repository to its plugin's first publish.
+
+### Not measurable from the board
+
+Change failure rate, CI-versus-production regressions, the DORA metrics, and pipeline failures triaged without paging (play 11) need deployment and incident data the board doesn't hold. `asdlc stats` lists them with what each needs.
+
+The event log and the hook decision logs are this machine's: each engineer's `asdlc stats` counts their own races and refusals, and the board's numbers are the same for everyone.
 
 ## Stop and remove it
 

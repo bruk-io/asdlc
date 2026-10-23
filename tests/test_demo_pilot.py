@@ -170,14 +170,16 @@ class PilotReadinessTest(review.CrossMachineReviewTest):
         # The story's numbers, from the board's history and ann's event log.
         stats = self.ann.asdlc("stats")
         numbers = json.loads(self.ann.asdlc("stats", "--json").stdout)
+        stage = {name: found["metrics"] for name, found in numbers["stages"].items()}
         self.assertEqual(numbers["tasks"], {"claimed": 2, "in_review": 2, "done": 0})
-        self.assertEqual(numbers["claim_to_review"]["count"], 2)
-        self.assertEqual(numbers["review_wait"]["count"], 3)
-        self.assertEqual(numbers["changes_requested"]["by_task"], {"TASK-1": 1, "TASK-2": 0})
-        self.assertEqual((numbers["reviews"]["total"], numbers["reviews"]["same_machine"]), (3, 1))
-        self.assertEqual((numbers["races"]["claimed"], numbers["races"]["lost"]), (2, 0))
-        self.assertEqual([o["plugin"] for o in numbers["onboardings"]], ["acme-api"])
-        self.assertEqual(numbers["onboardings"][0]["task"], "TASK-1")
+        self.assertEqual(stage["build"]["claim_to_review"]["count"], 2)
+        self.assertEqual(stage["deploy"]["time_to_first_review"]["count"], 3)
+        self.assertEqual(stage["build"]["rework_cycles"]["by_task"], {"TASK-1": 1, "TASK-2": 0})
+        self.assertEqual((stage["deploy"]["same_machine_reviews"]["of"], stage["deploy"]["same_machine_reviews"]["count"]), (3, 1))
+        self.assertEqual((stage["coordination"]["lost_races"]["claimed"], stage["coordination"]["lost_races"]["lost"]), (2, 0))
+        onboardings = stage["coordination"]["onboardings"]["onboardings"]
+        self.assertEqual([o["plugin"] for o in onboardings], ["acme-api"])
+        self.assertEqual(onboardings[0]["task"], "TASK-1")
         self.say(f"\n$ asdlc stats             # on ann's machine, after the story, which runs in seconds\n{stats.stdout.rstrip()}")
 
 

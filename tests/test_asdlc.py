@@ -790,6 +790,9 @@ class DoctorTest(unittest.TestCase):
 
 
 T0 = datetime(2026, 10, 22, 9, 0, tzinfo=UTC)
+# The structured record every review-done now carries, for a clean review and for one that asks for changes.
+CLEAN = ("--findings", "important=0,nit=0", "--plan-matched", "yes")
+CHANGES = ("--findings", "important=1", "--plan-matched", "yes")
 
 
 class PermissionRulesTest(unittest.TestCase):
@@ -835,96 +838,293 @@ class PermissionRulesTest(unittest.TestCase):
                     asdlc.merge_permissions(settings, RULES)
 
 
-def at(minutes: float, task_id: str = "TASK-1", **fields: object) -> object:
-    return asdlc.Snapshot(T0 + timedelta(minutes=minutes), task(task_id, **fields))
+def minute(m: float) -> datetime:
+    return T0 + timedelta(minutes=m)
 
 
-class StatsTest(unittest.TestCase):
-    """The pilot's numbers over fixed histories."""
+def check(passed: bool, m: float, commit: str, dirty: bool = False, since: tuple[int, int] | None = None) -> object:
+    return asdlc.Check(passed, 0 if passed else 1, minute(m).isoformat(), commit, dirty, since)
 
-    SNAPSHOTS = (
-        # TASK-1: claimed at 0, In Review at 30, reviewed (changes) at 40, back at 60, reviewed clean at 70, Done at 100.
-        at(0, status="To Do"),
-        at(1, status="In Progress", assignees=("@ann.w1",)),
-        at(30, status="In Review", assignees=("@ann.w1",)),
-        at(40, status="In Review", assignees=("@ann.w1",), reviewer="kyle.r1", review_kind="cross-machine"),
-        at(45, status="In Progress", assignees=("@ann.w1",), labels=("size-2", "changes-requested"), review_kind="cross-machine"),
-        at(60, status="In Review", assignees=("@ann.w1",), labels=("size-2",), review_kind="cross-machine"),
-        at(70, status="In Review", assignees=("@ann.w1",), reviewer="kyle.r1", review_kind="cross-machine"),
-        at(75, status="In Review", assignees=("@ann.w1",), labels=("size-2", "review-passed"), review_kind="cross-machine"),
-        at(100, status="Done", assignees=("@ann.w1",), labels=("size-2", "review-passed")),
-        # TASK-2: size-1, claimed at 10, In Review at 20, a same-machine review at 60.
-        at(5, "TASK-2", labels=("size-1",)),
-        at(10, "TASK-2", status="In Progress", assignees=("@ann.w2",), labels=("size-1",)),
-        at(20, "TASK-2", status="In Review", assignees=("@ann.w2",), labels=("size-1",)),
-        at(60, "TASK-2", status="In Review", assignees=("@ann.w2",), labels=("size-1",), reviewer="ann.r1", review_kind="same-machine"),
-        # TASK-3: in another project, claimed at 2 and still In Review with nobody reviewing.
-        at(2, "TASK-3", status="In Progress", assignees=("@kyle.w1",), project="acme-web"),
-        at(50, "TASK-3", status="In Review", assignees=("@kyle.w1",), project="acme-web"),
-    )
 
-    def report(self, since: datetime | None = None, events: tuple[dict[str, object], ...] = ()) -> dict[str, object]:
-        by_task = asdlc.histories(self.SNAPSHOTS)
-        current = (self.SNAPSHOTS[8].task, self.SNAPSHOTS[12].task, self.SNAPSHOTS[14].task)
-        texts = {"TASK-2": "size-1: plan approval skipped; small because one line"}
-        published = asdlc.published_plugins([(T0 + timedelta(minutes=25), "Add the app plugin"), (T0 + timedelta(minutes=90), "Update the app plugin")])
-        return asdlc.board_stats(by_task, current, texts, published, events, since)
+def seen(folder: str, task_id: str, *, substance: str = "", checks: tuple = (), noted: bool = False, **fields: object) -> object:
+    path = f"backlog/{folder}/{task_id.lower()} - x.md"
+    return asdlc.Change(path, asdlc.Item(task(task_id, path=path, **fields), substance, checks, noted))
 
-    def test_history_reads_the_transitions(self) -> None:
-        h = asdlc.histories(self.SNAPSHOTS)["TASK-1"]
-        minute = lambda m: T0 + timedelta(minutes=m)  # noqa: E731
-        self.assertEqual(h.claims, (minute(1),))
-        self.assertEqual(h.entered_review, (minute(30), minute(60)))
-        self.assertEqual(h.review_claims, ((minute(40), "cross-machine"), (minute(70), "cross-machine")))
-        self.assertEqual((h.changes, h.done, h.project), ((minute(45),), minute(100), "app"))
 
-    def test_the_numbers(self) -> None:
-        report = self.report()
-        self.assertEqual(report["tasks"], {"claimed": 3, "in_review": 2, "done": 1})
-        self.assertEqual(report["claim_to_review"], {"count": 3, "median": 29 * 60.0, "p90": 48 * 60.0})
-        self.assertEqual(report["review_to_done"], {"count": 1, "median": 70 * 60.0, "p90": 70 * 60.0})
-        self.assertEqual(report["review_wait"], {"count": 3, "median": 10 * 60.0, "p90": 40 * 60.0, "waiting_now": ["TASK-3"]})
-        self.assertEqual(report["changes_requested"], {"reviewed_tasks": 2, "round_trips": 1, "per_task": 0.5, "by_task": {"TASK-1": 1, "TASK-2": 0}})
-        self.assertEqual(report["reviews"], {"total": 3, "same_machine": 1, "share_same_machine": 1 / 3})
-        self.assertEqual(report["onboardings"], [{"plugin": "app", "published": (T0 + timedelta(minutes=25)).isoformat(), "task": "TASK-2", "seconds": 15 * 60.0}])
-        self.assertEqual(report["plan_approval_skipped"], [{"id": "TASK-2", "recorded": True}])
+def gone(folder: str, task_id: str) -> object:
+    return asdlc.Change(f"backlog/{folder}/{task_id.lower()} - x.md", None)
 
-    def test_since_leaves_out_what_came_before(self) -> None:
-        report = self.report(since=T0 + timedelta(minutes=55))
-        self.assertEqual(report["tasks"], {"claimed": 0, "in_review": 2, "done": 1})
-        self.assertEqual(report["review_wait"]["count"], 1)  # TASK-1 back In Review at 60; the others entered before 55
-        self.assertEqual(report["reviews"]["total"], 2)
-        self.assertEqual(report["onboardings"], [])
 
-    def test_races_come_from_the_event_log(self) -> None:
-        event = lambda m, command, outcome: {"time": (T0 + timedelta(minutes=m)).isoformat(), "command": command, "outcome": outcome}  # noqa: E731
+def doc(doc_id: str, title: str = "Spec: Rate limit logins", kind: str = "specification") -> object:
+    return asdlc.Change(f"backlog/docs/{doc_id} - x.md", asdlc.DocItem(doc_id, title, kind))
+
+
+def commit(m: float, *changes: object) -> object:
+    return asdlc.Commit(f"c{m}", minute(m), tuple(changes))
+
+
+INTENT = {"type": "intent", "labels": (), "project": "", "status": "Draft", "title": "Rate limit logins"}
+T2 = {"parent": "TASK-1", "labels": ("size-2",), "project": "app"}
+T2_CHECKS = (check(True, 21, "aaa"), check(True, 30, "bbb"))
+T3 = {"parent": "TASK-1", "labels": ("size-1",), "project": "app", "assignees": ("@ann.w2",)}
+T3_CHECKS = (check(True, 24, "c1"), check(False, 25, "c2"))
+
+# One intent, accepted with two children, built, reviewed and partly merged; another intent archived; a bug against
+# a Done task. Each commit is the state each file was left in, as the board's history holds it.
+HISTORY = (
+    commit(0, seen("drafts", "DRAFT-1", substance="a", intent_started=(T0 - timedelta(minutes=10)).isoformat(), **INTENT)),
+    commit(2, seen("drafts", "DRAFT-2", substance="z", **INTENT | {"title": "Doomed"})),
+    commit(5, doc("doc-1"), seen("drafts", "DRAFT-1", substance="a", documentation=("doc-1",), **INTENT)),
+    commit(6, seen("drafts", "DRAFT-1", substance="b", documentation=("doc-1",), **INTENT)),
+    commit(8, seen("drafts", "DRAFT-3", status="Draft", **T2 | {"parent": "DRAFT-1"}),
+           seen("drafts", "DRAFT-4", status="Draft", **T3 | {"parent": "DRAFT-1", "assignees": ()})),
+    commit(10, gone("drafts", "DRAFT-1"), gone("drafts", "DRAFT-3"), gone("drafts", "DRAFT-4"),
+           seen("tasks", "TASK-1", substance="b", documentation=("doc-1",), accepted_from="DRAFT-1", **INTENT | {"status": "To Do"}),
+           seen("tasks", "TASK-2", accepted_from="DRAFT-3", **T2),
+           seen("tasks", "TASK-3", accepted_from="DRAFT-4", **T3 | {"assignees": ()})),
+    commit(11, gone("drafts", "DRAFT-2"), seen("archive/drafts", "DRAFT-2", **INTENT | {"title": "Doomed"})),
+    commit(12, seen("tasks", "TASK-2", status="In Progress", assignees=("@ann.w1",), **T2)),
+    commit(13, seen("tasks", "TASK-3", status="In Progress", **T3)),
+    commit(15, seen("tasks", "TASK-2", status="In Progress", assignees=("@ann.w1",), plan_hash="p1", **T2)),
+    commit(16, doc("doc-1")),
+    commit(20, seen("tasks", "TASK-2", status="In Progress", assignees=("@ann.w1",), plan_hash="p1", plan_approved_by="ann", approved_hash="p1", **T2)),
+    commit(21, seen("tasks", "TASK-2", status="In Progress", assignees=("@ann.w1",), plan_hash="p1", plan_approved_by="ann", approved_hash="p1",
+                    checks=T2_CHECKS[:1], **T2)),
+    commit(25, seen("tasks", "TASK-3", status="In Review", checks=T3_CHECKS, noted=True, **T3)),
+    commit(30, seen("tasks", "TASK-2", status="In Review", assignees=("@ann.w1",), plan_hash="p1", plan_approved_by="ann", approved_hash="p1",
+                    checks=T2_CHECKS, **T2)),
+    commit(35, seen("tasks", "TASK-2", status="In Review", assignees=("@ann.w1",), reviewer="kyle.r1", review_kind="cross-machine", checks=T2_CHECKS, **T2)),
+    commit(40, seen("tasks", "TASK-2", status="In Progress", assignees=("@ann.w1",), review_kind="cross-machine", checks=T2_CHECKS,
+                    review_findings="important=1,nit=2", review_policies=("testing",), plan_matched="yes", **T2 | {"labels": ("size-2", "changes-requested")})),
+    commit(50, seen("tasks", "TASK-2", status="In Review", assignees=("@ann.w1",), review_kind="cross-machine",
+                    checks=(*T2_CHECKS, check(True, 50, "ccc", since=(2, 2))), **T2)),
+    commit(55, seen("tasks", "TASK-2", status="In Review", assignees=("@ann.w1",), reviewer="kyle.r1", review_kind="cross-machine",
+                    checks=(*T2_CHECKS, check(True, 50, "ccc", since=(2, 2))), **T2)),
+    commit(60, seen("tasks", "TASK-2", status="In Review", assignees=("@ann.w1",), review_kind="cross-machine", review_findings="important=0,nit=0",
+                    plan_matched="yes", checks=(*T2_CHECKS, check(True, 50, "ccc", since=(2, 2))), **T2 | {"labels": ("size-2", "review-passed")})),
+    commit(70, seen("tasks", "TASK-2", status="Done", assignees=("@ann.w1",), checks=(*T2_CHECKS, check(True, 50, "ccc", since=(2, 2))),
+                    references=("task-2-x", "https://github.com/acme/app/pull/7"), **T2 | {"labels": ("size-2", "review-passed")})),
+    commit(80, seen("tasks", "TASK-4", type="bug", references=("TASK-2",), labels=("size-1",))),
+    commit(90, seen("tasks", "TASK-3", status="In Review", reviewer="ann.r1", review_kind="same-machine", checks=T3_CHECKS, noted=True, **T3)),
+    commit(95, seen("tasks", "TASK-3", status="In Review", review_kind="same-machine", checks=T3_CHECKS, noted=True, review_findings="important=0,nit=1",
+                    review_policies=("testing", "naming"), plan_matched="no", **T3 | {"labels": ("size-1", "review-passed")})),
+)
+LEDGER = asdlc.replay(HISTORY)
+ALL = asdlc.Window(None, minute(100))
+
+
+def metrics(stage: dict[str, object]) -> dict[str, dict[str, object]]:
+    return stage["metrics"]
+
+
+class CheckNotesTest(unittest.TestCase):
+    """What stats reads back from record-check's notes."""
+
+    def test_a_check_note_reads_back(self) -> None:
+        output = "Check passed: `fake` exited 0 at 2026-10-22T15:00:00+00:00:\n```\nstill output\n"
+        where = asdlc.Where("/w/app.worktrees/task-1", "task-1-x", "0123456789abcdef", True)
+        notes = "\n\n".join([
+            asdlc.check_note(["./check"], 0, "fine\n", T0, where=where),
+            "A worker's own note.",
+            asdlc.check_note(["./check"], 1, output, T0 + timedelta(minutes=5), since_review=(1, 3)),
+            asdlc.check_note(["./check"], 0, "", T0 + timedelta(minutes=9), since_review=(2, 2)),
+            asdlc.check_note(["./check"], 0, "", T0 + timedelta(minutes=9), since_review=(0, 0)),
+        ])
+        found = asdlc.parse_checks(f"---\nid: TASK-1\n---\n<!-- SECTION:NOTES:BEGIN -->\n{notes}\n<!-- SECTION:NOTES:END -->\n")
+        self.assertEqual([(c.passed, c.code, c.commit, c.dirty, c.since_review) for c in found],
+                         [(True, 0, "0123456789ab", True, None), (False, 1, "", False, (1, 3)), (True, 0, "", False, (2, 2)), (True, 0, "", False, (0, 0))])
+        self.assertEqual(found[1].at, "2026-10-22T09:05:00+00:00")
+        self.assertIn("Commits since the review: 3, 2 without the Asdlc-Worker trailer.", notes)
+
+    def test_worker_commits_count_the_trailer(self) -> None:
+        log = "Fix it\n\nAsdlc-Worker: ann.w1\n\x01Tweak by hand\n\x01Again\n\nAsdlc-Worker: ann.w1\nOther: x\n\x01"
+        self.assertEqual(asdlc.worker_commits(log), (2, 3))
+        self.assertEqual(asdlc.worker_commits(""), (0, 0))
+
+    def test_substance_ignores_ticked_boxes_and_comments(self) -> None:
+        body = "<!-- SECTION:DESCRIPTION:BEGIN -->\nWhy\n<!-- SECTION:DESCRIPTION:END -->\n<!-- AC:BEGIN -->\n- [ ] #1 works\n<!-- AC:END -->\n"
+        self.assertEqual(asdlc.substance("T", body), asdlc.substance("T", body.replace("[ ]", "[x]") + "\n## Comments\nhi\n"))
+        self.assertNotEqual(asdlc.substance("T", body), asdlc.substance("T", body.replace("Why", "Why not")))
+
+
+class ReviewRecordTest(unittest.TestCase):
+    def test_findings_parse_and_fit_the_verdict(self) -> None:
+        self.assertEqual(asdlc.parse_findings("important=1,nit=2"), (1, 2))
+        self.assertEqual(asdlc.parse_findings("nit=3"), (0, 3))
+        self.assertEqual(asdlc.parse_findings(" Important = 2 "), (2, 0))
+        for bad in ("blocker=1", "important=x", "important"):
+            with self.subTest(bad=bad), self.assertRaises(asdlc.AsdlcError):
+                asdlc.parse_findings(bad)
+        none = asdlc.ReviewRecord(0, 1, (), True)
+        some = asdlc.ReviewRecord(1, 0, ("testing",), False)
+        self.assertIn("at least one Important", asdlc.review_record_refusal(asdlc.ReviewVerdict.CHANGES, none))
+        self.assertIn("the verdict is changes", asdlc.review_record_refusal(asdlc.ReviewVerdict.CLEAN, some))
+        self.assertIsNone(asdlc.review_record_refusal(asdlc.ReviewVerdict.CLEAN, none))
+        text = asdlc.review_comment("kyle.r1", "cross-machine", asdlc.ReviewVerdict.CHANGES, "[Bugs, Important] x", some)
+        self.assertIn("Findings: 1 Important, 0 nit. Cites: testing. The diff does not match the plan.", text)
+
+
+class ReplayTest(unittest.TestCase):
+    def test_lives_drafts_and_documents(self) -> None:
+        lives = LEDGER.lives
+        self.assertEqual(lives["DRAFT-1#1"].end, asdlc.End(5, minute(10), "accepted", "TASK-1"))
+        self.assertEqual(lives["DRAFT-2#1"].end.how, "archived")
+        self.assertEqual(LEDGER.docs["doc-1"].commits, ((2, minute(5)), (10, minute(16))))
+        self.assertEqual([i.id for i in asdlc.intents(LEDGER)], ["TASK-1", "DRAFT-2"])
+        self.assertEqual(sorted(life.id for life in asdlc.family(LEDGER, asdlc.intents(LEDGER)[0])), ["TASK-2", "TASK-3"])
+        self.assertEqual(LEDGER.stories["TASK-4"].first_when, minute(80))
+        self.assertEqual(LEDGER.stories["TASK-2"].first_when, minute(8), "a task begins when its draft was written")
+
+    def test_a_reused_draft_id_is_a_new_life(self) -> None:
+        again = asdlc.replay((*HISTORY, commit(99, seen("drafts", "DRAFT-1", **INTENT | {"title": "Another"}))))
+        self.assertEqual(again.lives["DRAFT-1#2"].seen[0].item.task.title, "Another")
+        self.assertEqual(again.lives["DRAFT-1#1"].end.how, "accepted")
+
+    def test_a_task_story(self) -> None:
+        story = LEDGER.stories["TASK-2"]
+        self.assertEqual(story.claims, (minute(12),))
+        self.assertEqual([w for w, _, _ in story.entered_review], [minute(30), minute(50)])
+        self.assertEqual([(v.clean, v.important, v.nit, v.policies, v.plan_matched) for v in story.verdicts],
+                         [(False, 1, 2, ("testing",), True), (True, 0, 0, (), True)])
+        self.assertEqual((story.plan_written, story.approvals, story.done), (minute(15), (minute(20),), minute(70)))
+        self.assertEqual(story.held, (("ann", minute(12), minute(30)), ("ann", minute(40), minute(50))))
+        self.assertEqual(story.pull, "https://github.com/acme/app/pull/7")
+
+
+class StageTest(unittest.TestCase):
+    """Each stage's numbers over the fixed history above."""
+
+    def test_plan(self) -> None:
+        found = metrics(asdlc.plan_stage(LEDGER, ALL))
+        self.assertEqual((found["conversation_to_intent"]["count"], found["conversation_to_intent"]["median"]), (1, 600.0))
+        self.assertEqual(found["conversation_to_intent"]["unrecorded"], ["DRAFT-2"])
+        self.assertEqual((found["survival_rate"]["count"], found["survival_rate"]["of"], found["survival_rate"]["archived"]), (1, 2, 1))
+        self.assertEqual(found["post_spec_churn"]["by_intent"], {"TASK-1": 1})
+        self.assertEqual(found["accept_wait"]["median"], 600.0)
+        self.assertEqual(found["conversation_to_intent"]["playbook"], "Conversation to committed intent (leading)")
+
+    def test_design(self) -> None:
+        found = metrics(asdlc.design_stage(LEDGER, ALL))
+        self.assertEqual((found["intent_to_spec"]["count"], found["intent_to_spec"]["median"]), (1, 300.0))
+        self.assertEqual(found["spec_rework"]["by_intent"], {"TASK-1": 1})
+
+    def test_build(self) -> None:
+        found = metrics(asdlc.build_stage(LEDGER, {}, ALL))
+        self.assertEqual((found["claim_to_review"]["median"], found["claim_to_review"]["p90"]), (720.0, 1080.0))
+        self.assertEqual((found["first_pass_merge"]["count"], found["first_pass_merge"]["of"]), (0, 1))
+        self.assertEqual((found["approval_to_merge"]["median"], found["approval_to_merge"]["sources"]), (3000.0, {"Done commit": 1}))
+        self.assertEqual(found["rework_cycles"]["by_task"], {"TASK-2": 1, "TASK-3": 0})
+        self.assertEqual((found["plan_matched"]["count"], found["plan_matched"]["of"]), (2, 3))
+        self.assertEqual(found["approval_wait"]["median"], 300.0)
+        self.assertEqual(found["size1_skipped_approval"]["tasks"], [{"id": "TASK-3", "noted": True}])
+        self.assertEqual(found["parallel_claims"]["by_engineer"], {"ann": {"peak": 2, "median": 1}})
+        self.assertEqual(found["throughput"]["by_engineer"]["ann"], {"weeks": {"2026-W43": 1}, "reviewed": 2, "round_trips": 1, "rework_rate": 0.5})
+        merged = metrics(asdlc.build_stage(LEDGER, {"TASK-2": minute(65)}, ALL))["approval_to_merge"]
+        self.assertEqual((merged["median"], merged["sources"]), (2700.0, {"gh": 1}))
+
+    def test_test(self) -> None:
+        found = metrics(asdlc.test_stage(LEDGER, ALL))
+        self.assertEqual((found["first_pass_checks"]["count"], found["first_pass_checks"]["of"]), (1, 2))
+        self.assertEqual(found["first_pass_checks"]["baseline"]["count"], 2)
+        self.assertEqual((found["checks_per_task"]["median"], found["checks_per_task"]["max"]), (2, 3))
+        self.assertEqual((found["failed_checks"]["count"], found["failed_checks"]["of"]), (1, 5))
+        self.assertFalse(found["eval_pass_rate"]["measured"])
+        self.assertIn("no eval suite", found["eval_pass_rate"]["needs"])
+
+    def test_deploy(self) -> None:
+        decisions = ({"time": minute(30).isoformat(), "hook": "guard_board", "verdict": "deny", "reason": the_guard().FORCE_REFUSAL},
+                     {"time": minute(31).isoformat(), "hook": "guard_board", "verdict": "deny", "reason": "backlog/x.md is on the board: change the board with asdlc board, ..."},
+                     {"time": minute(32).isoformat(), "hook": "guard_board", "verdict": "allow", "reason": "nothing"})
+        found = metrics(asdlc.deploy_stage(LEDGER, decisions, {}, ALL))
+        self.assertEqual((found["time_to_first_review"]["count"], found["time_to_first_review"]["median"], found["time_to_first_review"]["p90"]),
+                         (3, 300.0, 3900.0))
+        self.assertEqual(found["review_duration"]["median"], 300.0)
+        self.assertEqual((found["worker_only_fixes"]["count"], found["worker_only_fixes"]["of"]), (1, 1))
+        self.assertEqual((found["defects_caught"]["important"], found["defects_caught"]["nits"], found["defects_caught"]["tasks"]), (1, 3, 2))
+        self.assertEqual(found["findings_by_policy"]["by_policy"], {"naming": {"2026-W43": 1}, "testing": {"2026-W43": 2}})
+        self.assertEqual(found["defects_escaped"]["bugs"], [{"id": "TASK-4", "refs": ["TASK-2"], "week": "2026-W43"}])
+        self.assertEqual((found["same_machine_reviews"]["count"], found["same_machine_reviews"]["of"]), (1, 3))
+        self.assertEqual(found["review_to_done"]["median"], 2400.0)
+        self.assertEqual({k: v["median"] for k, v in found["gate_waits"].items() if isinstance(v, dict) and "median" in v},
+                         {"accept": 600.0, "approval": 300.0, "merge": 600.0})
+        self.assertEqual(found["guard_refusals"]["by_rule"], {"force push": 1, "board file edited by hand": 1})
+
+    def test_maintain_and_what_the_board_cant_measure(self) -> None:
+        self.assertIn("play 12", metrics(asdlc.maintain_stage())["closing_the_loop"]["needs"])
+        report = asdlc.stats_report(LEDGER, (), (), (), {}, ALL)
+        self.assertEqual(list(report["stages"]), list(asdlc.STAGES))
+        self.assertEqual([m["metric"] for m in report["not_measurable"]],
+                         ["Change failure rate", "CI versus production regressions", "DORA metrics", "Pipeline failures triaged without paging"])
+        self.assertTrue(all("data" in m["needs"] for m in report["not_measurable"]))
+        self.assertEqual(report["tasks"], {"claimed": 2, "in_review": 1, "done": 1})
+
+    def test_coordination(self) -> None:
+        subjects = ((minute(14), "Add the app plugin"), (minute(40), "Reap the claim on TASK-9: idle 2h 1m"),
+                    (minute(41), "Reap the reservation on TASK-9: idle 2h 1m"), (minute(42), "Release TASK-8 from @ann.w1"))
+        event = lambda m, command, outcome: {"time": minute(m).isoformat(), "command": command, "outcome": outcome}  # noqa: E731
         events = (event(1, "next", "claimed"), event(2, "next", "lost"), event(3, "next", "claimed"), event(4, "claim", "refused"),
                   event(5, "review-next", "claimed"), event(6, "lead", "lost"))
-        races = self.report(events=events)["races"]
-        self.assertEqual((races["claimed"], races["lost"], races["lost_per_claim"]), (2, 1, 0.5))
-        self.assertEqual(races["by_command"]["lead"], {"lost": 1})
-        self.assertEqual(self.report(since=T0 + timedelta(minutes=3), events=events)["races"]["claimed"], 1)
+        found = metrics(asdlc.coordination_stage(LEDGER, subjects, events, ALL))
+        self.assertEqual((found["lost_races"]["claimed"], found["lost_races"]["lost"], found["lost_races"]["lost_per_claim"]), (2, 1, 0.5))
+        self.assertEqual(found["lost_races"]["by_command"]["lead"], {"lost": 1})
+        self.assertEqual(found["reaped"]["by_hold"], {"claim": 1, "reservation": 1})
+        self.assertEqual(found["released"]["count"], 1)
+        self.assertEqual(found["onboardings"]["onboardings"], [{"plugin": "app", "published": minute(14).isoformat(), "task": "TASK-3", "seconds": 60.0}])
+        later = metrics(asdlc.coordination_stage(LEDGER, subjects, events, asdlc.Window(minute(3), minute(100))))
+        self.assertEqual((later["lost_races"]["claimed"], later["onboardings"]["onboardings"]), (1, [{"plugin": "app", "published": minute(14).isoformat(), "task": "TASK-3", "seconds": 60.0}]))
+
+    def test_since_leaves_out_what_came_before(self) -> None:
+        window = asdlc.Window(minute(50), minute(100))
+        report = asdlc.stats_report(LEDGER, (), (), (), {}, window)
+        self.assertEqual(report["tasks"], {"claimed": 0, "in_review": 1, "done": 1})
+        self.assertEqual(metrics(report["stages"]["deploy"])["time_to_first_review"]["count"], 1)
+        self.assertEqual(metrics(report["stages"]["plan"])["survival_rate"]["of"], 0)
+        self.assertEqual(metrics(report["stages"]["build"])["parallel_claims"]["by_engineer"], {"ann": {"peak": 0, "median": None}})
 
     def test_lines(self) -> None:
-        lines = asdlc.stats_lines(self.report(), "/state/asdlc/events.jsonl")
-        self.assertIn("tasks: 3 claimed, 2 in review now, 1 done", lines)
-        self.assertIn("claim to In Review: median 29m, p90 48m (3)", lines)
-        self.assertIn("review wait: median 10m, p90 40m (3); waiting now: TASK-3", lines)
-        self.assertIn("changes requested: 1 round trip(s) over 2 reviewed task(s), 0.5 per task, most 1 (TASK-1)", lines)
-        self.assertIn("reviews: 3, 1 same-machine (33%)", lines)
-        self.assertIn("lost races per claim: - (0 lost, 0 claimed; this machine's log, /state/asdlc/events.jsonl)", lines)
-        self.assertIn(f"onboarded app at {(T0 + timedelta(minutes=25)).isoformat()}, 15m after TASK-2 was claimed", lines)
-        self.assertEqual(lines[-1], "plan approval skipped (size-1): TASK-2")
+        lines = asdlc.stats_lines(asdlc.stats_report(LEDGER, (), (), (), {}, ALL))
+        self.assertIn("tasks: 2 claimed, 1 in review now, 1 done", lines)
+        self.assertIn("Plan (play 01, 10)", lines)
+        self.assertIn("  conversation to committed intent: median 10m, p90 10m (1); 1 intent(s) with no start recorded (DRAFT-2) "
+                      "[play 01: Conversation to committed intent (leading)]", lines)
+        self.assertIn("  claim to In Review: median 12m, p90 18m (2) [play 03: Claim to In Review]", lines)
+        self.assertIn("  eval pass rate: not measured: there is no eval suite yet; it needs eval results recorded per change, which play 08's eval gate "
+                      "will add [play 08: Eval pass rate]", lines)
+        self.assertIn("Not measurable from the board", lines)
+        only = asdlc.stats_lines(asdlc.stats_report(LEDGER, (), (), (), {}, ALL, ("test",)))
+        self.assertNotIn("Plan (play 01, 10)", only)
+        self.assertNotIn("Not measurable from the board", only)
+
+    def test_refusal_rules_name_every_guard_refusal(self) -> None:
+        guard = the_guard()  # the guard's own reasons, so the two can't drift apart
+        for name in ("MERGE_REFUSAL", "APPROVAL_REFUSAL", "ACCEPT_REFUSAL", "APPROVE_REFUSAL", "PERMISSIONS_REFUSAL", "IN_PROGRESS_REFUSAL",
+                     "IN_REVIEW_REFUSAL", "ASSIGNEE_REFUSAL", "REVIEW_LABEL_REFUSAL", "SIZE_REFUSAL", "FORCE_REFUSAL"):
+            with self.subTest(name=name):
+                self.assertNotIn("other", asdlc.refusal_rule("guard_board", getattr(guard, name)))
+        for command in ("backlog task edit 1 -s Done", "backlog draft promote 2", "backlog task archive 1", "backlog task create X -l size-1"):
+            with self.subTest(command=command):
+                self.assertNotIn("other", asdlc.refusal_rule("guard_board", guard.backlog_refusal(command.split()[1:])))
+        self.assertEqual(asdlc.refusal_rule("guard_x", "something new"), "guard_x: other")
 
     def test_percentile_and_the_pieces(self) -> None:
         self.assertIsNone(asdlc.percentile([], 0.5))
         self.assertEqual(asdlc.percentile([5, 1, 3, 2, 4], 0.5), 3)
         self.assertEqual(asdlc.percentile(list(range(1, 11)), 0.9), 9)
-        self.assertEqual(asdlc.percentile([7], 0.9), 7)
         self.assertEqual([asdlc._duration(v) for v in (None, 42.7, 60, 5400)], ["-", "42s", "1m", "1h 30m"])
         self.assertEqual(asdlc.published_plugins([(T0, "Add the acme-api plugin"), (T0, "Update the acme-api plugin"), (T0, "Claim TASK-1")]),
                          ((T0, "acme-api"),))
         self.assertEqual(asdlc.batch_objects(b"abc blob 3\nxyz\nmain:gone missing\ndef blob 0\n\n"), ["xyz", None, ""])
+
+    def test_the_cache_round_trips(self) -> None:
+        for found in HISTORY:
+            for change in found.changes:
+                with self.subTest(path=change.path):
+                    self.assertEqual(asdlc.change_from_json(json.loads(json.dumps(asdlc.change_json(change)))), change)
+
+
+def the_guard() -> object:
+    load("hooks/decision_log.py")
+    return load("hooks/guard_board.py")
 
 
 # --- the script, against real git repositories and the backlog CLI --------------------
@@ -938,7 +1138,7 @@ def as_engineer(name: str) -> dict[str, str]:
 # A machine with nothing registered: tests that register pass their own XDG_CONFIG_HOME. Its
 # event log goes to a folder of its own, never the real ~/.local/state.
 _STATE = tempfile.TemporaryDirectory()
-NO_MACHINE_CONFIG = {"XDG_CONFIG_HOME": "/nonexistent/asdlc-tests", "XDG_STATE_HOME": _STATE.name}
+NO_MACHINE_CONFIG = {"XDG_CONFIG_HOME": "/nonexistent/asdlc-tests", "XDG_STATE_HOME": _STATE.name, "ASDLC_GH": ""}  # no gh calls to GitHub
 
 
 def _asdlc(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None, engineer: str = "agent") -> subprocess.CompletedProcess[str]:
@@ -1183,11 +1383,18 @@ class ClaimTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         report = json.loads(done.stdout)
         self.assertEqual(report["tasks"], {"claimed": 1, "in_review": 1, "done": 0})
-        self.assertEqual(report["claim_to_review"]["count"], 1)
-        self.assertEqual(report["review_wait"]["waiting_now"], ["TASK-1"])
-        self.assertEqual((report["races"]["claimed"], report["races"]["lost"]), (1, 0))
+        self.assertEqual(list(report["stages"]), list(asdlc.STAGES))
+        stages = report["stages"]
+        self.assertEqual(stages["build"]["metrics"]["claim_to_review"]["count"], 1)
+        self.assertEqual(stages["deploy"]["metrics"]["time_to_first_review"]["waiting_now"], ["TASK-1"])
+        races = stages["coordination"]["metrics"]["lost_races"]
+        self.assertEqual((races["claimed"], races["lost"]), (1, 0))
         later = _asdlc("--board", str(self.theirs), "stats", "--since", "2999-01-01", env=state)
         self.assertIn("tasks: 0 claimed, 1 in review now, 0 done", later.stdout)
+        self.assertIn("Not measurable from the board", later.stdout)
+        build = _asdlc("--board", str(self.theirs), "stats", "--stage", "build", env=state)
+        self.assertIn("Build (play 03, 06)", build.stdout)
+        self.assertNotIn("Deploy (play", build.stdout)
         self.assertEqual(_git(self.theirs, "status", "--porcelain"), "", "stats changes nothing")
 
     def test_a_push_rejected_for_another_task_is_retried(self) -> None:
@@ -1657,24 +1864,37 @@ class ReviewCommandTest(unittest.TestCase):
     def test_changes_go_back_to_the_author_and_a_clean_review_waits_for_a_person(self) -> None:
         self.submit("TASK-1")
         self.review("kyle.r1")
+        missing = self.team.run("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "changes", "--notes", "[Bugs, Important] x")
+        self.assertEqual(missing.returncode, 2)
+        self.assertIn("--findings", missing.stderr)
+        unfit = self.team.run("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "changes", "--findings", "nit=1", "--plan-matched", "yes",
+                              "--notes", "[Bugs, Nit] x")
+        self.assertIn("a changes verdict needs at least one Important finding", unfit.stderr)
+        self.assertEqual(self.team.task("TASK-1").reviewer, "kyle.r1", "a refused verdict changes nothing")
         changes = json.loads(self.team.ok("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "changes", "--json",
+                                          "--findings", "important=1,nit=2", "--policy", "testing", "--policy", "Bugs", "--plan-matched", "no",
                                           "--notes", "[Bugs, Important] the limit resets on every request").stdout)
         self.assertEqual((changes["status"], changes["workers"]), ("In Progress", ["ann.w1"]))
+        self.assertEqual((changes["findings"], changes["policies"], changes["plan_matched"]), ({"important": 1, "nit": 2}, ["testing", "Bugs"], False))
         back = self.team.task("TASK-1")
+        self.assertEqual((back.review_findings, back.review_policies, back.plan_matched), ("important=1,nit=2", ("testing", "Bugs"), "no"))
         self.assertEqual((back.status, back.assignees, back.reviewer, back.review_kind), ("In Progress", ("@ann.w1",), "", "cross-machine"))
         self.assertIn("changes-requested", back.labels)
         text = self.team.text("TASK-1")
         self.assertIn("Review by @kyle.r1 (cross-machine): changes requested.", text)
         self.assertIn("[Bugs, Important] the limit resets on every request", text)
+        self.assertIn("Findings: 1 Important, 2 nit. Cites: testing, Bugs. The diff does not match the plan.", text)
         mine = json.loads(self.team.ok("mine", "--as", "ann", "--json", engineer="ann").stdout)
         self.assertEqual([r["id"] for r in mine["changes_requested"]], ["TASK-1"])
         self.team.ok("heartbeat", "TASK-1", "--as", "ann.w1", engineer="ann")
         self.team.ok("finish", "TASK-1", "--as", "ann.w1", "--notes", "Fixed: failures only are counted.", engineer="ann")
         self.assertEqual(self.review("kyle.r1")["task"], "TASK-1")
-        clean = self.team.ok("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "clean", "--notes", "No findings.")
+        clean = self.team.ok("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "clean", "--findings", "important=0,nit=0",
+                             "--plan-matched", "yes", "--notes", "No findings.")
         self.assertEqual(clean.stdout.strip(), "TASK-1 passed review by @kyle.r1 (cross-machine); it stays In Review for a person to merge")
         passed = self.team.task("TASK-1")
         self.assertEqual((passed.status, passed.reviewer, passed.labels), ("In Review", "", ("size-2", "review-passed")))
+        self.assertEqual((passed.review_findings, passed.review_policies, passed.plan_matched), ("important=0,nit=0", (), "yes"))
         again = self.team.ok("review-next", "--as", "kyle.r1")
         self.assertIn("skipped TASK-1 has passed review and waits for a person to merge it", again.stderr)
 
@@ -1684,13 +1904,13 @@ class ReviewCommandTest(unittest.TestCase):
         for reviewer, says in (("lee.r1", "@kyle.r1 holds its review, so @lee.r1 can't finish it"), ("kyle.r2", "so @kyle.r2 can't finish it"),
                                ("kyle.w1", "not a reviewer's name")):
             with self.subTest(reviewer=reviewer):
-                done = self.team.run("review-done", "TASK-1", "--as", reviewer, "--verdict", "clean", "--notes", "ok", engineer=asdlc.owner_of(reviewer))
+                done = self.team.run("review-done", "TASK-1", "--as", reviewer, "--verdict", "clean", *CLEAN, "--notes", "ok", engineer=asdlc.owner_of(reviewer))
                 self.assertEqual(done.returncode, 1)
                 self.assertIn(says, done.stderr)
-        empty = self.team.run("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "clean", "--notes", " ")
+        empty = self.team.run("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "clean", *CLEAN, "--notes", " ")
         self.assertIn("say what the review found", empty.stderr)
         self.assertEqual(self.team.task("TASK-1").reviewer, "kyle.r1")
-        unclaimed = self.team.run("review-done", "TASK-2", "--as", "kyle.r1", "--verdict", "clean", "--notes", "ok")
+        unclaimed = self.team.run("review-done", "TASK-2", "--as", "kyle.r1", "--verdict", "clean", *CLEAN, "--notes", "ok")
         self.assertIn("nobody holds its review", unclaimed.stderr)
 
     def test_reap_releases_a_stale_review_claim(self) -> None:
@@ -1819,7 +2039,7 @@ class ResumedBranchTest(unittest.TestCase):
         work = _git(worktree, "rev-parse", "HEAD")
         team.ok("finish", "1", "--as", "kyle.w1", "--notes", "built")
         team.ok("review-next", "--as", "ann.r1", engineer="ann")
-        team.ok("review-done", "1", "--as", "ann.r1", "--verdict", "changes", "--notes", "[Bugs, Important] fix x", engineer="ann")
+        team.ok("review-done", "1", "--as", "ann.r1", "--verdict", "changes", *CHANGES, "--notes", "[Bugs, Important] fix x", engineer="ann")
         team.ok("reap", "--now", _later(hours=3), engineer="ann")
         reaped = team.task("TASK-1")
         self.assertEqual((reaped.status, reaped.assignees, reaped.branch), ("To Do", ("@kyle",), branch))
@@ -2031,6 +2251,85 @@ class RecordCheckWhereTest(unittest.TestCase):
         head = _git(one, "rev-parse", "HEAD")[:12]
         self.assertIn(f"Check passed: `true` exited 0 at", team.text("TASK-1"))
         self.assertIn(f"in {one} on task-1-one at {head} with uncommitted changes", team.text("TASK-1"))
+
+
+@needs_backlog
+class WorkerTrailerTest(unittest.TestCase):
+    """A check on a sent-back task says whether every commit since the review carries the worker trailer, and stats counts it."""
+
+    def test_record_check_counts_the_commits_since_the_review(self) -> None:
+        team = Team(self, [_sized("Add login", "size-1", "--project", "acme-api")])
+        worktree = Path(json.loads(team.ok("claim", "1", "--as", "kyle.w1", "--json").stdout)["worktree"])
+        _git(worktree, "commit", "-q", "--allow-empty", "-m", "Build it", "--trailer", "Asdlc-Worker: kyle.w1")
+        _git(worktree, "push", "-q", "-u", "origin", "HEAD")
+        first = _asdlc("record-check", "TASK-1", "--as", "kyle.w1", "--", "true", cwd=worktree, env=team.machine, engineer="kyle")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertNotIn("Commits since the review", team.text("TASK-1"), "only a sent-back task's checks count them")
+        team.ok("finish", "1", "--as", "kyle.w1", "--notes", "built")
+        team.ok("review-next", "--as", "ann.r1", engineer="ann")
+        team.ok("review-done", "1", "--as", "ann.r1", "--verdict", "changes", *CHANGES, "--policy", "testing", "--notes", "[Bugs, Important] x", engineer="ann")
+        _git(worktree, "commit", "-q", "--allow-empty", "-m", "Fix it", "--trailer", "Asdlc-Worker: kyle.w1")
+        _git(worktree, "commit", "-q", "--allow-empty", "-m", "A person's fix")
+        done = _asdlc("record-check", "TASK-1", "--as", "kyle.w1", "--", "true", cwd=worktree, env=team.machine, engineer="kyle")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("Commits since the review: 2, 1 without the Asdlc-Worker trailer.", team.text("TASK-1"))
+        _git(worktree, "push", "-q", "origin", "HEAD")
+        team.ok("finish", "1", "--as", "kyle.w1", "--notes", "fixed")
+        report = json.loads(team.ok("stats", "--stage", "deploy", "--json").stdout)
+        self.assertEqual(list(report["stages"]), ["deploy"])
+        deploy = report["stages"]["deploy"]["metrics"]
+        self.assertEqual((deploy["worker_only_fixes"]["count"], deploy["worker_only_fixes"]["of"]), (0, 1))
+        self.assertEqual(deploy["findings_by_policy"]["by_policy"].keys(), {"testing"})
+        self.assertEqual(deploy["defects_caught"]["important"], 1)
+        self.assertTrue((team.board / ".asdlc" / "stats" / "history.json").is_file(), "the parsed history is cached in the board clone")
+        self.assertEqual(_git(team.board, "status", "--porcelain"), "", "the cache is ignored")
+        again = json.loads(team.ok("stats", "--stage", "deploy", "--json").stdout)
+        self.assertEqual(again["stages"]["deploy"]["metrics"]["worker_only_fixes"], deploy["worker_only_fixes"], "the cache reads the same")
+
+
+@needs_backlog
+class MergeTimeTest(unittest.TestCase):
+    def test_gh_gives_the_merge_time_and_it_is_cached(self) -> None:
+        team = Team(self, [_sized("Add login", "size-2", "--project", "acme-api")])
+        team.ok("claim", "1", "--as", "kyle.w1")
+        team.ok("board", "task", "edit", "TASK-1", "--plan", "Files: login.py. Proof: it parses.")
+        team.ok("approve", "TASK-1")
+        team.ok("finish", "1", "--as", "kyle.w1", "--pr", "https://github.com/acme/api/pull/9", "--notes", "built")
+        team.ok("board", "task", "edit", "TASK-1", "-s", "Done")
+        asked = team.boards.root / "asked"
+        gh = team.boards.root / "gh"
+        gh.write_text(f'#!/bin/sh\necho "$@" >> {asked}\necho \'{{"mergedAt": "2999-01-01T00:00:00Z"}}\'\n')
+        gh.chmod(0o755)
+        merged = json.loads(team.ok("stats", "--stage", "build", "--json", env={"ASDLC_GH": str(gh)}).stdout)
+        found = merged["stages"]["build"]["metrics"]["approval_to_merge"]
+        self.assertEqual(found["sources"], {"gh": 1})
+        self.assertEqual(asked.read_text(), "pr view https://github.com/acme/api/pull/9 --json mergedAt\n")
+        cached = json.loads(team.ok("stats", "--stage", "build", "--json").stdout)["stages"]["build"]["metrics"]["approval_to_merge"]
+        self.assertEqual((cached["sources"], cached["median"]), ({"gh": 1}, found["median"]), "a known merge time is kept, without asking again")
+        self.assertEqual(len(asked.read_text().splitlines()), 1)
+
+
+@needs_backlog
+class IntentStartedTest(unittest.TestCase):
+    def test_records_when_the_conversation_began_once(self) -> None:
+        team = Team(self, [_sized("A task", "size-1", "--project", "acme-api")])
+        team.ok("board", "task", "create", "Faster logins", "--draft", "--type", "intent")
+        team.ok("board", "task", "create", "Not an intent", "--draft", "--type", "task")
+        start = (datetime.now(UTC) - timedelta(minutes=20)).replace(microsecond=0)
+        done = team.ok("intent-started", "DRAFT-1", "--at", start.isoformat())
+        self.assertIn(f"DRAFT-1: the conversation began at {start.isoformat()}", done.stdout)
+        self.assertIn(f"asdlc_intent_started: '{start.isoformat()}'", team.text("DRAFT-1"))
+        self.assertIn("already recorded", team.ok("intent-started", "1", "--at", start.isoformat()).stdout)
+        for args, says in ((("DRAFT-1", "--at", (start + timedelta(minutes=1)).isoformat()), "asdlc doesn't change it"),
+                           (("DRAFT-2",), "not an intent"), (("TASK-1",), "not a draft on the board"),
+                           (("DRAFT-1", "--at", "2999-01-01T00:00:00+00:00"), "in the future")):
+            with self.subTest(args=args):
+                refused = team.run("intent-started", *args)
+                self.assertEqual(refused.returncode, 1)
+                self.assertIn(says, refused.stderr)
+        stats = json.loads(team.ok("stats", "--stage", "plan", "--json").stdout)["stages"]["plan"]["metrics"]
+        self.assertEqual(stats["conversation_to_intent"]["count"], 1)
+        self.assertGreaterEqual(stats["conversation_to_intent"]["median"], 20 * 60 - 5)
 
 
 @needs_backlog
@@ -2270,7 +2569,7 @@ class ReservationExpiryTest(unittest.TestCase):
         team.ok("claim", "1", "--as", "kyle.w1")
         team.ok("finish", "1", "--as", "kyle.w1", "--notes", "built")
         team.ok("review-next", "--as", "ann.r1", engineer="ann")
-        team.ok("review-done", "1", "--as", "ann.r1", "--verdict", "changes", "--notes", "[Bugs, Important] x", engineer="ann")
+        team.ok("review-done", "1", "--as", "ann.r1", "--verdict", "changes", *CHANGES, "--notes", "[Bugs, Important] x", engineer="ann")
         team.ok("reap", "--now", _later(hours=3), engineer="ann")
         self.assertEqual(team.task("TASK-1").assignees, ("@kyle",))
         self.assertIn("nothing stale", team.ok("reap", "--now", _later(hours=1), engineer="ann").stdout)
