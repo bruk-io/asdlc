@@ -17,7 +17,7 @@ You start in the tasks clone, and you stay there: nobody can answer a permission
 
 - `asdlc` runs from where you are; it finds the board itself. The one command that needs your worktree, `asdlc record-check`, takes it as `--in <worktree>`.
 - git always with `-C` and the worktree, such as `git -C <worktree> status`, one command per Bash call. Never change directory first (no `cd`): Claude Code asks a person before any line that changes directory and runs git, and you have no person, so the whole line is refused.
-- Find and read files with the Glob, Grep and Read tools on absolute paths under the worktree (Glob with the pattern `**/*` and the worktree as its path lists them all; Read takes a file, never a folder), or `git -C <worktree> ls-files` and `git -C <worktree> grep <pattern>`.
+- List the worktree's files with `git -C <worktree> ls-files`, search them with `git -C <worktree> grep <pattern>`, and read each with the Read tool by its absolute path (Read takes a file, never a folder). Not every session has the Glob and Grep tools; these always work.
 - Never pipe a command's output into `python3`, `jq` or another program to pick it apart: read it yourself. A program with no allow rule is refused, and so is any line that includes one.
 
 ## Rules for both phases

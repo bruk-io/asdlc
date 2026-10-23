@@ -3563,7 +3563,8 @@ def _write_atomically(target: Path, text: str) -> None:
 def permissions(explicit_board: str | None, cwd: Path, write: bool, as_json: bool, now: datetime) -> int:
     """Print the Claude Code allow rules normal work needs on this machine; with `write`, merge them into
     the tasks clone's own `.claude/settings.local.json`, where orchestrator sessions and the workers
-    they launch run, keeping everything there, after a backup.
+    they launch run, keeping everything there, after a backup, and make the additional directories that
+    don't exist yet (the first claim makes a repository's worktree folder, after a session has started).
 
     Raises:
         AsdlcError: no board, the registry or the settings file is unreadable, or the settings file has the wrong shape.
@@ -3594,6 +3595,11 @@ def permissions(explicit_board: str | None, cwd: Path, write: bool, as_json: boo
     if (updated := with_exclude(exclude.read_text() if exclude.exists() else "", f"{LOCAL_SETTINGS}*")) is not None:
         exclude.parent.mkdir(parents=True, exist_ok=True)
         exclude.write_text(updated)  # untracked, so Claude Code applies it as the person's own file
+    made = [folder for folder in rules.directories if not Path(folder).is_dir()]
+    for folder in made:  # a session leaves out an additional directory missing when it starts, and claims make them later
+        Path(folder).mkdir(parents=True, exist_ok=True)
+    if made:
+        _say("made " + ", ".join(made) + " now, so sessions started before the first claim can read there")
     if not added:
         _emit(report | {"added": []}, as_json, [f"{target} already allows everything normal work needs: nothing to add", *skipped])
         return 0

@@ -9,8 +9,9 @@ The first real eval run found 14 tool errors in 63 calls, nearly all from backgr
 - `asdlc record-check <id> --in <worktree> ...`: the check runs in the worktree named, from anywhere, so no worker has to `cd` (Claude Code always asks before a line that changes directory and runs git). Every `asdlc` command takes `--in <folder>`, before or after the subcommand.
 - `asdlc permissions` allows the read-only git workers and reviewers reach for, in task worktrees and the registered clone: `ls-files`, `grep`, `blame`, `cat-file`, `ls-tree`, `merge-base`, `rev-list`, `describe`, `show-ref` and `remote get-url`, each also bare.
 - Claims and review claims carry `github`, the origin's `owner/name` when `gh` is installed and the origin is on GitHub, so agents open or comment on pull requests with `gh --repo` without probing for `gh`.
+- `asdlc permissions --write` makes each worktree folder it adds to `additionalDirectories`, since a session leaves out one that doesn't exist when it starts, and the first claim makes it later.
 - `asdlc-plugin status`, `scaffold`, `verify-command` and `--repo` take a registered slug as well as a path, and refuse an unknown one naming the registered slugs.
-- The worker and reviewer agents and the orchestrate, lead and onboard-repo skills say where each command runs: from the tasks clone, `--in`, `git -C`, the Glob, Grep and Read tools, never `cd`, never an interpreter in a pipe. The tests walk every command they give and fail on any `cd`, or any part no allow rule covers.
+- The worker and reviewer agents and the orchestrate, lead and onboard-repo skills say where each command runs: from the tasks clone, `--in`, `git -C`, `git -C <worktree> ls-files` and `git grep`, the Read tool, never `cd`, never an interpreter in a pipe. The tests walk every command they give and fail on any `cd`, or any part no allow rule covers.
 
 ### Evals
 

@@ -2545,8 +2545,12 @@ class PermissionsCommandTest(unittest.TestCase):
         self.assertIn("lint", team.ok("permissions", env=env).stdout)
         target.parent.mkdir()
         target.write_text(json.dumps({"theme": "dark", "env": {"X": "\u00e9"}, "permissions": {"allow": ["Bash(git status)"]}}, ensure_ascii=False))
+        self.assertFalse(Path(f"{team.api}.worktrees").exists(), "no claim yet")
         written = team.ok("permissions", "--write", env=env)
         self.assertIn(str(target), written.stdout)
+        for folder in shown["directories"]:
+            with self.subTest(folder=folder):
+                self.assertTrue(Path(folder).is_dir(), "the second eval run: a worktree folder missing when the session started wasn't readable by its workers")
         result = json.loads(target.read_text())
         self.assertEqual((result["theme"], result["env"]["X"], result["permissions"]["allow"][0]), ("dark", "\u00e9", "Bash(git status)"))
         self.assertIn("\u00e9", target.read_text(), "non-ASCII text is kept as it was written")

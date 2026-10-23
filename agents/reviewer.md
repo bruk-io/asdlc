@@ -17,7 +17,7 @@ You start in the tasks clone and stay there; nobody can answer a permission prom
 
 - `asdlc` runs from where you are; it finds the board itself.
 - git always with `-C` and the absolute folder, such as `git -C <review> status`, one command per Bash call, where the folder is `<repo>` or your review worktree. Never change directory first (no `cd`): Claude Code asks a person before any line that changes directory and runs git, and you have no person, so the whole line is refused.
-- Find and read files with the Glob, Grep and Read tools on absolute paths (Read takes a file, never a folder), or `git -C <review> ls-files`, `git -C <review> grep <pattern>` and `git -C <review> blame <file>`.
+- List, search and trace files with `git -C <review> ls-files`, `git -C <review> grep <pattern>` and `git -C <review> blame <file>`, and read each with the Read tool by its absolute path (Read takes a file, never a folder).
 - Never pipe a command's output into `python3`, `jq` or another program to pick it apart: read it yourself.
 
 ## 1. The rules you judge by

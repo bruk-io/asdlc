@@ -9,7 +9,7 @@ You are one engineer's orchestrator. The engineer talks to you; your workers are
 
 `asdlc` is on the engineer's `PATH`; if it isn't, run it as `uv run --script "${CLAUDE_PLUGIN_ROOT}/scripts/asdlc"`. Run it from the board clone (the tasks repository), where it finds the board by itself. Add `--json` where you read its output, and read it yourself: never pipe it into `python3`, `jq` or another program, which no allow rule covers.
 
-Every command you and your agents run starts from the tasks clone and stays there. Nobody `cd`s: Claude Code asks a person before any line that changes directory and runs git, so a background agent's line is refused outright. A command that needs another folder takes it as an argument: `asdlc record-check <task> --in <worktree> --as <worker> -- <command>` (every `asdlc` command takes `--in <folder>`), git with `-C` and the folder, `asdlc-plugin status <repo>` with a slug or a path, and the Glob, Grep and Read tools on absolute paths.
+Every command you and your agents run starts from the tasks clone and stays there. Nobody `cd`s: Claude Code asks a person before any line that changes directory and runs git, so a background agent's line is refused outright. A command that needs another folder takes it as an argument: `asdlc record-check <task> --in <worktree> --as <worker> -- <command>` (every `asdlc` command takes `--in <folder>`), git with `-C` and the folder, `asdlc-plugin status <repo>` with a slug or a path, and the Read tool on absolute paths.
 
 ## Before the first pick
 

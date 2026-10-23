@@ -27,14 +27,14 @@ Not counted as errors, but the same causes: `asdlc-plugin status acme-api --json
 
 | File | New | What it holds | Requirements |
 |---|---|---|---|
-| `scripts/asdlc` | no | `READ_ONLY_GIT` (ls-files, grep, blame, cat-file, ls-tree, merge-base, rev-list, describe, show-ref, `remote get-url`) added to the worktree rules and the registered clone's, each with its bare form as before. A global `--in <folder>`, before or after the subcommand, that every command uses as its working directory, and `record-check <id> --in <worktree> --as <worker> -- <command>`; the refusal outside a worktree names `--in`. A `github` field on the claim and review-claim reports: the origin's `owner/name` when it is on GitHub and `gh` is installed, else null, from `github_repo` (pure) | R12, R13, R16 |
+| `scripts/asdlc` | no | `permissions --write` also makes each additional directory that doesn't exist yet (see the second run, below). `READ_ONLY_GIT` (ls-files, grep, blame, cat-file, ls-tree, merge-base, rev-list, describe, show-ref, `remote get-url`) added to the worktree rules and the registered clone's, each with its bare form as before. A global `--in <folder>`, before or after the subcommand, that every command uses as its working directory, and `record-check <id> --in <worktree> --as <worker> -- <command>`; the refusal outside a worktree names `--in`. A `github` field on the claim and review-claim reports: the origin's `owner/name` when it is on GitHub and `gh` is installed, else null, from `github_repo` (pure) | R12, R13, R16 |
 | `scripts/repo_slug.py` | no | `github_repo(remote)`: `owner/name` for a github.com remote, else None | R12 |
 | `scripts/asdlc-plugin` | no | `status`, `scaffold` and `verify-command` take a repository path or a registered slug, and `check`/`publish --repo` too; `repo_argument` (pure) decides, and an unknown name is refused with the registered slugs | R16 |
-| `agents/worker.md` | no | Where each command runs: asdlc from anywhere, record-check with `--in`, git always as `git -C <worktree>`, one command per call, files listed and read with Glob, Grep and Read; never `cd`, never an interpreter in a pipe; the pull request with `gh pr create --repo <github>` only when the claim gave `github` | R12 |
-| `agents/reviewer.md` | no | The same for the reviewer: `git -C`, the file tools, no `cd`; comment on the pull request only when the claim gave `github` | R12, R15 |
+| `agents/worker.md` | no | Where each command runs: asdlc from anywhere, record-check with `--in`, git always as `git -C <worktree>`, one command per call, files listed with `git -C <worktree> ls-files`, searched with `git grep` and read with Read; never `cd`, never an interpreter in a pipe; the pull request with `gh pr create --repo <github>` only when the claim gave `github` | R12 |
+| `agents/reviewer.md` | no | The same for the reviewer: `git -C`, Read, no `cd`; comment on the pull request only when the claim gave `github` | R12, R15 |
 | `skills/orchestrate/SKILL.md` | no | Run every command from the tasks clone; `asdlc-plugin status` with the slug or the path; the launch prompt carries `github`; read JSON yourself rather than pipe it into an interpreter | R12 |
-| `skills/lead/SKILL.md`, `skills/onboard-repo/SKILL.md` | no | Where their commands run; `git -C` and the file tools to read a repository; `<repo>` may be the slug | R12 |
-| `tests/test_asdlc.py` | no | `--in` for record-check (from the tasks clone, before or after the id) and as a global option; the refusal names `--in`; `github_repo`; the claim report's `github` | R13 |
+| `skills/lead/SKILL.md`, `skills/onboard-repo/SKILL.md` | no | Where their commands run; `git -C` and Read to read a repository; `<repo>` may be the slug | R12 |
+| `tests/test_asdlc.py` | no | `permissions --write` makes the missing worktree folders; `--in` for record-check (from the tasks clone, before or after the id) and as a global option; the refusal names `--in`; `github_repo`; the claim report's `github` | R13 |
 | `tests/test_asdlc_plugin.py` | no | `repo_argument` over paths, registered slugs and unknown names; `status` by slug against a real registry | R16 |
 | `tests/test_guard_board.py` | no | The walk over every command in the skills and agents: no `cd` in any of them; every part of every agent command, and of the orchestrator's skills, covered by an allow rule, with no `cd` exemption; Claude Code's cd-with-git prompt modelled and asserted absent; the new read-only git allowed bare and with arguments, in worktrees and the clone, and still not the clone's writes | R12, R16 |
 | `README.md`, `docs/guide.md` | no | `--in`, the read-only git in the permissions list, `asdlc-plugin` taking a slug | - |
@@ -66,3 +66,27 @@ Nothing under `evals/` changes (R23).
 - `./scripts/check` passes: artefacts, every test, and `scripts/eval validate`.
 - The walk: every command the agents and skills give passes the guard, none has a `cd`, and every part of every agent and orchestrator command is allowed by a rule `asdlc permissions` writes.
 - One real run of `approval-before-build`, natively, against this branch's commit: passed, with the tool calls, the errors by cause, the turns, the tokens and the cost next to the first run's (63 calls, 14 errors, 18 turns, $0.50).
+
+## The second run
+
+`approval-before-build`, trial 1, plugin `cf0cdf7` (this branch before the fixes below), natively, `.eval-results/20261023T132106Z-cf0cdf7-with-plugin`:
+
+| Run | Result | Turns | Tool calls | Errors | Permission denials | Tokens (sonnet 5.5: input, output, cache read, cache write) | Agent time | Cost at API prices |
+|---|---|---|---|---|---|---|---|---|
+| First (`b2a2cff`, main) | passed after the check fix | 18 | 63 | 14 | 7 | 118, 18,230, 1,145,190, 66,830 | 156s | $0.5024 |
+| Second (`cf0cdf7`) | passed, every check | 14 | 52 | 4 | 2 | 80, 11,335, 695,778, 70,309 | 152s | $0.4048 |
+
+No `cd`, no refused git, no record-check from the wrong folder, no slug error, no `which gh`, and both plans named real files the first time. Its four errors:
+
+| # | Who | Call | Error | Cause | Fixed |
+|---|---|---|---|---|---|
+| 1, 2 | both planners | `cat <worktree>/.asdlc-task` | denied: "may only concatenate files from the allowed working directories: tasks, tasks.worktrees" | `<clone>.worktrees` was in `additionalDirectories` but didn't exist when the session started (the first claim makes it), and the session left it out of the folders Bash may read. The Read tool still read there | here, after the run: `permissions --write` makes the folders |
+| 3 | planner of TASK-1 | Glob | "No such tool available: Glob" | this Claude Code build has no Glob tool; the agent file told the worker to use it | here, after the run: the agents list and search with `git -C <worktree> ls-files` and `git grep`, and read with Read |
+| 4 | builder of TASK-2 | `asdlc record-check ... -- python3 -m unittest -q` | exit 1 | the deliberately failing test before the fix: expected | - |
+
+The fixes for errors 1 to 3 came after the one model run this change was allowed, so no run proves them; their unit test (the folders exist after `--write`) and the walk do.
+
+## Departures from the plan
+
+- **The folders `permissions --write` makes, and no Glob in the agents' guidance**: not in the approved plan; the second run found both, and they share its root cause (a background worker stopped by something it can't ask about).
+- **Glob and Grep stay in the agents' `tools` lists**: a session that has them may use them; the guidance no longer depends on them.
