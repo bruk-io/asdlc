@@ -1,0 +1,914 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.15"
+# ///
+"""Onboard a code repository: make, prove, check and publish its plugin in the tasks repository.
+
+The judgement (which commands, which layers, what each rule says) is the `onboard-repo`
+skill's. This script does everything that can be decided without it:
+
+  asdlc-plugin [--board <path>] status <code-repo> [--json]
+  asdlc-plugin [--board <path>] scaffold <code-repo>
+  asdlc-plugin [--board <path>] verify-command <code-repo> <name> [--timeout <seconds>]
+  asdlc-plugin [--board <path>] check <slug> [--repo <code-repo>]
+  asdlc-plugin [--board <path>] publish <slug> [--repo <code-repo>]
+
+Onboarding never edits the board clone itself, since `asdlc` refuses a board with
+uncommitted changes and other agents on the machine keep claiming work while one onboards.
+`scaffold` opens a detached worktree of the tasks repository beside the clone,
+`<board>.worktrees/plugin-<slug>`, from `origin/main`; every edit, verification and check
+happens there; `publish` pushes it to `origin/main` and removes it.
+
+For a code repository the board is `--board`, else $ASDLC_BOARD, else `git config
+asdlc.board` in it: the one lookup `asdlc` and the rule loader use too, so the plugin lands
+where it is read. `check` and `publish` take a slug: with `--repo`, the board is found the
+same way through that repository; without it, as `asdlc` finds it from here.
+`claude plugin validate` is $ASDLC_CLAUDE, else `claude`, else `npx @anthropic-ai/claude-code`.
+"""
+
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import random
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+import tomllib
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime
+from pathlib import Path
+from types import ModuleType
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path[:0] = [str(ROOT / "scripts"), str(ROOT / "hooks")]
+
+from repo_slug import origin_url, remote_path, repo_slug  # noqa: E402
+
+
+def _load(name: str, path: Path) -> ModuleType:
+    """Import a script by path under a private name, so it never clashes with another copy."""
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    loader.exec_module(module)
+    return module
+
+
+asdlc = _load("_asdlc_board", ROOT / "scripts" / "asdlc")
+rules = _load("_asdlc_load_rules", ROOT / "hooks" / "load_rules.py")
+
+REQUIRED_COMMANDS = ("build", "test", "lint")
+COMMAND_KEYS = frozenset({"run", "verified", "cwd", "needs"})
+LAYER_KEYS = frozenset({"paths", "summary", "depends_on"})
+RULE_LIMIT = 2_500  # a quarter of the loader's 10,000-character cap, shared by every rule delivered at once
+TAIL_LINES = 40
+DEFAULT_TIMEOUT = 1800
+MARKETPLACE = ".claude-plugin/marketplace.json"
+_SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
+_PLUGIN_ROOT_REF = re.compile(r"\{plugin_root\}/([^\s`'\"<>()\[\]]+)")
+
+
+class PluginError(Exception):
+    """A refusal or failure the person can act on; its message says what to do."""
+
+
+@dataclass(frozen=True)
+class Finding:
+    where: str  # a path relative to the tasks repository
+    problem: str  # what is wrong and what to do about it
+
+    def __str__(self) -> str:
+        return f"{self.where}: {self.problem}"
+
+
+@dataclass(frozen=True)
+class PluginFiles:
+    """One plugin as read from disk: file texts, None where a file is missing."""
+
+    slug: str
+    manifest: str | None
+    marketplace: str | None
+    layers: str | None
+    commands: str | None
+    rules: frozendict[str, str]  # file name -> text
+    skills: frozendict[str, str | None]  # folder name -> SKILL.md text
+    files: frozenset[str]  # every file, relative to the plugin's folder
+
+
+# --- the logic: data in, data out ------------------------------------------------------
+
+
+def display_name(remote: str) -> str:
+    """`owner/repo` from a remote URL, for people to read."""
+    parts = [part for part in remote_path(remote).replace("\\", "/").split("/") if part]
+    return "/".join([*parts[-2:-1], parts[-1].removesuffix(".git")]) if parts else remote
+
+
+def onboarding_path(board: Path, slug: str) -> Path:
+    """The worktree of the tasks repository where a plugin is made: beside the board clone."""
+    return board.parent / f"{board.name}.worktrees" / f"plugin-{slug}"
+
+
+def plugin_entry(slug: str, description: str) -> dict[str, str]:
+    return {"name": slug, "source": f"./plugins/{slug}", "description": description}
+
+
+def skeleton(slug: str, display: str) -> dict[str, str]:
+    """The empty plugin, file by file, relative to `plugins/<slug>/`."""
+    description = f"Conventions, layers and verified commands for {display}."
+    manifest = {"name": slug, "version": "0.1.0", "description": description, "author": {"name": "The team"}}
+    layers = (
+        f"# Layers of {display}, as globs relative to its root. The first layer whose globs match a\n"
+        "# file is its layer, so narrow layers go first. Each layer has one rule in rules/ whose\n"
+        "# frontmatter says `layer: <name>` and uses the same globs. Format: docs/repo-plugins.md.\n"
+        "#\n"
+        "# [layers.<name>]\n"
+        '# paths = ["src/<folder>/**"]\n'
+        '# summary = "What lives here, and what it must not depend on."\n'
+        '# depends_on = ["<another layer>"]\n'
+    )
+    commands = (
+        f"# Verified commands for {display}. Each runs from the repository's root unless `cwd` says\n"
+        "# otherwise. A command becomes verified only by running it, never by hand:\n"
+        "#   asdlc-plugin verify-command <code repository> <name>\n"
+        "# writes today's date to `verified` when it passes on a clean checkout of the default branch.\n"
+        "\n[build]\nrun = \"\"\n\n[test]\nrun = \"\"\n\n[lint]\nrun = \"\"\n"
+    )
+    return {
+        ".claude-plugin/plugin.json": json.dumps(manifest, indent=2) + "\n",
+        "layers.toml": layers,
+        "commands.toml": commands,
+    }
+
+
+def marketplace_with(text: str, entry: Mapping[str, str]) -> str:
+    """The marketplace with `entry` listed: replacing the plugin of the same name, else appended.
+
+    Raises:
+        PluginError: the marketplace isn't a JSON object with a `plugins` list.
+    """
+    try:
+        market = json.loads(text)
+    except ValueError as error:
+        raise PluginError(f"{MARKETPLACE} is not valid JSON ({error}); fix it in the tasks repository first") from None
+    if not isinstance(market, dict) or not isinstance(market.get("plugins", []), list):
+        raise PluginError(f"{MARKETPLACE} must be a JSON object whose `plugins` is a list")
+    plugins = [p for p in market.get("plugins", []) if not (isinstance(p, dict) and p.get("name") == entry["name"])]
+    position = next((n for n, p in enumerate(market.get("plugins", [])) if isinstance(p, dict) and p.get("name") == entry["name"]), len(plugins))
+    plugins.insert(position, dict(entry))
+    return json.dumps(market | {"plugins": plugins}, indent=2, ensure_ascii=False) + "\n"
+
+
+def listed_entry(text: str, slug: str) -> dict[str, str] | None:
+    try:
+        market = json.loads(text)
+    except ValueError:
+        return None
+    plugins = market.get("plugins", []) if isinstance(market, dict) else []
+    return next((p for p in plugins if isinstance(p, dict) and p.get("name") == slug), None) if isinstance(plugins, list) else None
+
+
+_TABLE = re.compile(r"^\s*\[\s*([A-Za-z0-9_-]+)\s*\]\s*(?:#.*)?$")
+_ANY_TABLE = re.compile(r"^\s*\[")
+_VERIFIED_LINE = re.compile(r"^\s*verified\s*=")
+
+
+def _without(data: Mapping[str, object], table: str) -> dict[str, object]:
+    return {name: ({k: v for k, v in value.items() if k != "verified"} if name == table and isinstance(value, dict) else value)
+            for name, value in data.items()}
+
+
+def with_verified(text: str, table: str, day: date) -> str:
+    """`commands.toml` with `verified = <day>` in one table, every other line as it was.
+
+    Raises:
+        PluginError: the file isn't valid TOML, has no such table, or the edit would change
+        anything but that one date.
+    """
+    try:
+        before = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        raise PluginError(f"commands.toml is not valid TOML: {error}") from None
+    lines = text.splitlines()
+    start = next((n for n, line in enumerate(lines) if (m := _TABLE.match(line)) and m.group(1) == table), None)
+    if start is None or not isinstance(before.get(table), dict):
+        raise PluginError(f"commands.toml has no [{table}] table: add it with its `run` command first")
+    end = next((n for n in range(start + 1, len(lines)) if _ANY_TABLE.match(lines[n])), len(lines))
+    line = f"verified = {day.isoformat()}"
+    if existing := [n for n in range(start + 1, end) if _VERIFIED_LINE.match(lines[n])]:
+        lines[existing[0]] = line
+    else:
+        last = max((n for n in range(start, end) if lines[n].strip() and not lines[n].lstrip().startswith("#")), default=start)
+        lines.insert(last + 1, line)
+    updated = "\n".join(lines) + "\n"
+    try:
+        after = tomllib.loads(updated)
+    except tomllib.TOMLDecodeError:
+        after = {}
+    if after.get(table, {}).get("verified") != day or _without(after, table) != _without(before, table):
+        raise PluginError(f"could not write `verified` into [{table}] without changing anything else; "
+                          f"write [{table}] as plain `key = value` lines and run this again")
+    return updated
+
+
+def tail(output: str, count: int = TAIL_LINES) -> str:
+    return "\n".join(output.rstrip().splitlines()[-count:])
+
+
+def _glob_problem(glob: str) -> str | None:
+    if glob.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", glob):
+        return f"`{glob}` is absolute; globs are relative to the code repository's root"
+    if ".." in glob.replace("\\", "/").split("/"):
+        return f"`{glob}` climbs out with `..`; globs are relative to the code repository's root"
+    return None
+
+
+def check_manifest(text: str | None, slug: str, where: str) -> list[Finding]:
+    if text is None:
+        return [Finding(where, "missing: run asdlc-plugin scaffold to create it")]
+    try:
+        manifest = json.loads(text)
+    except ValueError as error:
+        return [Finding(where, f"is not valid JSON: {error}")]
+    if not isinstance(manifest, dict):
+        return [Finding(where, "must be a JSON object")]
+    findings = []
+    if manifest.get("name") != slug:
+        findings.append(Finding(where, f"`name` is {manifest.get('name')!r}; it must be the slug, {slug!r}, so the loader and the marketplace agree"))
+    if not isinstance(manifest.get("version"), str) or not _SEMVER.match(manifest["version"]):
+        findings.append(Finding(where, "`version` must be MAJOR.MINOR.PATCH, such as 0.1.0"))
+    if not isinstance(manifest.get("description"), str) or not manifest["description"].strip():
+        findings.append(Finding(where, "`description` is empty: say what the plugin knows about the repository"))
+    return findings
+
+
+def check_marketplace(text: str | None, slug: str) -> list[Finding]:
+    if text is None:
+        return [Finding(MARKETPLACE, "missing: this is not a tasks repository made by asdlc init-board")]
+    entry = listed_entry(text, slug)
+    if entry is None:
+        return [Finding(MARKETPLACE, f"does not list {slug!r}: run asdlc-plugin scaffold, which adds it")]
+    if entry.get("source") != f"./plugins/{slug}":
+        return [Finding(MARKETPLACE, f"lists {slug!r} with source {entry.get('source')!r}; it must be './plugins/{slug}'")]
+    return []
+
+
+def check_layers(text: str | None, where: str) -> tuple[dict[str, tuple[str, ...]], list[Finding]]:
+    """The layers in file order, and what is wrong with them. No file means no layers."""
+    if text is None:
+        return {}, []
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        return {}, [Finding(where, f"is not valid TOML: {error}")]
+    findings = [Finding(where, f"`{key}` is not part of the format; everything goes under [layers.<name>]") for key in data if key != "layers"]
+    tables = data.get("layers", {})
+    if not isinstance(tables, dict):
+        return {}, findings + [Finding(where, "`layers` must be a table of [layers.<name>] tables")]
+    layers: dict[str, tuple[str, ...]] = {}
+    for name, table in tables.items():
+        label = f"[layers.{name}]"
+        if not isinstance(table, dict):
+            findings.append(Finding(where, f"{label} must be a table"))
+            continue
+        paths = table.get("paths")
+        if not isinstance(paths, list) or not paths or not all(isinstance(p, str) and p.strip() for p in paths):
+            findings.append(Finding(where, f"{label} needs `paths`, a non-empty list of globs relative to the code repository's root"))
+            continue
+        findings += [Finding(where, f"{label} {problem}") for p in paths if (problem := _glob_problem(p))]
+        findings += [Finding(where, f"{label} has `{key}`, which the format doesn't define (paths, summary, depends_on)") for key in table if key not in LAYER_KEYS]
+        if "summary" in table and not (isinstance(table["summary"], str) and table["summary"].strip()):
+            findings.append(Finding(where, f"{label} `summary` must be a sentence saying what lives there"))
+        layers[name] = tuple(paths)
+    for name, table in tables.items():
+        depends = table.get("depends_on", []) if isinstance(table, dict) else []
+        if not isinstance(depends, list) or not all(isinstance(d, str) for d in depends):
+            findings.append(Finding(where, f"[layers.{name}] `depends_on` must be a list of layer names"))
+            continue
+        findings += [Finding(where, f"[layers.{name}] depends on {d!r}, which is not a layer here") for d in depends if d not in tables]
+    return layers, findings
+
+
+def check_commands(text: str | None, where: str, today: date, repo_hint: str) -> list[Finding]:
+    if text is None:
+        return [Finding(where, "missing: run asdlc-plugin scaffold to create it")]
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        return [Finding(where, f"is not valid TOML: {error}")]
+    findings = [Finding(where, f"[{name}] is missing: the build, test and lint commands are required") for name in REQUIRED_COMMANDS if name not in data]
+    for name, table in data.items():
+        label = f"[{name}]"
+        if not isinstance(table, dict):
+            findings.append(Finding(where, f"`{name}` must be a [{name}] table with `run` and `verified`"))
+            continue
+        findings += [Finding(where, f"{label} has `{key}`, which the format doesn't define (run, verified, cwd, needs)") for key in table if key not in COMMAND_KEYS]
+        run = table.get("run")
+        if not isinstance(run, str) or not run.strip():
+            findings.append(Finding(where, f"{label} has no `run` command: find it in the repository's CI, manifests or README, write it here, then prove it"))
+        cwd = table.get("cwd")
+        if cwd is not None and (not isinstance(cwd, str) or not cwd.strip() or _glob_problem(cwd)):
+            findings.append(Finding(where, f"{label} `cwd` must be a folder relative to the code repository's root"))
+        needs = table.get("needs")
+        if needs is not None and (not isinstance(needs, list) or not needs or not all(isinstance(n, str) and n.strip() for n in needs)):
+            findings.append(Finding(where, f"{label} `needs` must be a list saying, in words, what must be on the machine first"))
+        verified = table.get("verified")
+        if verified is None:
+            if needs is None:
+                findings.append(Finding(where, f"{label} is not verified: prove it with asdlc-plugin verify-command {repo_hint} {name}, which writes the date when it passes"))
+        elif not isinstance(verified, date) or isinstance(verified, datetime):
+            findings.append(Finding(where, f"{label} `verified` must be a bare TOML date such as 2026-10-22, written by asdlc-plugin verify-command"))
+        elif verified > today:
+            findings.append(Finding(where, f"{label} `verified` is {verified}, after today; only asdlc-plugin verify-command writes it"))
+    return findings
+
+
+@dataclass(frozen=True)
+class ParsedRule:
+    name: str
+    paths: tuple[str, ...]
+    layer: str | None
+    body: str
+
+
+def parse_rules(texts: Mapping[str, str], where: str) -> tuple[list[ParsedRule], list[Finding]]:
+    parsed, findings = [], []
+    for name, text in sorted(texts.items()):
+        at = f"{where}/{name}"
+        try:
+            rule = rules.parse_rule(Path(name), "repo", text)
+        except rules.RuleError as error:
+            findings.append(Finding(at, str(error).removeprefix(f"{name}: ")))
+            continue
+        layer = asdlc.frontmatter(text).get("layer")
+        parsed.append(ParsedRule(name, rule.paths, layer if isinstance(layer, str) and layer else None, rule.body))
+    return parsed, findings
+
+
+def check_rules(parsed: Sequence[ParsedRule], layers: Mapping[str, Sequence[str]], plugin: PluginFiles, where: str) -> list[Finding]:
+    findings = []
+    for rule in parsed:
+        at = f"{where}/{rule.name}"
+        if not rule.paths:
+            findings.append(Finding(at, "has no `paths` frontmatter: a repository rule says which files it applies to, as globs relative to the code repository's root"))
+        findings += [Finding(at, problem) for glob in rule.paths if (problem := _glob_problem(glob))]
+        first = next((line.strip() for line in rule.body.splitlines() if line.strip() and not line.lstrip().startswith("#")), "")
+        if not first.startswith("Applies to"):
+            findings.append(Finding(at, "must start, after its heading, with one line saying when it applies: \"Applies to ...\""))
+        if len(rule.body) > RULE_LIMIT:
+            findings.append(Finding(at, f"is {len(rule.body):,} characters; keep a rule under {RULE_LIMIT:,} (rules delivered together share a 10,000-character cap) and move procedure into a skill"))
+        if rule.layer is not None:
+            if rule.layer not in layers:
+                findings.append(Finding(at, f"names layer {rule.layer!r}, which layers.toml doesn't define"))
+            elif sorted(rule.paths) != sorted(layers[rule.layer]):
+                findings.append(Finding(at, f"is the {rule.layer!r} layer's rule, so its `paths` must be that layer's globs from layers.toml: {list(layers[rule.layer])}"))
+        for ref in _PLUGIN_ROOT_REF.findall(rule.body):
+            ref = ref.rstrip(".,;:")
+            if ref not in plugin.files and not any(f.startswith(ref.rstrip("/") + "/") for f in plugin.files):
+                findings.append(Finding(at, f"points at {{plugin_root}}/{ref}, which is not in the plugin"))
+        for skill in re.findall(rf"\b{re.escape(plugin.slug)}:([a-z0-9][a-z0-9-]*)", rule.body):
+            if skill not in plugin.skills:
+                findings.append(Finding(at, f"names the skill {plugin.slug}:{skill}, but there is no skills/{skill}/SKILL.md"))
+    named = {rule.layer for rule in parsed if rule.layer}
+    findings += [Finding(f"{where}/", f"layer {name!r} has no rule (one with `layer: {name}`), so an agent working there is never told it is in that layer: write its rule, or remove the layer")
+                 for name in layers if name not in named]
+    if not any(rule.name.startswith("testing-") for rule in parsed):
+        findings.append(Finding(f"{where}/", "has no testing rule: draft rules/testing-<language>.md from the tests the repository already has"))
+    return findings
+
+
+def check_skills(skills: Mapping[str, str | None], where: str) -> list[Finding]:
+    findings = []
+    for folder, text in sorted(skills.items()):
+        at = f"{where}/{folder}/SKILL.md"
+        if text is None:
+            findings.append(Finding(at, "missing: a skill folder holds a SKILL.md, or remove the folder"))
+            continue
+        fields = asdlc.frontmatter(text)
+        if fields.get("name", folder) != folder:
+            findings.append(Finding(at, f"`name` is {fields.get('name')!r}; leave it out or make it the folder's name, {folder!r}"))
+        description = fields.get("description")
+        if not isinstance(description, str) or len(description) < 80:
+            findings.append(Finding(at, "needs a `description` saying what it does, when to load it, and what goes wrong without it"))
+    return findings
+
+
+def check_against_files(layers: Mapping[str, Sequence[str]], parsed: Sequence[ParsedRule], tracked: Sequence[str], where: str) -> list[Finding]:
+    """What the layer map and the rules claim, against the files the code repository has."""
+    findings = []
+    owner = {path: rules.layer_of(path, layers) for path in tracked}
+    for name, globs in layers.items():
+        matched = [path for path in tracked if rules.matches(path, globs)]
+        if not matched:
+            findings.append(Finding(f"{where}/layers.toml", f"[layers.{name}] matches no file in the repository: map only folders the code has"))
+        elif not any(owner[path] == name for path in matched):
+            earlier = sorted({owner[path] for path in matched if owner[path]})
+            findings.append(Finding(f"{where}/layers.toml", f"[layers.{name}] never applies: every file it matches is in an earlier layer ({', '.join(earlier)}); put narrow layers first"))
+    for rule in parsed:
+        if rule.paths and not any(rules.matches(path, rule.paths) for path in tracked):
+            findings.append(Finding(f"{where}/rules/{rule.name}", "its `paths` match no file in the repository, so it would never be delivered"))
+    return findings
+
+
+def check_plugin(plugin: PluginFiles, today: date, tracked: Sequence[str] | None, repo_hint: str) -> list[Finding]:
+    """Every finding for one plugin against docs/repo-plugins.md."""
+    where = f"plugins/{plugin.slug}"
+    layers, layer_findings = check_layers(plugin.layers, f"{where}/layers.toml")
+    parsed, rule_findings = parse_rules(plugin.rules, f"{where}/rules")
+    findings = [
+        *check_manifest(plugin.manifest, plugin.slug, f"{where}/.claude-plugin/plugin.json"),
+        *check_marketplace(plugin.marketplace, plugin.slug),
+        *layer_findings,
+        *check_commands(plugin.commands, f"{where}/commands.toml", today, repo_hint),
+        *rule_findings,
+        *check_rules(parsed, layers, plugin, f"{where}/rules"),
+        *check_skills(plugin.skills, f"{where}/skills"),
+    ]
+    if tracked is not None:
+        findings += check_against_files(layers, parsed, tracked, where)
+    return findings
+
+
+def record(plugin: PluginFiles, commit: str) -> str:
+    """What was published, from the files themselves, for the task's notes."""
+    try:
+        commands = tomllib.loads(plugin.commands or "")
+    except tomllib.TOMLDecodeError:
+        commands = {}
+    layers, _ = check_layers(plugin.layers, "")
+
+    def command(name: str, table: Mapping[str, object]) -> str:
+        if "verified" in table:
+            state = f"verified {table['verified']}"
+        else:
+            state = "not verified" + (f" (needs: {'; '.join(map(str, table['needs']))})" if isinstance(table.get("needs"), list) else "")
+        return f"- {name}: `{table.get('run', '')}`" + (f" in {table['cwd']}" if table.get("cwd") else "") + f", {state}"
+
+    lines = [f"Plugin {plugin.slug} published to the tasks repository at {commit[:12]}.", "Commands:"]
+    lines += [command(name, table) for name, table in commands.items() if isinstance(table, dict)]
+    lines += ["Layers:" if layers else "Layers: none"] + [f"- {name}: {', '.join(globs)}" for name, globs in layers.items()]
+    lines.append(f"Rules: {', '.join(sorted(plugin.rules)) or 'none'}")
+    lines.append(f"Skills: {', '.join(f'{plugin.slug}:{name}' for name in sorted(plugin.skills)) or 'none'}")
+    return "\n".join(lines)
+
+
+def validation_result(returncode: int, output: str) -> bool | None:
+    """`claude plugin validate`: True passed, False failed, None when it didn't run."""
+    if "Validation passed" in output and returncode == 0:
+        return True
+    if "Validation failed" in output:
+        return False
+    return None
+
+
+def validation_errors(output: str) -> str:
+    """The validator's own errors, without the plugin directory's submission advice."""
+    return output.split("Plugin directory checks")[0].strip()
+
+
+# --- the shell: git, files and subprocesses ---------------------------------------------
+
+
+def _say(message: str) -> None:
+    print(f"asdlc-plugin: {message}", file=sys.stderr, flush=True)
+
+
+def _git(directory: Path, *args: str, env: Mapping[str, str] | None = None, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], cwd=directory, env=dict(env) if env is not None else None, input=stdin, capture_output=True, text=True)
+
+
+def _git_ok(directory: Path, *args: str, env: Mapping[str, str] | None = None, stdin: str | None = None) -> str:
+    """Raises: PluginError: git failed."""
+    done = _git(directory, *args, env=env, stdin=stdin)
+    if done.returncode != 0:
+        raise PluginError(f"git {' '.join(args)} failed in {directory}: {done.stderr.strip()}")
+    return done.stdout.strip()
+
+
+@dataclass(frozen=True)
+class Repo:
+    root: Path
+    slug: str
+    display: str
+
+
+def code_repo(path: Path) -> Repo:
+    """Raises: PluginError: not a git repository, or no `origin` to name it by."""
+    top = _git(path, "rev-parse", "--show-toplevel") if path.is_dir() else None
+    if top is None or top.returncode != 0:
+        raise PluginError(f"{path} is not a git repository")
+    root = Path(top.stdout.strip()).resolve()
+    url = origin_url(root)
+    slug = repo_slug(url) if url else None
+    if url is None or slug is None:
+        raise PluginError(f"{root} has no `origin` remote naming an owner and repository, and its plugin is named from it: git remote add origin <url>")
+    return Repo(root, slug, display_name(url))
+
+
+def _is_board(path: Path) -> bool:
+    return (path / "backlog" / "config.yml").is_file()
+
+
+def board_for_repo(explicit: str | None, repo: Path, environ: Mapping[str, str]) -> Path:
+    """--board, else $ASDLC_BOARD, else `git config asdlc.board` in the code repository: the
+    order `asdlc` and the rule loader use (`asdlc.board_setting`).
+
+    Raises:
+        PluginError: none is set, or it is not a board.
+    """
+    configured = _git(repo, "config", "--get", "asdlc.board")
+    found = asdlc.board_setting(explicit, environ, configured.stdout if configured.returncode == 0 else "")
+    if found is None:
+        raise PluginError(f"no tasks repository for {repo}: run `git config asdlc.board <path to your clone of it>` there, or pass --board")
+    raw, source = found
+    path = Path(raw).expanduser()
+    path = (path if path.is_absolute() else repo / path).resolve()
+    if not _is_board(path):
+        raise PluginError(f"{path} (from {source}) is not a tasks repository: it has no backlog/config.yml")
+    return path
+
+
+def board_for_slug(explicit: str | None, repo: Path | None) -> Path:
+    """Through the code repository when there is one, else as `asdlc` looks it up.
+
+    Raises:
+        PluginError: no board.
+    """
+    if repo is not None:
+        return board_for_repo(explicit, code_repo(repo).root, os.environ)
+    try:
+        return asdlc.resolve_board(explicit, Path.cwd())
+    except asdlc.AsdlcError as error:
+        raise PluginError(str(error)) from None
+
+
+def _board_env() -> dict[str, str]:
+    return asdlc.hooks_off(os.environ)
+
+
+def _fetch_board(board: Path) -> str | None:
+    """Fetch the tasks repository's main; None, or why it couldn't."""
+    done = _git(board, "fetch", "--quiet", "origin", asdlc.BOARD_BRANCH, env=_board_env())
+    return None if done.returncode == 0 else done.stderr.strip() or "git fetch failed"
+
+
+def _on_ref(directory: Path, ref: str, path: str) -> str | None:
+    """The object id of `path` at `ref`, or None when it isn't there."""
+    done = _git(directory, "rev-parse", "--verify", "--quiet", f"{ref}:{path}")
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def _read(path: Path) -> str | None:
+    return path.read_text() if path.is_file() else None
+
+
+def read_plugin(tasks_root: Path, slug: str) -> PluginFiles:
+    folder = tasks_root / "plugins" / slug
+    files = frozenset(p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file()) if folder.is_dir() else frozenset()
+    skills_dir = folder / "skills"
+    return PluginFiles(
+        slug=slug,
+        manifest=_read(folder / ".claude-plugin" / "plugin.json"),
+        marketplace=_read(tasks_root / MARKETPLACE),
+        layers=_read(folder / "layers.toml"),
+        commands=_read(folder / "commands.toml"),
+        rules=frozendict({p.name: p.read_text() for p in sorted((folder / "rules").glob("*.md"))}),
+        skills=frozendict({p.name: _read(p / "SKILL.md") for p in sorted(skills_dir.iterdir()) if p.is_dir()} if skills_dir.is_dir() else {}),
+        files=files,
+    )
+
+
+def _status(explicit: str | None, path: Path, as_json: bool) -> int:
+    repo = code_repo(path)
+    board = board_for_repo(explicit, repo.root, os.environ)
+    fetch_error = _fetch_board(board)
+    folder = f"plugins/{repo.slug}"
+    published = (board / folder / ".claude-plugin" / "plugin.json").is_file() or _on_ref(board, f"origin/{asdlc.BOARD_BRANCH}", folder) is not None
+    worktree = onboarding_path(board, repo.slug)
+    onboarding = str(worktree) if worktree.is_dir() else None
+    if as_json:
+        print(json.dumps({"repo": str(repo.root), "slug": repo.slug, "board": str(board), "plugin": folder,
+                          "published": published, "onboarding": onboarding, "fetched": fetch_error is None}))
+    else:
+        print(f"{repo.slug}: {'published' if published else 'no plugin yet'} in {board / folder}")
+        if onboarding:
+            print(f"onboarding in progress at {Path(onboarding) / folder}")
+        elif not published:
+            print("onboard it with the onboard-repo skill, starting with: asdlc-plugin scaffold " + shlex.quote(str(repo.root)))
+    if fetch_error:
+        _say(f"could not fetch the tasks repository, so this is as of the last fetch: {fetch_error}")
+    return 0
+
+
+def _scaffold(explicit: str | None, path: Path) -> int:
+    repo = code_repo(path)
+    board = board_for_repo(explicit, repo.root, os.environ)
+    worktree = onboarding_path(board, repo.slug)
+    if worktree.is_dir():
+        _say(f"continuing the onboarding already open at {worktree}")
+    else:
+        if fetch_error := _fetch_board(board):
+            _say(f"could not fetch the tasks repository; starting from the last fetched origin/{asdlc.BOARD_BRANCH}: {fetch_error}")
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+        _git_ok(board, "worktree", "add", "--quiet", "--detach", str(worktree), f"origin/{asdlc.BOARD_BRANCH}", env=_board_env())
+    folder = worktree / "plugins" / repo.slug
+    created = []
+    for relative, text in skeleton(repo.slug, repo.display).items():
+        target = folder / relative
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
+            created.append(f"plugins/{repo.slug}/{relative}")
+    for empty in ("rules", "skills"):
+        (folder / empty).mkdir(exist_ok=True)
+    market = worktree / MARKETPLACE
+    if not market.is_file():
+        raise PluginError(f"{market} is missing: this tasks repository was not made by asdlc init-board; run it there to add the marketplace")
+    if listed_entry(market.read_text(), repo.slug) is None:
+        manifest = json.loads((folder / ".claude-plugin" / "plugin.json").read_text())
+        market.write_text(marketplace_with(market.read_text(), plugin_entry(repo.slug, str(manifest.get("description", "")))))
+        created.append(f"{MARKETPLACE} (the {repo.slug} entry)")
+    print(f"plugin for {repo.display}: {folder}")
+    print("created: " + (", ".join(created) if created else "nothing; every file was already there"))
+    print(f"next: fill it in, prove each command with asdlc-plugin verify-command {shlex.quote(str(repo.root))} <build|test|lint>, "
+          f"then asdlc-plugin check {repo.slug} --repo {shlex.quote(str(repo.root))}")
+    return 0
+
+
+def verify_checkout_path(repo: Path) -> Path:
+    """Where commands are verified when the clone itself isn't clean at the default branch."""
+    return repo.parent / f"{repo.name}.worktrees" / "asdlc-verify"
+
+
+def _verification_checkout(repo: Path) -> Path:
+    """A checkout with no uncommitted changes whose HEAD is origin's default branch: the clone
+    itself when it is one, else a detached worktree beside it, kept so installs carry over.
+
+    Raises:
+        PluginError: there is no origin/<default branch>, or git could not make the worktree.
+    """
+    base = asdlc.default_branch(repo)
+    if _git(repo, "fetch", "--quiet", "origin", base).returncode != 0:
+        _say(f"could not fetch origin/{base}; verifying against the last fetched copy")
+    tip = _git(repo, "rev-parse", "--verify", "--quiet", f"origin/{base}").stdout.strip()
+    if not tip:
+        raise PluginError(f"{repo} has no origin/{base} to verify against")
+    dirty = _git(repo, "status", "--porcelain", "--untracked-files=no").stdout.strip()
+    head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    if not dirty and head == tip:
+        return repo
+    path = verify_checkout_path(repo)
+    if path.is_dir():
+        _git_ok(path, "checkout", "--quiet", "--force", "--detach", tip)
+    else:
+        _git_ok(repo, "worktree", "add", "--quiet", "--detach", str(path), tip)
+    why = "has uncommitted changes" if dirty else f"is at {head[:12]}, not origin/{base}"
+    _say(f"{repo} {why}, so this runs in a clean checkout of origin/{base} at {path}, kept for the next command")
+    return path
+
+
+def _verify_command(explicit: str | None, path: Path, name: str, timeout: int) -> int:
+    repo = code_repo(path)
+    board = board_for_repo(explicit, repo.root, os.environ)
+    worktree = onboarding_path(board, repo.slug)
+    commands_file = worktree / "plugins" / repo.slug / "commands.toml"
+    if not commands_file.is_file():
+        raise PluginError(f"no onboarding is open for {repo.slug}: run asdlc-plugin scaffold {shlex.quote(str(repo.root))} first")
+    text = commands_file.read_text()
+    try:
+        table = tomllib.loads(text).get(name)
+    except tomllib.TOMLDecodeError as error:
+        raise PluginError(f"{commands_file} is not valid TOML: {error}") from None
+    if not isinstance(table, dict) or not isinstance(table.get("run"), str) or not table["run"].strip():
+        raise PluginError(f"[{name}] in {commands_file} has no `run` command: write it there first")
+    checkout = _verification_checkout(repo.root)
+    folder = checkout / str(table.get("cwd", "") or ".")
+    if not folder.resolve().is_relative_to(checkout) or not folder.is_dir():
+        raise PluginError(f"[{name}] `cwd` is {table.get('cwd')!r}, which is not a folder in the repository")
+    started = time.monotonic()
+    try:
+        done = subprocess.run(table["run"], shell=True, cwd=folder, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True, timeout=timeout)
+        code, output = done.returncode, done.stdout
+    except subprocess.TimeoutExpired as error:
+        code, output = None, error.output.decode(errors="replace") if isinstance(error.output, bytes) else (error.output or "")
+    seconds = time.monotonic() - started
+    changed = _git(checkout, "status", "--porcelain", "--untracked-files=no").stdout.strip()
+    if code != 0 or changed:
+        why = (f"timed out after {timeout}s" if code is None else f"exited {code}") if code != 0 else f"changed tracked files, and a check must not change the code:\n{changed}"
+        print(f"[{name}] NOT verified: `{table['run']}` {why} ({seconds:.1f}s). commands.toml is unchanged.")
+        if output.strip():
+            print(f"--- last {TAIL_LINES} lines of its output ---\n{tail(output)}")
+        return 1
+    commands_file.write_text(with_verified(text, name, date.today()))
+    print(f"[{name}] verified {date.today().isoformat()}: `{table['run']}` exited 0 in {seconds:.1f}s in {folder}")
+    return 0
+
+
+def _validator() -> list[str] | str:
+    """The command that runs `claude plugin validate`, or why there is none."""
+    if (configured := os.environ.get("ASDLC_CLAUDE")) is not None:
+        return shlex.split(configured) or "ASDLC_CLAUDE is set but empty"
+    if found := shutil.which("claude"):
+        return [found]
+    if npx := shutil.which("npx"):
+        return [npx, "--yes", "@anthropic-ai/claude-code"]
+    return "neither claude nor npx is installed"
+
+
+def _validate(folders: Sequence[Path], tasks_root: Path) -> tuple[list[Finding], list[str]]:
+    """`claude plugin validate` on each folder: findings, and notes when it couldn't run."""
+    command = _validator()
+    if isinstance(command, str):
+        return [], [f"claude plugin validate was not run: {command}"]
+    findings, notes = [], []
+    for folder in folders:
+        label = folder.relative_to(tasks_root).as_posix() if folder != tasks_root else "the tasks repository"
+        try:
+            done = subprocess.run([*command, "plugin", "validate", str(folder)], capture_output=True, text=True, timeout=300)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            notes.append(f"claude plugin validate could not run on {label}: {error}")
+            continue
+        output = done.stdout + done.stderr
+        match validation_result(done.returncode, output):
+            case True:
+                notes.append(f"claude plugin validate passed on {label}")
+            case False:
+                findings.append(Finding(label if folder != tasks_root else MARKETPLACE, f"claude plugin validate failed:\n{validation_errors(output)}"))
+            case None:
+                notes.append(f"claude plugin validate could not run on {label} (exit {done.returncode}): {tail(output, 5)}")
+    return findings, notes
+
+
+def run_check(board: Path, slug: str, repo: Path | None) -> tuple[Path, list[Finding], list[str]]:
+    """Check the plugin where it is being made, else where it is published.
+
+    Raises:
+        PluginError: there is no such plugin, or --repo is not that repository.
+    """
+    tracked: list[str] | None = None
+    if repo is not None:
+        code = code_repo(repo)
+        if code.slug != slug:
+            raise PluginError(f"--repo {code.root} is {code.slug}, not {slug}")
+        tracked = [path for path in _git_ok(code.root, "ls-files", "-z").split("\0") if path]
+    worktree = onboarding_path(board, slug)
+    tasks_root = worktree if worktree.is_dir() else board
+    if not (tasks_root / "plugins" / slug).is_dir():
+        raise PluginError(f"there is no plugins/{slug} in {board}, and no onboarding open for it: run asdlc-plugin scaffold <code repository>")
+    hint = shlex.quote(str(repo)) if repo else "<code repository>"
+    findings = check_plugin(read_plugin(tasks_root, slug), date.today(), tracked, hint)
+    notes = [] if repo else ["--repo was not given, so layers and rules were not checked against the repository's files"]
+    found, ran = _validate([tasks_root / "plugins" / slug, tasks_root], tasks_root)
+    return tasks_root, findings + found, notes + ran
+
+
+def _check(explicit: str | None, slug: str, repo: Path | None) -> int:
+    tasks_root, findings, notes = run_check(board_for_slug(explicit, repo), slug, repo)
+    for note in notes:
+        _say(note)
+    for finding in findings:
+        print(finding)
+    print(f"{slug}: {len(findings)} finding(s) in {tasks_root / 'plugins' / slug}" if findings else f"{slug}: clean ({tasks_root / 'plugins' / slug})")
+    return 1 if findings else 0
+
+
+def _build_commit(worktree: Path, slug: str, entry: Mapping[str, str], message: str, env: Mapping[str, str]) -> str | None:
+    """A commit on origin/main with this plugin's folder and its marketplace entry, built in a
+    temporary index so neither the worktree nor anyone else's change is touched; None when
+    origin/main already has exactly this.
+
+    Raises:
+        PluginError: git failed.
+    """
+    origin = f"origin/{asdlc.BOARD_BRANCH}"
+    git_dir = Path(_git_ok(worktree, "rev-parse", "--absolute-git-dir"))
+    index = git_dir / "asdlc-publish-index"
+    staged = {**env, "GIT_INDEX_FILE": str(index)}
+    try:
+        _git_ok(worktree, "read-tree", origin, env=staged)
+        _git_ok(worktree, "add", "-A", "--", f"plugins/{slug}", env=staged)
+        merged = marketplace_with(_git_ok(worktree, "show", f"{origin}:{MARKETPLACE}") + "\n", entry)
+        blob = _git_ok(worktree, "hash-object", "-w", "--stdin", env=staged, stdin=merged)
+        _git_ok(worktree, "update-index", "--add", "--cacheinfo", f"100644,{blob},{MARKETPLACE}", env=staged)
+        tree = _git_ok(worktree, "write-tree", env=staged)
+    finally:
+        index.unlink(missing_ok=True)
+    if tree == _git_ok(worktree, "rev-parse", f"{origin}^{{tree}}"):
+        return None
+    return _git_ok(worktree, "commit-tree", tree, "-p", origin, "-m", message, env=env)
+
+
+def _publish(explicit: str | None, slug: str, repo: Path | None) -> int:
+    board_path = board_for_slug(explicit, repo)
+    worktree = onboarding_path(board_path, slug)
+    if not worktree.is_dir():
+        raise PluginError(f"nothing to publish: no onboarding is open for {slug} at {worktree}; run asdlc-plugin scaffold <code repository>")
+    _, findings, notes = run_check(board_path, slug, repo)
+    for note in notes:
+        _say(note)
+    if findings:
+        for finding in findings:
+            print(finding)
+        raise PluginError(f"not published: {len(findings)} finding(s) above; fix them and run asdlc-plugin check {slug} until it is clean")
+    entry = listed_entry((worktree / MARKETPLACE).read_text(), slug)
+    assert entry is not None  # the check above found it
+    env = _board_env()
+    board = asdlc.open_board(board_path)
+    folder = f"plugins/{slug}"
+    base = _git_ok(worktree, "rev-parse", "HEAD")
+    rng = random.Random()
+    with asdlc._locked(board):
+        for attempt in range(1, asdlc.PUSH_ATTEMPTS + 1):
+            if fetch_error := _fetch_board(worktree):
+                raise PluginError(f"could not fetch the tasks repository, so nothing was published: {fetch_error}")
+            origin = f"origin/{asdlc.BOARD_BRANCH}"
+            if _on_ref(worktree, origin, folder) != _on_ref(worktree, base, folder):
+                raise PluginError(f"{folder} changed on {origin} since this onboarding started (someone else published it). "
+                                  f"Nothing was published. Compare {worktree / folder} with {origin}, merge by hand, then publish again.")
+            verb = "Update" if _on_ref(worktree, origin, folder) else "Add"
+            commit = _build_commit(worktree, slug, entry, f"{verb} the {slug} plugin", env)
+            if commit is None:
+                commit = _git_ok(worktree, "rev-parse", origin)
+                print(f"{slug}: origin/{asdlc.BOARD_BRANCH} already has this plugin; nothing to publish")
+                break
+            done = _git(worktree, "push", "--no-verify", "--quiet", "origin", f"{commit}:refs/heads/{asdlc.BOARD_BRANCH}", env=env)
+            match asdlc.push_outcome(done.returncode, done.stderr):
+                case asdlc.Push.PUSHED:
+                    print(f"published {folder} to origin/{asdlc.BOARD_BRANCH} ({commit[:12]})")
+                    break
+                case asdlc.Push.FAILED:
+                    raise PluginError(f"the push failed, so nothing was published; the plugin is still at {worktree}:\n{done.stderr.strip()}")
+                case asdlc.Push.RETRY:
+                    _say("someone else pushed to the tasks repository first; building on theirs and trying again")
+                    time.sleep(asdlc.backoff(attempt, rng))
+        else:
+            raise PluginError(f"gave up after {asdlc.PUSH_ATTEMPTS} attempts because others kept pushing first; nothing was published, try again")
+        try:
+            asdlc._require_ready(board)
+            asdlc._catch_up(board)
+        except asdlc.AsdlcError as error:
+            _say(f"published, but the board clone at {board_path} is not up to date yet, so the rule loader won't see the plugin "
+                 f"until the next asdlc command brings it up: {error}")
+    published = read_plugin(worktree, slug)
+    _git_ok(board_path, "worktree", "remove", "--force", str(worktree), env=env)
+    print(f"removed the onboarding worktree {worktree}")
+    print(f"--- record for the task's notes ---\n{record(published, commit)}")
+    return 0
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="asdlc-plugin", description="Onboard a code repository: its plugin in the tasks repository.")
+    parser.add_argument("--board", help="the tasks repository clone (else $ASDLC_BOARD, else git config asdlc.board)")
+    after = argparse.ArgumentParser(add_help=False)  # --board is accepted after the subcommand too
+    after.add_argument("--board", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    def add(name: str, help: str) -> argparse.ArgumentParser:
+        return commands.add_parser(name, parents=[after], help=help)
+
+    status = add("status", help="the repository's slug and whether its plugin exists")
+    status.add_argument("repo")
+    status.add_argument("--json", action="store_true")
+    add("scaffold", help="open the plugin for editing, creating its skeleton; never overwrites").add_argument("repo")
+    verify = add("verify-command", help="run one command from commands.toml and, if it passes, date it")
+    verify.add_argument("repo")
+    verify.add_argument("name")
+    verify.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"seconds (default {DEFAULT_TIMEOUT})")
+    for name, text in (("check", "check a plugin against docs/repo-plugins.md"), ("publish", "check, commit and push the plugin")):
+        sub = add(name, help=text)
+        sub.add_argument("slug")
+        sub.add_argument("--repo", help="the code repository, to check layers and rules against its files")
+    return parser
+
+
+def main(argv: Sequence[str]) -> int:
+    arguments = _parser().parse_args(argv)
+    try:
+        match arguments.command:
+            case "status":
+                return _status(arguments.board, Path(arguments.repo).expanduser().resolve(), arguments.json)
+            case "scaffold":
+                return _scaffold(arguments.board, Path(arguments.repo).expanduser().resolve())
+            case "verify-command":
+                return _verify_command(arguments.board, Path(arguments.repo).expanduser().resolve(), arguments.name, arguments.timeout)
+            case "check":
+                return _check(arguments.board, arguments.slug, Path(arguments.repo).expanduser().resolve() if arguments.repo else None)
+            case "publish":
+                return _publish(arguments.board, arguments.slug, Path(arguments.repo).expanduser().resolve() if arguments.repo else None)
+        return 2
+    except (PluginError, asdlc.AsdlcError) as error:
+        print(f"asdlc-plugin: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

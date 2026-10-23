@@ -1,0 +1,6 @@
+# An example: copy this file to devs/<your name>.yaml and change it. See README.md.
+name: example
+prefer: [acme-web-app, acme-api]
+avoid: [acme-legacy-billing]
+workers: 3
+review: true

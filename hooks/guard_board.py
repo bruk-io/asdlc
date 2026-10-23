@@ -7,20 +7,34 @@ Denied, each with the reason and the way that works instead:
 
 - Editing a file in a board's `backlog/` folder by hand. The board changes through
   `asdlc board`, so each change is committed and pushed where every agent sees it.
-- Setting a task to To Do or Done, promoting a draft, or creating a task without
-  `--draft` (it would start as accepted To Do work), with `backlog` or `asdlc board`.
-  Accepting work and closing it are a person's decisions. `asdlc release`, the tool's own
-  way of handing a claimed task back, is allowed.
+- Setting a task to To Do or Done, promoting a draft, archiving or demoting a task, or
+  creating a task without `--draft` (it would start as accepted To Do work), with `backlog`
+  or `asdlc board`, and running `asdlc accept`, `asdlc approve` or `asdlc permissions
+  --write`. Accepting work, approving plans, closing work and changing a person's Claude
+  Code settings are a person's decisions. `asdlc release` and `asdlc reap`, the
+  tool's own ways of handing a claimed task back, are allowed.
+- Setting a task In Progress or In Review, changing a task's assignees, or adding or
+  removing the review-passed or changes-requested labels, with `backlog` or `asdlc board`.
+  Claims, `asdlc finish`, `asdlc release` and `asdlc review-done` do those, checking who
+  holds the task, so a worker whose claim was reaped can't change someone else's task.
 - Editing a file in a code repository that takes its work from a board (`git config
   asdlc.board` is set) outside a claimed task's worktree, the one with a `.asdlc-task`
   marker. Work starts with a claim, so no two agents change the same thing.
-- `git push` to the default branch of such a code repository. Changes reach it through
-  review. Pushes to the board itself are how the board works, so they are allowed.
+- `git push` to the default branch of such a code repository, and any force push there.
+  Changes reach the default branch through review, and a task branch under review is never
+  rewritten. Pushes to the board itself are how the board works, so they are allowed.
+- Approving, requesting changes on or merging a pull request: `gh pr review --approve` or
+  `--request-changes` (`-a`, `-r`), `gh pr merge`, and the same through `gh api` (a pull
+  request's `/merge`, a review with event APPROVE or REQUEST_CHANGES, or the GraphQL
+  mutations that do either). Approving and merging are a person's; a review comments.
 
-Shell commands are parsed with shlex, through `&&`, `;`, `|`, subshells, `cd`, env
-assignments and `sh -c`. A shell can always do something this doesn't recognise, so it
-is a guardrail, not a wall. When the guard can't tell, it allows, logs an error and says
-so. Every decision is logged.
+Shell commands are parsed with shlex, through `&&`, `;`, `|`, subshells, loops and
+conditionals, `cd` and `git -C` (with `~` expanded), env assignments, `xargs`, and
+`sh -c`/`bash -lc`. The command `asdlc record-check` runs is judged like any other. A
+shell can always do something this doesn't recognise, so it is a guardrail, not a wall.
+When the guard can't tell (a `cd` to a variable, a request body it can't see), it allows,
+logs an error and says so. It only ever denies or allows, never asks, so it adds no
+permission prompts of its own. Every decision is logged.
 """
 
 import json
@@ -39,11 +53,17 @@ from decision_log import Verdict, current_branch, decision, project_dir, record
 HOOK = "guard_board"
 MARKER = ".asdlc-task"
 BOARD_FOLDER = "backlog"
-PERSON_STATUSES = frozendict({"todo": "To Do", "done": "Done"})
+STATUSES = frozendict({"todo": "To Do", "done": "Done", "inprogress": "In Progress", "inreview": "In Review"})
+PERSON_STATUSES = frozenset({"To Do", "Done"})
+REVIEW_LABELS = frozenset({"review-passed", "changes-requested"})
+_LABEL_FLAGS = frozenset({"-l", "--label", "--labels", "--add-label", "--remove-label"})
+_ASSIGNEE_FLAGS = frozenset({"-a", "--assignee", "--assignees"})
 _SEPARATORS = frozenset(";&|()\n`")
 _REDIRECTS = frozenset({">", ">>", "<", "<<", "<<<", ">&", "&>", "<&", ">|", "&>>"})
-_LAUNCHERS = frozenset({"env", "sudo", "command", "exec", "time", "nohup", "nice", "npx", "bunx", "uv", "uvx", "run", "python", "python3"})
-_LAUNCHER_VALUES = frozenset({"--with", "--python", "-p", "--project", "--directory", "--package", "-u", "-n"})
+_LAUNCHERS = frozenset({"env", "sudo", "command", "exec", "time", "nohup", "nice", "npx", "bunx", "uv", "uvx", "run", "python", "python3", "xargs"})
+_LAUNCHER_VALUES = frozenset({"--with", "--python", "-p", "--project", "--directory", "--package", "-u", "-n",
+                              "-I", "-P", "-L", "-d", "-E", "-s", "-a", "--max-args", "--max-procs", "--delimiter", "--arg-file"})
+_KEYWORDS = frozenset({"if", "then", "else", "elif", "fi", "for", "select", "while", "until", "do", "done", "case", "esac", "{", "}", "!"})
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
 _BACKLOG = frozenset({"backlog", "backlog.md"})
 _PUSH_VALUES = frozenset({"-o", "--push-option", "--receive-pack", "--exec", "--repo"})
@@ -70,6 +90,35 @@ class Repo:
 Lookup = Callable[[Path], Repo | None]
 
 ALLOW = Outcome(Verdict.ALLOW, "nothing the board guard covers")
+MERGE_REFUSAL = (
+    "merging a pull request is a person's decision: it is how work reaches the default branch. Leave it to the "
+    "person; a clean review labels the task review-passed for them."
+)
+APPROVAL_REFUSAL = (
+    "approving or requesting changes on a pull request is a person's decision, and an agent's review never approves. "
+    "Post the findings as a comment (gh pr comment <url> --body ..., or gh pr review <url> --comment --body ...) "
+    "and record the verdict with asdlc review-done."
+)
+_GH_REVIEW_VALUES = frozenset({"-b", "--body", "-F", "--body-file", "-R", "--repo"})
+_GH_VERDICTS = frozenset({"-a", "--approve", "-r", "--request-changes"})
+_GH_API_VALUES = frozenset({"-X", "--method", "-f", "--raw-field", "-F", "--field", "-H", "--header", "--input", "-q", "--jq",
+                            "-t", "--template", "--hostname", "-p", "--preview", "--cache"})
+_GH_API_FIELDS = frozenset({"-f", "--raw-field", "-F", "--field"})
+_PERSON_EVENTS = frozenset({"APPROVE", "REQUEST_CHANGES"})
+ACCEPT_REFUSAL = (
+    "asdlc accept promotes an intent and its draft children to accepted work, and accepting work is a "
+    "person's decision: ask the person to run asdlc accept <intent-id> in their own terminal."
+)
+
+APPROVE_REFUSAL = (
+    "asdlc approve records a person's approval of a plan, and approving a plan is the person's decision: show them the "
+    "plans and ask them to run asdlc approve <task id>... in their own terminal."
+)
+
+PERMISSIONS_REFUSAL = (
+    "asdlc permissions --write changes the person's own Claude Code settings, which is theirs to do: show them "
+    "asdlc permissions and ask them to run asdlc permissions --write in their own terminal."
+)
 
 
 # --- the logic -----------------------------------------------------------------------
@@ -114,10 +163,24 @@ def simple_commands(command: str) -> list[list[str]]:
 
 
 def _without_assignments(words: Sequence[str]) -> list[str]:
+    """The words without leading assignments and shell keywords (`do`, `then`, `{`, `!` ...), so the
+    command inside a loop or a conditional is judged like any other."""
     index = 0
-    while index < len(words) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[index]):
+    while index < len(words) and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[index]) or words[index] in _KEYWORDS):
         index += 1
     return list(words[index:])
+
+
+def directory_of(base: Path | None, raw: str) -> Path | None:
+    """Where `cd <raw>` or `git -C <raw>` leads from `base`, with `~` expanded; None when it can't be
+    told, because the path holds a variable or a command substitution."""
+    if "$" in raw or "`" in raw:
+        return None
+    if raw == "~" or raw.startswith("~/"):
+        return Path.home() / raw[2:]
+    if Path(raw).is_absolute():
+        return Path(raw)
+    return base / raw if base is not None else None
 
 
 def unwrap(words: Sequence[str]) -> list[str]:
@@ -130,32 +193,107 @@ def unwrap(words: Sequence[str]) -> list[str]:
     return words
 
 
-def status_set(arguments: Sequence[str]) -> str | None:
-    """The person's status (To Do or Done) a backlog command sets, if any."""
+def _flag_values(arguments: Sequence[str], flags: frozenset[str]) -> list[str]:
+    """The values given to any of `flags`, as `-f v`, `-fv`, `--flag v` or `--flag=v`."""
+    found = []
     for index, word in enumerate(arguments):
-        value = None
-        if word in ("-s", "--status") and index + 1 < len(arguments):
-            value = arguments[index + 1]
-        elif word.startswith("--status="):
-            value = word.partition("=")[2]
-        elif word.startswith("-s") and not word.startswith("--") and len(word) > 2:
-            value = word[2:].removeprefix("=")
-        if value is not None and (named := PERSON_STATUSES.get(re.sub(r"[\s_-]", "", value).casefold())):
+        flag, equals, value = word.partition("=")
+        if flag in flags and equals:
+            found.append(value)
+        elif word in flags and index + 1 < len(arguments):
+            found.append(arguments[index + 1])
+        elif not word.startswith("--") and len(word) > 2 and word[:2] in flags:
+            found.append(word[2:].removeprefix("="))
+    return found
+
+
+def status_set(arguments: Sequence[str]) -> str | None:
+    """The board status (To Do, In Progress, In Review or Done) a backlog command sets, if any."""
+    for value in _flag_values(arguments, frozenset({"-s", "--status"})):
+        if named := STATUSES.get(re.sub(r"[\s_-]", "", value).casefold()):
             return named
     return None
 
 
+def _action(arguments: Sequence[str]) -> tuple[str, str, list[str]]:
+    """A backlog command's entity, verb and the words after them: `task edit 1 -s x` is (task, edit, [1, -s, x])."""
+    words = [w for w in arguments]
+    positional = [index for index, word in enumerate(words) if not word.startswith("-")][:2]
+    if len(positional) < 2:
+        return (words[positional[0]] if positional else ""), "", words[positional[0] + 1:] if positional else []
+    return words[positional[0]], words[positional[1]], words[positional[1] + 1:]
+
+
+_CHANGES = frozenset({("task", "edit"), ("task", "create"), ("draft", "create"), ("draft", "edit")})
+
+
+IN_PROGRESS_REFUSAL = (
+    "a task goes In Progress only through a claim, which checks that nobody else holds it: asdlc claim <id> --as <worker>, "
+    "or asdlc next --as <worker>."
+)
+IN_REVIEW_REFUSAL = (
+    "a task goes to review only through asdlc finish <id> --as <worker> --pr <url> --notes ..., which checks that the "
+    "worker still holds it (its claim may have been reaped and taken by someone else) and records its branch."
+)
+ASSIGNEE_REFUSAL = (
+    "who holds a task changes only through asdlc claim, asdlc release, asdlc reap and asdlc review-done, which check the "
+    "holder; reserving accepted work for a person is that person's decision."
+)
+REVIEW_LABEL_REFUSAL = (
+    "the review-passed and changes-requested labels are set only by asdlc review-done (a reviewer's verdict on a review it "
+    "holds) and changes-requested is removed only by asdlc finish (handing the fixed task back to review)."
+)
+
+
+SIZE_REFUSAL = (
+    "a task's size decides whether its plan needs a person's approval and which model builds it, and an approval records the "
+    "size it approved: an agent doesn't change the size of accepted work. Ask the person to resize it; a resized task's plan "
+    "is approved again with asdlc approve. Change other labels with --add-label and --remove-label."
+)
+
+
+def _accepted_ids(rest: Sequence[str]) -> list[str]:
+    """The ids a `task edit` names that aren't drafts."""
+    ids = []
+    for word in rest:
+        if word.startswith("-"):
+            break
+        if not re.fullmatch(r"(?i)draft-\d+", word):
+            ids.append(word)
+    return ids
+
+
 def backlog_refusal(arguments: Sequence[str]) -> str | None:
-    if named := status_set(arguments):
-        return (
-            f"setting a task to {named} is a person's decision: To Do accepts work, and Done closes it "
-            "after someone who didn't do it has reviewed it. Ask the person; to hand back a task you "
-            "claimed, use asdlc release."
-        )
-    pairs = set(zip(arguments, arguments[1:]))
-    if ("draft", "promote") in pairs or ("task", "promote") in pairs:
+    """Why an agent may not run this backlog command, or None. Listings, views and searches are
+    never refused: the status, label and assignee rules apply only to commands that change a task."""
+    entity, verb, rest = _action(arguments)
+    if (entity, verb) in (("draft", "promote"), ("task", "promote")):
         return "promoting a draft accepts it as work, which is a person's decision: ask the person to promote it."
-    if ("task", "create") in pairs and "--draft" not in arguments:
+    if (entity, verb) in (("task", "archive"), ("task", "demote")):
+        return "archiving or demoting accepted work is a person's decision: ask the person."
+    if (entity, verb) not in _CHANGES:
+        return None
+    match status_set(rest):
+        case "To Do" | "Done" as named:
+            return (
+                f"setting a task to {named} is a person's decision: To Do accepts work, and Done closes it "
+                "after someone who didn't do it has reviewed it. Ask the person; to hand back a task you "
+                "claimed, use asdlc release."
+            )
+        case "In Progress":
+            return IN_PROGRESS_REFUSAL
+        case "In Review":
+            return IN_REVIEW_REFUSAL
+    if (entity, verb) == ("task", "edit") and _flag_values(rest, _ASSIGNEE_FLAGS):
+        return ASSIGNEE_REFUSAL
+    labels = {label.strip().lower() for value in _flag_values(rest, _LABEL_FLAGS) for label in value.split(",")}
+    if labels & REVIEW_LABELS:
+        return REVIEW_LABEL_REFUSAL
+    if (entity, verb) == ("task", "edit") and _accepted_ids(rest):
+        replacing = _flag_values(rest, frozenset({"-l", "--label", "--labels"})) or "--clear-labels" in rest
+        if replacing or any(label.startswith("size-") for label in labels):
+            return SIZE_REFUSAL
+    if (entity, verb) == ("task", "create") and "--draft" not in rest:
         return (
             "a task created without --draft starts as accepted To Do work, and accepting work is a "
             "person's decision: add --draft, and the person promotes it."
@@ -209,13 +347,13 @@ def push_destinations(arguments: Sequence[str], branch: str) -> frozenset[str]:
     return frozenset(destinations)
 
 
-def _git_call(words: Sequence[str], directory: Path) -> tuple[str, list[str], Path]:
-    """A git command's subcommand, its arguments, and the directory it runs in."""
+def _git_call(words: Sequence[str], directory: Path | None) -> tuple[str, list[str], Path | None]:
+    """A git command's subcommand, its arguments, and the directory it runs in (None when it can't be told)."""
     index = 1
     while index < len(words) and words[index].startswith("-"):
         word = words[index]
         if word == "-C" and index + 1 < len(words):
-            directory = directory / words[index + 1]
+            directory = directory_of(directory, words[index + 1])
             index += 2
         elif word in _GIT_VALUES:
             index += 2
@@ -226,45 +364,169 @@ def _git_call(words: Sequence[str], directory: Path) -> tuple[str, list[str], Pa
     return words[index], list(words[index + 1:]), directory
 
 
-def decide_command(command: str, cwd: Path, lookup: Lookup) -> Outcome:
+def options(arguments: Sequence[str], takes_value: frozenset[str]) -> tuple[list[str], list[tuple[str, str]]]:
+    """A command's positional words, and its flags with their values: `-f v`, `-fv`, `--flag v`
+    and `--flag=v`. A flag without a value has an empty one."""
+    positional: list[str] = []
+    found: list[tuple[str, str]] = []
+    index = 0
+    while index < len(arguments):
+        word = arguments[index]
+        index += 1
+        if word == "--":
+            positional += arguments[index:]
+            break
+        if word.startswith("--"):
+            flag, equals, value = word.partition("=")
+        elif word.startswith("-") and len(word) > 1:
+            flag, equals, value = word[:2], "", word[2:]
+        else:
+            positional.append(word)
+            continue
+        if not equals and not value and flag in takes_value and index < len(arguments):
+            value = arguments[index]
+            index += 1
+        found.append((flag, value))
+    return positional, found
+
+
+def _gh_api(arguments: Sequence[str]) -> Outcome | None:
+    """A `gh api` call that merges a pull request or submits an approving or changes-requesting review."""
+    positional, found = options(arguments, _GH_API_VALUES)
+    path = re.sub(r"^https?://[^/]+", "", positional[0] if positional else "").partition("?")[0].strip("/")
+    fields = {key.strip().lower(): value for flag, raw in found if flag in _GH_API_FIELDS for key, _, value in [raw.partition("=")]}
+    piped = any(flag == "--input" for flag, _ in found)
+    method = next((value.upper() for flag, value in reversed(found) if flag in ("-X", "--method")), "POST" if fields or piped else "GET")
+    unseen = f"could not see what this gh api call to {path} sends (it reads it from a file or stdin), so it may approve or merge a pull request; allowed"
+    if path == "graphql":
+        query = fields.get("query", "")
+        if piped or query.startswith("@"):
+            return Outcome(Verdict.ERROR, unseen)
+        if re.search(r"\b(mergePullRequest|enablePullRequestAutoMerge)\b", query):
+            return Outcome(Verdict.DENY, MERGE_REFUSAL)
+        if re.search(r"\b(addPullRequestReview|submitPullRequestReview)\b", query) and re.search(r"\b(APPROVE|REQUEST_CHANGES)\b", " ".join(fields.values())):
+            return Outcome(Verdict.DENY, APPROVAL_REFUSAL)
+        return None
+    if method == "GET":
+        return None
+    if re.search(r"(^|/)pulls/[^/]+/merge$", path):
+        return Outcome(Verdict.DENY, MERGE_REFUSAL)
+    if re.search(r"(^|/)pulls/[^/]+/reviews(/[^/]+/events)?$", path):
+        event = fields.get("event", "")
+        if event.strip().upper() in _PERSON_EVENTS:
+            return Outcome(Verdict.DENY, APPROVAL_REFUSAL)
+        if piped or event.startswith("@"):
+            return Outcome(Verdict.ERROR, unseen)
+    return None
+
+
+def gh_outcome(arguments: Sequence[str]) -> Outcome | None:
+    """Why a `gh` command is a person's to run, or None when it isn't one of those."""
+    words = list(arguments)
+    while words and words[0].startswith("-"):
+        words = words[1:]
+    match words[:2]:
+        case ["pr", "merge"]:
+            return Outcome(Verdict.DENY, MERGE_REFUSAL)
+        case ["pr", "review"]:
+            _, found = options(words[2:], _GH_REVIEW_VALUES)
+            if any(flag in _GH_VERDICTS and value.lower() != "false" for flag, value in found):
+                return Outcome(Verdict.DENY, APPROVAL_REFUSAL)
+        case ["api", *_]:
+            return _gh_api(words[1:])
+    return None
+
+
+def _shell_script(words: Sequence[str]) -> str | None:
+    """The script `sh -c`, `bash -lc` or `sh -ec` runs, or None."""
+    for index, word in enumerate(words[1:-1], start=1):
+        if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", word):
+            return words[index + 1]
+    return None
+
+
+def decide_command(command: str, cwd: Path | None, lookup: Lookup) -> Outcome:
+    """The verdict on a shell command: the first refusal among its simple commands, else the first
+    thing it couldn't tell (allowed, and said), else allowed."""
     try:
         commands = simple_commands(command)
     except ValueError as error:
-        if re.search(r"\b(backlog|asdlc|git\s+push)\b", command):
-            return Outcome(Verdict.ERROR, f"could not parse a command that may touch the board or push ({error}); allowed")
+        if re.search(r"\b(backlog|asdlc|git\s+push|gh\s+(pr|api))\b", command):
+            return Outcome(Verdict.ERROR, f"could not parse a command that may touch the board, push, approve or merge ({error}); allowed")
         return ALLOW
     directory = cwd
+    unsure: Outcome | None = None
     for words in commands:
         words = _without_assignments(words)
         if words[:1] == ["cd"]:
-            directory = directory / (words[1] if len(words) > 1 else str(Path.home()))
+            directory = directory_of(directory, words[1] if len(words) > 1 else "~")
             continue
-        words = unwrap(words)
-        if not words:
-            continue
-        name = PurePath(words[0]).name
-        if name in _SHELLS and "-c" in words[1:-1]:
-            inner = decide_command(words[words.index("-c", 1) + 1], directory, lookup)
-            if inner.verdict is not Verdict.ALLOW:
-                return inner
-        elif name in _BACKLOG:
-            if reason := backlog_refusal(words[1:]):
-                return Outcome(Verdict.DENY, reason)
-        elif name == "asdlc":
-            subcommand, rest = _asdlc_subcommand(words[1:])
-            if subcommand == "board" and (reason := backlog_refusal(rest)):
-                return Outcome(Verdict.DENY, reason)
-        elif name == "git":
-            subcommand, rest, where = _git_call(words, directory)
-            if subcommand == "push" and (outcome := _decide_push(rest, where, lookup)).verdict is not Verdict.ALLOW:
-                return outcome
+        outcome = _decide_simple(unwrap(words), directory, lookup)
+        if outcome.verdict is Verdict.DENY:
+            return outcome
+        if outcome.verdict is Verdict.ERROR and unsure is None:
+            unsure = outcome
+    return unsure or ALLOW
+
+
+def _decide_simple(words: Sequence[str], directory: Path | None, lookup: Lookup) -> Outcome:
+    if not words:
+        return ALLOW
+    name = PurePath(words[0]).name
+    if name in _SHELLS and (script := _shell_script(words)) is not None:
+        return decide_command(script, directory, lookup)
+    if name in _BACKLOG:
+        if reason := backlog_refusal(words[1:]):
+            return Outcome(Verdict.DENY, reason)
+    elif name == "asdlc":
+        subcommand, rest = _asdlc_subcommand(words[1:])
+        if subcommand == "board" and (reason := backlog_refusal(rest)):
+            return Outcome(Verdict.DENY, reason)
+        if subcommand == "accept":
+            return Outcome(Verdict.DENY, ACCEPT_REFUSAL)
+        if subcommand == "approve":
+            return Outcome(Verdict.DENY, APPROVE_REFUSAL)
+        if subcommand == "permissions" and "--write" in rest:
+            return Outcome(Verdict.DENY, PERMISSIONS_REFUSAL)
+        if subcommand == "record-check" and "--" in rest:
+            return decide_command(shlex.join(rest[rest.index("--") + 1:]), directory, lookup)
+    elif name == "gh":
+        if (outcome := gh_outcome(words[1:])) is not None:
+            return outcome
+    elif name == "git":
+        subcommand, rest, where = _git_call(words, directory)
+        if subcommand == "push":
+            return _decide_push(rest, where, lookup)
     return ALLOW
 
 
-def _decide_push(arguments: Sequence[str], directory: Path, lookup: Lookup) -> Outcome:
+def forces(arguments: Sequence[str]) -> bool:
+    """Whether a `git push` may overwrite history: --force, -f, --force-with-lease, or a `+refspec`."""
+    for word in arguments:
+        if word == "--":
+            break
+        if word.startswith("--force") or (word.startswith("-") and not word.startswith("--") and "f" in word[1:]):
+            return True
+        if word.startswith("+"):
+            return True
+    return False
+
+
+FORCE_REFUSAL = (
+    "a force push rewrites a task branch whose history a review, and maybe another worker, builds on. Bring in what is on "
+    "origin instead: git fetch origin, then git rebase origin/<branch> (your new commits go on top), and push without force."
+)
+
+
+def _decide_push(arguments: Sequence[str], directory: Path | None, lookup: Lookup) -> Outcome:
+    if directory is None:
+        return Outcome(Verdict.ERROR, "can't tell which repository this git push runs in (its cd or -C names a variable), so it may push to a "
+                                      "default branch or force a task branch; allowed")
     repo = lookup(directory)
     if repo is None or repo.is_board or not repo.takes_board_work:
         return ALLOW
+    if forces(arguments):
+        return Outcome(Verdict.DENY, FORCE_REFUSAL)
     hits = push_destinations(arguments, repo.branch)
     protected = sorted(repo.protected if _ALL in hits else hits & repo.protected)
     if not protected:

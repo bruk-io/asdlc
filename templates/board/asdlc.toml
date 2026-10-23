@@ -1,0 +1,17 @@
+# Settings for this tasks repository, read by `asdlc` on every machine that clones it.
+# Durations are a number and a unit: s, m, h or d, such as "90m" or "2h".
+
+# How long a claimed task may go without an update on the board before `asdlc reap`
+# releases its claim. A worker's heartbeat (any board commit touching the task) keeps
+# the claim alive, so this only frees work whose agent or machine has gone away.
+stale_after = "2h"
+
+# How long a finished task waits In Review for an orchestrator on another engineer's
+# machine to claim its review. After this, the author's own machine may review it with
+# a fresh reviewer agent, and the review is marked as a same-machine review.
+review_fallback_after = "30m"
+
+# How long a claimed task whose plan is written may wait for a person to approve it
+# (asdlc approve) before `asdlc reap` releases its claim. Longer than stale_after, since
+# approval waits for a person, not an agent.
+approval_wait = "24h"
