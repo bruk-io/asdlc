@@ -1,0 +1,382 @@
+"""The world most cases start from: a tasks repository with its board, one code repository
+(acme/api, a few lines of Python with tests), and the engineers' machines.
+
+Everything here runs on the host, before the agent starts and outside its reach. Each
+engineer's machine is a `Machine` (scripts/eval): its own git identity, registry, board
+clone and code clone. The agent's engineer lives under the fixture's `agent/` folder,
+everyone else under `others/`, which the agent never sees.
+"""
+
+import json
+import os
+import shlex
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import asdlc_eval as ev
+
+LOGIN = '''"""Logins for acme/api."""
+
+PASSWORDS = {"ann": "s3cret", "kyle": "hunter2"}
+FAILED: dict[str, int] = {}
+
+
+def check(user: str, password: str) -> bool:
+    return PASSWORDS.get(user) == password
+
+
+def login(user: str, password: str) -> bool:
+    return check(user, password)
+'''
+
+TESTS = '''import unittest
+
+from login import login
+
+
+class LoginTest(unittest.TestCase):
+    def test_the_right_password_logs_in(self) -> None:
+        self.assertTrue(login("ann", "s3cret"))
+
+    def test_a_wrong_password_does_not(self) -> None:
+        self.assertFalse(login("ann", "nope"))
+
+
+if __name__ == "__main__":
+    unittest.main()
+'''
+
+COMMANDS = """[build]
+run = "python3 -m py_compile login.py"
+
+[test]
+run = "python3 -m unittest -q"
+
+[lint]
+run = "python3 -m py_compile login.py test_login.py"
+"""
+
+TESTING_RULE = """---
+paths:
+  - "**/*.py"
+---
+# Testing acme/api
+
+Applies to every Python file in acme/api.
+
+- Tests are `unittest` modules beside the code, `test_<module>.py`; run them all with `python3 -m unittest -q` from the repository's root.
+"""
+
+
+@dataclass(frozen=True)
+class Spec:
+    """A board item the seed creates directly, as accepted work (or a draft with draft=True)."""
+
+    title: str
+    type: str = "task"
+    size: str = ""  # such as size-2
+    project: str = ""  # acme-api for work in the code repository
+    parent: str = ""
+    ac: tuple[str, ...] = ("It works",)
+    description: str = ""
+    assignee: str = ""
+    docs: tuple[str, ...] = ()  # document ids to link, created before the items
+    draft: bool = False
+
+
+@dataclass(frozen=True)
+class Doc:
+    title: str
+    content: str
+    type: str = "other"
+
+
+@dataclass
+class Team:
+    fixture: ev.Fixture
+    board_origin: Path
+    api_origin: Path
+    machines: dict[str, ev.Machine] = field(default_factory=dict)
+    agent: str = ""
+
+    @property
+    def me(self) -> ev.Machine:
+        return self.machines[self.agent]
+
+    def facts(self, **extra: object) -> dict[str, object]:
+        """What the runner, the prompts and the checks know about the fixture."""
+        me = self.me
+        return {"board_origin": self.board_origin, "board": me.board, "cwd": me.board, "env": me.env, "engineer": me.name,
+                "code_origins": {"api": self.api_origin}, "clones": {"api": me.clones["api"]}, "api": me.clones["api"],
+                "worktrees": Path(f"{me.clones['api']}.worktrees"), **extra}
+
+
+def _backlog(seed: Path, *args: str) -> str:
+    env = {**os.environ, **ev.SEED_ENV, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": "/dev/null"}
+    done = subprocess.run(["backlog", *args], cwd=seed, capture_output=True, text=True, env=env)
+    if done.returncode != 0:
+        raise RuntimeError(f"backlog {' '.join(args)}: {done.stderr.strip() or done.stdout.strip()}")
+    return done.stdout
+
+
+def team(fixture: ev.Fixture, *, agent: str, devs: dict[str, str], items: list[Spec], docs: list[Doc] = (),
+         settings: str = 'stale_after = "2h"\nreview_fallback_after = "30m"\n', publish: bool = True) -> Team:
+    """The tasks repository, acme/api and a machine for each engineer in `devs` (name -> devs/<name>.yaml)."""
+    env = fixture.seed_env()
+    board_origin = ev.bare(fixture.origins / "board.git")
+    seed = fixture.others / "seed-board"
+    done = subprocess.run([sys.executable, str(fixture.plugin / "scripts" / "asdlc"), "init-board", str(seed)],
+                          capture_output=True, text=True, env={**env, "ASDLC_BACKLOG": "backlog"})
+    if done.returncode != 0:
+        raise RuntimeError(f"init-board: {done.stderr}")
+    (seed / "devs").mkdir(exist_ok=True)
+    for name, text in devs.items():
+        (seed / "devs" / f"{name}.yaml").write_text(text)
+    (seed / "asdlc.toml").write_text(settings)
+    config = seed / "backlog" / "config.yml"
+    config.write_text(config.read_text() + 'projects: ["acme-api"]\n')
+    for doc in docs:
+        created = _backlog(seed, "doc", "create", doc.title, "-t", doc.type)
+        doc_id = created.split("Created document ")[1].split()[0]
+        _backlog(seed, "doc", "update", doc_id, "--content", doc.content)
+    for spec in items:
+        args = ["task", "create", spec.title, "--type", spec.type]
+        args += ["-l", spec.size] if spec.size else []
+        args += ["--project", spec.project] if spec.project else []
+        args += ["-p", spec.parent] if spec.parent else []
+        args += ["-a", spec.assignee] if spec.assignee else []
+        args += ["-d", spec.description] if spec.description else []
+        args += [part for ac in spec.ac for part in ("--ac", ac)]
+        args += ["--draft"] if spec.draft else []
+        _backlog(seed, *args)
+        if spec.docs:
+            listing = sorted((seed / "backlog" / ("drafts" if spec.draft else "tasks")).glob("*.md"), key=lambda p: p.stat().st_mtime_ns)
+            item = ev.board_item(str(listing[-1]), listing[-1].read_text())
+            for doc_id in spec.docs:
+                _backlog(seed, "task" if not spec.draft else "draft", "edit", item.id, "--add-doc", doc_id)
+    ev._git(seed, "add", ".", env=env)
+    ev._git(seed, "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "The team's board", env=env)
+    ev._git(seed, "remote", "add", "origin", str(board_origin), env=env)
+    ev._git(seed, "push", "--quiet", "origin", "main", env=env)
+
+    api_origin = ev.bare(fixture.origins / "acme" / "api.git")
+    work = fixture.others / "seed-api"
+    subprocess.run(["git", "clone", "--quiet", str(api_origin), str(work)], check=True, capture_output=True, env=env)
+    (work / "login.py").write_text(LOGIN)
+    (work / "test_login.py").write_text(TESTS)
+    ev._git(work, "add", ".", env=env)
+    ev._git(work, "commit", "--quiet", "-m", "Logins", env=env)
+    ev._git(work, "push", "--quiet", "origin", "main", env=env)
+
+    found = Team(fixture, board_origin, api_origin, agent=agent)
+    for name in devs:
+        machine = ev.machine(fixture, name, board_origin, agent=name == agent)
+        clone = machine.home / "api"
+        machine.run("git", "clone", "--quiet", str(api_origin), str(clone), cwd=machine.home)
+        machine.asdlc("register", "--board", str(machine.board), cwd=clone)
+        machine.clones["api"] = clone
+        found.machines[name] = machine
+    if publish:
+        publish_api_plugin(found.me)
+    found.me.asdlc("permissions", "--write")
+    return found
+
+
+def publish_api_plugin(machine: ev.Machine) -> None:
+    """acme/api's plugin in the tasks repository, onboarded the way the onboard-repo skill does it,
+    so no case pays for an onboarding it isn't about."""
+    repo = machine.clones["api"]
+    status = json.loads(machine.plugin("status", str(repo), "--json").stdout)
+    machine.plugin("scaffold", str(repo))
+    board = Path(str(status["board"]))
+    folder = board.parent / f"{board.name}.worktrees" / f"plugin-{status['slug']}" / "plugins" / status["slug"]
+    (folder / "commands.toml").write_text(COMMANDS)
+    (folder / "rules").mkdir(exist_ok=True)
+    (folder / "rules" / "testing-python.md").write_text(TESTING_RULE)
+    for name in ("build", "test", "lint"):
+        machine.plugin("verify-command", str(repo), name)
+    machine.plugin("publish", status["slug"], "--repo", str(repo))
+
+
+def machine_from(fixture: ev.Fixture, facts: dict[str, object]) -> ev.Machine:
+    """The agent's engineer's machine again, for a person step."""
+    env = {str(k): str(v) for k, v in dict(facts["env"]).items()}
+    found = ev.Machine(fixture, str(facts["engineer"]), Path(env["HOME"]), Path(str(facts["board"])), env)
+    found.clones["api"] = Path(str(facts["api"]))
+    return found
+
+
+def build_and_push(machine: ev.Machine, worktree: Path, files: dict[str, str], message: str, worker: str) -> str:
+    """A worker's commit on the task's branch, pushed: what an earlier round of work left behind."""
+    for name, text in files.items():
+        (worktree / name).write_text(text)
+    machine.git(worktree, "add", *files)
+    machine.git(worktree, "commit", "--quiet", "-m", message, "--trailer", f"Asdlc-Worker: {worker}")
+    machine.git(worktree, "push", "--quiet", "-u", "origin", "HEAD")
+    return machine.git(worktree, "rev-parse", "HEAD")
+
+
+def item(machine: ev.Machine, item_id: str) -> ev.BoardItem:
+    """An item as the board clone has it now, after pulling."""
+    machine.git(machine.board, "pull", "--quiet", "--ff-only")
+    for folder in ("tasks", "drafts"):
+        for path in (machine.board / "backlog" / folder).glob("*.md"):
+            found = ev.board_item(str(path.relative_to(machine.board)), path.read_text())
+            if found and found.id == item_id.upper():
+                return found
+    raise RuntimeError(f"no {item_id} on {machine.name}'s board")
+
+
+# What earlier rounds of work left on the board, done the way the worker and reviewer agents do it.
+
+COUNTING = '''"""Logins for acme/api."""
+
+PASSWORDS = {"ann": "s3cret", "kyle": "hunter2"}
+FAILED: dict[str, int] = {}
+
+
+def check(user: str, password: str) -> bool:
+    return PASSWORDS.get(user) == password
+
+
+def login(user: str, password: str) -> bool:
+    FAILED[user] = FAILED.get(user, 0) + 1
+    return check(user, password)
+'''
+"""Counts every login, successful ones too: the defect the review cases seed."""
+
+COUNTING_FIXED = '''"""Logins for acme/api."""
+
+PASSWORDS = {"ann": "s3cret", "kyle": "hunter2"}
+FAILED: dict[str, int] = {}
+
+
+def check(user: str, password: str) -> bool:
+    return PASSWORDS.get(user) == password
+
+
+def login(user: str, password: str) -> bool:
+    ok = check(user, password)
+    if not ok:
+        FAILED[user] = FAILED.get(user, 0) + 1
+    return ok
+'''
+
+COUNTING_TESTS = '''import unittest
+
+from login import FAILED, login
+
+
+class LoginTest(unittest.TestCase):
+    def setUp(self) -> None:
+        FAILED.clear()
+
+    def test_the_right_password_logs_in(self) -> None:
+        self.assertTrue(login("ann", "s3cret"))
+
+    def test_a_wrong_password_does_not(self) -> None:
+        self.assertFalse(login("ann", "nope"))
+
+    def test_a_failed_login_is_counted(self) -> None:
+        login("ann", "nope")
+        self.assertEqual(FAILED["ann"], 1)
+'''
+
+COUNTING_TESTS_FIXED = COUNTING_TESTS + '''
+    def test_a_successful_login_is_not_counted(self) -> None:
+        login("ann", "s3cret")
+        self.assertNotIn("ann", FAILED)
+'''
+
+COUNT_TASK = Spec(
+    "Count failed logins", size="size-2", project="acme-api",
+    ac=("A failed login adds one to FAILED[user]", "A successful login leaves FAILED unchanged", "Tests cover both"),
+    description="Support wants to see who keeps failing to log in. Count failed logins per user in FAILED; successful logins don't count.",
+)
+
+COUNT_PLAN = """## Files that change
+- `login.py`: count a failed login in FAILED[user]
+- `test_login.py`: a test for a counted failure
+
+## Order of work
+1. Count in login().
+2. Add the test.
+
+## Risks
+- None worth naming: one function.
+
+## Proof
+- `python3 -m unittest -q` passes."""
+
+
+def claim(machine: ev.Machine, task: str, worker: str) -> dict[str, object]:
+    return machine.json("claim", task, "--as", worker)
+
+
+def plan_and_approve(machine: ev.Machine, task: str, plan: str = COUNT_PLAN) -> None:
+    """The worker writes its plan; its engineer approves it, as a person."""
+    machine.asdlc("board", "task", "edit", task, "--plan", plan)
+    machine.asdlc("approve", task)
+
+
+def build_round(machine: ev.Machine, task: str, worker: str, worktree: Path, commits: list[tuple[str, dict[str, str]]],
+                pull: str | None) -> list[str]:
+    """A worker's phase 2: a commit per step, the tests recorded, pushed, handed to review."""
+    shas = []
+    for message, files in commits:
+        for name, text in files.items():
+            (worktree / name).write_text(text)
+        machine.git(worktree, "add", *files)
+        machine.git(worktree, "commit", "--quiet", "-m", message, "--trailer", f"Asdlc-Worker: {worker}")
+        shas.append(machine.git(worktree, "rev-parse", "HEAD"))
+    machine.asdlc("record-check", task, "--as", worker, "--", "python3", "-m", "unittest", "-q", cwd=worktree)
+    machine.git(worktree, "push", "--quiet", "-u", "origin", "HEAD")
+    machine.asdlc("finish", task, "--as", worker, *(("--pr", pull) if pull else ()), "--notes", "Built; tests recorded above.")
+    return shas
+
+
+def review_scene(fixture: ev.Fixture, *, defect: bool, gh: bool = False) -> tuple[Team, dict[str, object]]:
+    """ann's worker built "Count failed logins" and handed it to review; kyle's reviewer claimed the review.
+    With `defect`, the change counts successful logins too, and its tests don't notice."""
+    if gh:
+        fixture.add_gh()
+    found = team(fixture, agent="kyle", items=[COUNT_TASK],
+                 devs={"kyle": "name: kyle\nworkers: 2\nreview: true\n", "ann": "name: ann\nworkers: 2\nreview: true\n"})
+    ann = found.machines["ann"]
+    claimed = claim(ann, "TASK-1", "ann.w1")
+    plan_and_approve(ann, "TASK-1")
+    files = {"login.py": COUNTING, "test_login.py": COUNTING_TESTS} if defect else \
+        {"login.py": COUNTING_FIXED, "test_login.py": COUNTING_TESTS_FIXED}
+    build_round(ann, "TASK-1", "ann.w1", Path(str(claimed["worktree"])), [("Count failed logins", files)],
+                "https://github.com/acme/api/pull/7")
+    review = found.me.json("review-next", "--as", "kyle.r1")
+    if review.get("task") != "TASK-1":
+        raise RuntimeError(f"kyle's review-next didn't claim TASK-1: {review}")
+    return found, review
+
+
+def reviewer_prompt(review: dict[str, object]) -> str:
+    """What the orchestrate skill gives a reviewer it launches: every field the claim printed."""
+    return ("Review the task your orchestrator claimed. These are the fields `asdlc review-next` printed:\n\n"
+            + "\n".join(f"- {key}: {review[key]}" for key in ("task", "reviewer", "kind", "repo", "default_branch", "branch",
+                                                              "pull_request", "policies")))
+
+
+def reference_review(script: ev.Script, review: dict[str, object], verdict: str, findings: str, notes: str,
+                     policies: tuple[str, ...] = ("review",)) -> None:
+    """The reviewer agent's steps, scripted: read, diff in a detached worktree, record the verdict, clean up."""
+    repo, branch, base, task, who = (str(review[k]) for k in ("repo", "branch", "default_branch", "task", "reviewer"))
+    worktree = f"{repo}.worktrees/review-{task.lower()}-{who}"
+    for policy in review["policies"]:
+        script.read(Path(str(policy)))
+    script.bash(f"asdlc board task view {task} --plain")
+    script.bash(f"git -C {repo} fetch origin {branch} {base}")
+    script.bash(f"git -C {repo} worktree add --detach {worktree} origin/{branch}")
+    script.bash(f"git -C {worktree} diff origin/{base}...HEAD")
+    script.read(Path(worktree) / "login.py")
+    cited = " ".join(f"--policy {p}" for p in policies)
+    script.bash(f"asdlc review-done {task} --as {who} --verdict {verdict} --findings {findings} {cited} --plan-matched yes "
+                f"--notes {shlex.quote(notes)}")
+    script.bash(f"git -C {repo} worktree remove --force {worktree}")

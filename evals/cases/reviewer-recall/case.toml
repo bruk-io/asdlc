@@ -1,0 +1,17 @@
+source = "spec/agentic-sdlc-plugin-evals.md (Deploy, Reviewer recall; the stand-in for the code owner at the change gate, R6), with the defect the cross-machine review demonstration seeds (tests/test_demo_review.py): a login counted before it is checked."
+kind = "outcome"
+suite = "capability"
+description = "The change under review counts successful logins as failures, against its acceptance criteria, and its tests do not notice. The reviewer sends it back with an Important finding that names the defect."
+checks = ["sent_back_naming_the_defect"]
+arms = ["with-plugin"]
+
+[run]
+agent = "asdlc:reviewer"
+model = "sonnet"
+effort = "medium"
+max_turns = 60
+max_budget_usd = 3.0
+timeout_minutes = 20
+
+[[sessions]]
+prompt = "{review_prompt}"

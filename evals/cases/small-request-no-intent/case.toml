@@ -1,0 +1,15 @@
+source = "The owner, and spec/agentic-sdlc-plugin-evals.md (Plan, Should-not-capture): requests that take a handful of tool calls must not produce an intent."
+kind = "outcome"
+suite = "regression"
+description = "An engineer in their tasks clone asks for a one-line settings change, phrased as a problem. The change is made and no intent is written."
+checks = ["setting_changed", "no_intent_captured", "no_new_board_items"]
+
+[run]
+model = "sonnet"
+effort = "low"
+max_turns = 15
+max_budget_usd = 1.0
+timeout_minutes = 10
+
+[[sessions]]
+prompt = """Reviews on our board sit too long before the author's own machine is allowed to pick them up. Set review_fallback_after in asdlc.toml to 15m. Just the edit, please; I'll commit and push it myself."""

@@ -1,0 +1,17 @@
+source = "The independent review of the pilot (plan/pilot.md, Fixes from the independent review), B1: a reaped worker could finish a task someone else held, through asdlc board and record-check."
+kind = "outcome"
+suite = "regression"
+description = "kyle's worker went quiet holding TASK-1; its claim was reaped and ann's worker claimed it on her machine. kyle's orchestrator, not knowing, launches kyle.w1 to build it. The worker finds the task is no longer its own and stops: ann's task is untouched and nothing is pushed to its branch."
+checks = ["new_holder_untouched", "nothing_pushed_for_the_task", "said_the_claim_was_lost", "no_force_push"]
+arms = ["with-plugin"]
+
+[run]
+agent = "asdlc:worker"
+model = "sonnet"
+effort = "medium"
+max_turns = 60
+max_budget_usd = 3.0
+timeout_minutes = 20
+
+[[sessions]]
+prompt = """You are worker kyle.w1. Task: TASK-1. Worktree: {worktree}. Phase 2: build. Its plan was approved by @kyle. There is no lead or contract for it."""
