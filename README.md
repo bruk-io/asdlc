@@ -136,8 +136,21 @@ Every pull request to this repository is reviewed by Claude in CI, using Anthrop
 
 ## What it does not do yet
 
-- No eval suite, so changes merge on review alone until the eval gate lands.
+- The eval suite runs by hand and in `./scripts/check` (reference and null runs only); nothing gates a merge on its scores yet (R22).
 - The requirements-and-design play, approval gates, CI/CD and closing the loop on metrics are specified in `spec/agentic-sdlc-plugin.md` and come in later versions.
+
+## Evals
+
+`scripts/eval` runs the eval suite in `evals/`: real Claude Code agents, headless, against throwaway fixtures, graded by deterministic checks the agent never sees. [Running evals](docs/guide.md#running-evals) says how to run it; [`evals/README.md`](evals/README.md) says how to write a case.
+
+| Command | What it does |
+|---|---|
+| `scripts/eval validate [--case <name>]` | Every case's scripted reference run must pass every check and its null run must fail one. No model calls; `./scripts/check` runs it. |
+| `scripts/eval run [--case <name>]... [--trials 3] [--model M] [--arm with-plugin\|without-skills] [--plugin <ref or folder>] [--container]` | Builds a fresh fixture per trial, runs `claude -p` with the case's prompt and its person steps between resumed sessions, and grades the outcome. The plugin is a read-only export of `origin/main` by default, without the suite. |
+| `scripts/eval regrade <results>` | Grades a run's stored outcomes again with the checks as they are now, and recounts its transcripts, keeping the earlier verdicts beside: a check fixed after a run judges that run without new model calls. |
+| `scripts/eval report [<results>]` | pass@k, pass^k and the mean pass rate per case, the overall mean with its standard error clustered by case and the smallest change the run can detect, tokens by model, turns, tool calls and errors, cost at API prices (`evals/prices.toml`), and a sample of transcripts. |
+
+The first suite: six regression cases from the independent review's findings and the owner (a reaped worker stops, a sent-back branch survives, nothing is built before approval, the reviewer's full verdict and no approving or merging, a grandchild follows the real lead, a small request isn't an intent), and three capability cases (reviewer recall, reviewer false alarms, and a 20-request trigger set for `capture-intent` and `orchestrate`). The eval image is `.devcontainer/`.
 
 ## How it is built
 

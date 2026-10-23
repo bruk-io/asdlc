@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.15"
 # ///
-"""The single check command: every artefact check, then the tests.
+"""The single check command: every artefact check, the tests, then the eval cases' reference and null runs.
 
 Exits non-zero when anything fails, so it works the same by hand, in a hook and in CI.
 """
@@ -25,6 +25,7 @@ def main() -> int:
     results = [
         _run("artefacts", [sys.executable, str(ROOT / "scripts" / "artefacts.py")]),
         _run("tests", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."]),
+        _run("evals", [sys.executable, str(ROOT / "scripts" / "eval"), "validate"]),
     ]
     return 0 if all(results) else 1
 

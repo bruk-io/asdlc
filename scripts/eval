@@ -1,0 +1,1593 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.15"
+# ///
+"""Evals: real Claude Code agents, run headless against throwaway fixtures, graded afterwards.
+
+Each case under `evals/cases/<name>/` builds a fixture (a tasks repository with its board,
+a code repository, one engineer's machine), gives an agent a prompt, performs the
+scripted person steps between sessions, and grades the outcome with deterministic checks
+outside the agent's reach. Every case ships a scripted reference run, which must pass
+every check, and a null run, which must fail at least one; `validate` runs both, with no
+model calls, and `./scripts/check` runs `validate`.
+
+    eval validate [--case <name>]... [--plugin <git ref or folder>]
+    eval run [--case <name>]... [--trials N] [--model M] [--arm with-plugin|without-skills]
+             [--plugin <path or git ref>] [--container] [--image <tag>] [--results <dir>]
+    eval report [<results dir>] [--samples N]
+    eval regrade <results dir>
+
+The logic (cases, transcripts, board history, checks, statistics, cost) takes data and
+returns data; git, files, subprocesses and the clock stay in the shell below it.
+"""
+
+import argparse
+import importlib.util
+import json
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import tomllib
+import uuid
+from collections import Counter, defaultdict
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import asdict, dataclass, field, replace
+from datetime import UTC, datetime
+from enum import StrEnum
+from pathlib import Path
+from types import ModuleType
+
+ROOT = Path(__file__).resolve().parent.parent
+EVALS = ROOT / "evals"
+CASES = EVALS / "cases"
+PRICES = EVALS / "prices.toml"
+RESULTS = ROOT / ".eval-results"
+IMAGE = "asdlc-evals:local"
+DEFAULT_TRIALS = 3
+# What the agent's copy of the plugin leaves out: the suite and its answers (practice 1).
+NOT_FOR_THE_AGENT = ("evals", "tests", ".eval-results", ".github", ".devcontainer")
+NOT_FOR_THE_AGENT_GLOBS = ("spec/*-evals.md",)
+Z_ALPHA, Z_BETA = 1.96, 0.84  # two-sided 5% significance, 80% power
+
+
+# --- cases -----------------------------------------------------------------------------
+
+
+class CaseError(Exception):
+    """A case definition that can't be run; its message names every problem."""
+
+
+class Kind(StrEnum):
+    OUTCOME = "outcome"  # the end state is graded
+    PROCESS = "process"  # the order is the point: ordered trace assertions
+
+
+class Suite(StrEnum):
+    REGRESSION = "regression"  # should hold near 100%
+    CAPABILITY = "capability"  # measures how well, not whether it still works
+
+
+class Arm(StrEnum):
+    WITH_PLUGIN = "with-plugin"
+    WITHOUT_SKILLS = "without-skills"  # scripts, hooks and commands; no skills, no agents
+
+
+@dataclass(frozen=True)
+class Session:
+    prompt: str
+    before: tuple[str, ...] = ()  # person steps performed before this session starts
+    fresh: bool = False  # a new session instead of resuming the first one
+
+
+@dataclass(frozen=True)
+class Item:
+    """One request of a trigger set: run in its own fresh session."""
+
+    prompt: str
+    expect: str  # the skill that should load (its short name), or "none"
+
+
+@dataclass(frozen=True)
+class Case:
+    name: str
+    source: str
+    kind: Kind
+    suite: Suite
+    description: str
+    checks: tuple[str, ...]
+    sessions: tuple[Session, ...] = ()
+    items: tuple[Item, ...] = ()
+    agent: str = ""  # a plugin agent to run as the session's main agent, such as asdlc:worker
+    model: str = "sonnet"
+    effort: str = "medium"
+    max_turns: int = 60
+    max_budget_usd: float = 5.0
+    timeout_minutes: int = 30
+    permission_mode: str = "acceptEdits"
+    arms: tuple[Arm, ...] = (Arm.WITH_PLUGIN, Arm.WITHOUT_SKILLS)
+
+    @property
+    def runs(self) -> tuple[Session, ...]:
+        """The sessions a trial runs, in order: the declared ones, or one fresh one per item."""
+        return self.sessions or tuple(Session(item.prompt, fresh=True) for item in self.items)
+
+
+_CASE_KEYS = {"source", "kind", "suite", "description", "checks", "sessions", "items", "agent", "arms"}
+_AGENT_KEYS = {"model", "effort", "max_turns", "max_budget_usd", "timeout_minutes", "permission_mode", "agent"}
+_PERMISSION_MODES = {"default", "acceptEdits", "dontAsk", "plan", "auto"}
+
+
+def parse_case(text: str, name: str) -> Case:
+    """A case from its case.toml, or CaseError naming everything wrong with it."""
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        raise CaseError(f"{name}: case.toml isn't TOML: {error}") from None
+    problems: list[str] = []
+    settings = data.pop("run", {})
+    for key in sorted(set(data) - _CASE_KEYS):
+        problems.append(f"unknown key {key!r}")
+    for key in sorted(set(settings) - _AGENT_KEYS if isinstance(settings, dict) else ()):
+        problems.append(f"unknown key run.{key}")
+    for key in ("source", "kind", "suite", "description"):
+        if not isinstance(data.get(key), str) or not data.get(key, "").strip():
+            problems.append(f"{key} is required")
+    kind = data.get("kind", "")
+    suite = data.get("suite", "")
+    if kind and kind not in {str(k) for k in Kind}:
+        problems.append(f"kind must be outcome or process, not {kind!r}")
+    if suite and suite not in {str(s) for s in Suite}:
+        problems.append(f"suite must be regression or capability, not {suite!r}")
+    checks = data.get("checks", [])
+    if not checks or not all(isinstance(c, str) and c for c in checks):
+        problems.append("checks must name at least one check")
+    sessions = []
+    for number, raw in enumerate(data.get("sessions", []), start=1):
+        if not isinstance(raw, dict) or not str(raw.get("prompt", "")).strip():
+            problems.append(f"session {number} needs a prompt")
+            continue
+        extra = set(raw) - {"prompt", "before", "fresh"}
+        if extra:
+            problems.append(f"session {number}: unknown keys {sorted(extra)}")
+        if number == 1 and raw.get("before"):
+            problems.append("session 1 can't have person steps before it: the fixture builder sets the scene")
+        sessions.append(Session(str(raw["prompt"]).strip(), tuple(raw.get("before", ())), bool(raw.get("fresh", False))))
+    items = []
+    for number, raw in enumerate(data.get("items", []), start=1):
+        if not isinstance(raw, dict) or not str(raw.get("prompt", "")).strip() or not str(raw.get("expect", "")).strip():
+            problems.append(f"item {number} needs a prompt and an expect")
+            continue
+        items.append(Item(str(raw["prompt"]).strip(), str(raw["expect"]).strip()))
+    if bool(sessions) == bool(items):
+        problems.append("a case has sessions or items, not both and not neither")
+    arms = data.get("arms", [str(a) for a in Arm])
+    if not arms or any(a not in {str(x) for x in Arm} for a in arms):
+        problems.append(f"arms must be among {[str(a) for a in Arm]}")
+    mode = settings.get("permission_mode", "acceptEdits") if isinstance(settings, dict) else "acceptEdits"
+    if mode not in _PERMISSION_MODES:
+        problems.append(f"run.permission_mode {mode!r} isn't one of {sorted(_PERMISSION_MODES)} (bypassPermissions is never used)")
+    if problems:
+        raise CaseError(f"{name}: " + "; ".join(problems))
+    run = settings if isinstance(settings, dict) else {}
+    return Case(
+        name=name, source=data["source"].strip(), kind=Kind(kind), suite=Suite(suite), description=data["description"].strip(),
+        checks=tuple(checks), sessions=tuple(sessions), items=tuple(items), agent=str(run.get("agent", data.get("agent", ""))),
+        model=str(run.get("model", "sonnet")), effort=str(run.get("effort", "medium")), max_turns=int(run.get("max_turns", 60)),
+        max_budget_usd=float(run.get("max_budget_usd", 5.0)), timeout_minutes=int(run.get("timeout_minutes", 30)),
+        permission_mode=mode, arms=tuple(Arm(a) for a in arms),
+    )
+
+
+def fill(prompt: str, facts: Mapping[str, object]) -> str:
+    """A prompt with `{name}` replaced from the fixture's facts; an unknown name is an error."""
+    def one(found: re.Match[str]) -> str:
+        key = found[1]
+        if key not in facts:
+            raise CaseError(f"the prompt names {{{key}}}, which the fixture didn't provide")
+        return str(facts[key])
+    return re.sub(r"\{([a-z_][a-z0-9_]*)\}", one, prompt)
+
+
+# --- transcripts -----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Event:
+    """One moment of a trial: a tool call, its result, text, a person's step, or a session's end."""
+
+    session: int
+    kind: str  # tool | result | text | person | end
+    name: str = ""  # the tool, or the person step
+    input: Mapping[str, object] = field(default_factory=dict)
+    id: str = ""
+    parent: str = ""  # the tool call of the subagent that made it, "" for the main agent
+    error: bool = False
+    text: str = ""
+    board_commits: int = -1  # on a person step: how many board commits existed when it ran
+
+    @property
+    def command(self) -> str:
+        return str(self.input.get("command", "")) if self.name == "Bash" else ""
+
+
+@dataclass(frozen=True)
+class Usage:
+    input: int = 0
+    output: int = 0
+    cache_read: int = 0
+    cache_write: int = 0  # every cache write, at either lifetime
+    cache_write_1h: int = 0  # the part of cache_write that went to the 1-hour cache
+
+    def __add__(self, other: Usage) -> Usage:
+        return Usage(self.input + other.input, self.output + other.output, self.cache_read + other.cache_read,
+                     self.cache_write + other.cache_write, self.cache_write_1h + other.cache_write_1h)
+
+
+@dataclass(frozen=True)
+class Stream:
+    """One session's stream-json output, parsed."""
+
+    session_id: str
+    events: tuple[Event, ...]
+    result: Mapping[str, object] | None
+    tokens: Mapping[str, Usage]  # by model
+    turns: int
+    duration_ms: int
+    cli_cost_usd: float
+    permission_denials: int
+    models: tuple[str, ...]
+
+
+def _blocks(message: Mapping[str, object]) -> list[Mapping[str, object]]:
+    content = message.get("content")
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
+def _result_text(block: Mapping[str, object]) -> str:
+    content = block.get("content")
+    if isinstance(content, list):
+        return "\n".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+    return str(content or "")
+
+
+def _usage(raw: Mapping[str, object]) -> Usage:
+    split = raw.get("cache_creation")
+    hour = int(split.get("ephemeral_1h_input_tokens") or 0) if isinstance(split, dict) else 0
+    return Usage(int(raw.get("input_tokens") or 0), int(raw.get("output_tokens") or 0),
+                 int(raw.get("cache_read_input_tokens") or 0), int(raw.get("cache_creation_input_tokens") or 0), hour)
+
+
+def parse_stream(lines: Iterable[str], session: int) -> Stream:
+    """A session's stream-json lines as events and counts. Lines that aren't JSON are skipped.
+
+    Token counts come from the `result` message's `modelUsage`, which covers subagents. A
+    session that never finished has none, so its counts are summed from the assistant
+    messages, once per message id.
+    """
+    events: list[Event] = []
+    session_id, result = "", None
+    by_message: dict[str, tuple[str, Usage]] = {}
+    models: list[str] = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        kind = record.get("type")
+        session_id = session_id or str(record.get("session_id") or "")
+        parent = str(record.get("parent_tool_use_id") or "")
+        if kind == "system" and record.get("subtype") == "init" and record.get("model"):
+            models.append(str(record["model"]))
+        elif kind == "assistant" and isinstance(record.get("message"), dict):
+            message = record["message"]
+            model = str(message.get("model") or "")
+            if isinstance(message.get("usage"), dict):
+                by_message[str(message.get("id") or len(by_message))] = (model, _usage(message["usage"]))
+            for block in _blocks(message):
+                if block.get("type") == "tool_use":
+                    raw_input = block.get("input")
+                    events.append(Event(session, "tool", str(block.get("name") or ""), raw_input if isinstance(raw_input, dict) else {},
+                                        str(block.get("id") or ""), parent))
+                elif block.get("type") == "text" and str(block.get("text") or "").strip():
+                    events.append(Event(session, "text", parent=parent, text=str(block["text"])))
+        elif kind == "user" and isinstance(record.get("message"), dict):
+            for block in _blocks(record["message"]):
+                if block.get("type") == "tool_result":
+                    events.append(Event(session, "result", id=str(block.get("tool_use_id") or ""), parent=parent,
+                                        error=bool(block.get("is_error")), text=_result_text(block)))
+        elif kind == "result":
+            result = record
+    tokens: dict[str, Usage] = defaultdict(Usage)
+    # A resumed session's modelUsage and total_cost_usd carry the whole conversation so far;
+    # model_usage_since_last_result is this run's own share, so it is preferred when present.
+    usage_key = "model_usage_since_last_result" if result and isinstance(result.get("model_usage_since_last_result"), dict) else "modelUsage"
+    if result and isinstance(result.get(usage_key), dict):
+        seen: dict[str, Usage] = defaultdict(Usage)
+        for model, usage in by_message.values():
+            seen[model] += usage
+        whole = _usage(result["usage"]) if isinstance(result.get("usage"), dict) else Usage()
+        hour_share = whole.cache_write_1h / whole.cache_write if whole.cache_write else 0.0
+        for model, numbers in result[usage_key].items():
+            if isinstance(numbers, dict):
+                written = int(numbers.get("cacheCreationInputTokens") or 0)
+                # modelUsage doesn't split cache writes by lifetime: take it from this model's messages,
+                # else from the session's own split.
+                hour = min(written, seen[model].cache_write_1h) if seen[model].cache_write else round(written * hour_share)
+                tokens[model] += Usage(int(numbers.get("inputTokens") or 0), int(numbers.get("outputTokens") or 0),
+                                       int(numbers.get("cacheReadInputTokens") or 0), written, hour)
+    else:
+        for model, usage in by_message.values():
+            tokens[model or "unknown"] += usage
+    tool_names = {e.id: e.name for e in events if e.kind == "tool"}
+    events = [replace(e, name=tool_names.get(e.id, "")) if e.kind == "result" else e for e in events]
+    if result is not None:
+        events.append(Event(session, "end", text=str(result.get("result") or ""), error=bool(result.get("is_error"))))
+    denials = result.get("permission_denials") if result else None
+    return Stream(
+        session_id=session_id, events=tuple(events), result=result, tokens=dict(tokens),
+        turns=int(result.get("num_turns") or 0) if result else len(by_message),
+        duration_ms=int(result.get("duration_ms") or 0) if result else 0,
+        cli_cost_usd=(sum(float(n.get("costUSD") or 0) for n in result[usage_key].values() if isinstance(n, dict))
+                      if usage_key != "modelUsage" else float(result.get("total_cost_usd") or 0)) if result else 0.0,
+        permission_denials=len(denials) if isinstance(denials, list) else 0,
+        models=tuple(dict.fromkeys(models)),
+    )
+
+
+def merge_subagent_events(stream_events: Sequence[Event], extra: Sequence[Event]) -> tuple[Event, ...]:
+    """Add tool calls from subagent transcripts that the stream didn't carry, by tool call id."""
+    seen = {e.id for e in stream_events if e.id}
+    return (*stream_events, *(e for e in extra if not e.id or e.id not in seen))
+
+
+@dataclass(frozen=True)
+class Counts:
+    """What a trial used: kept per trial, priced at report time (R29)."""
+
+    tokens: Mapping[str, Usage]
+    turns: int
+    tool_calls: int
+    tool_errors: int
+    duration_ms: int
+    cli_cost_usd: float
+    permission_denials: int
+    sessions: int
+    finished: int  # sessions that ended with a result message
+
+
+def counts(streams: Sequence[Stream], events: Sequence[Event]) -> Counts:
+    tokens: dict[str, Usage] = defaultdict(Usage)
+    for stream in streams:
+        for model, usage in stream.tokens.items():
+            tokens[model] += usage
+    return Counts(
+        tokens=dict(tokens), turns=sum(s.turns for s in streams),
+        tool_calls=sum(1 for e in events if e.kind == "tool"), tool_errors=sum(1 for e in events if e.kind == "result" and e.error),
+        duration_ms=sum(s.duration_ms for s in streams), cli_cost_usd=sum(s.cli_cost_usd for s in streams),
+        permission_denials=sum(s.permission_denials for s in streams), sessions=len(streams),
+        finished=sum(1 for s in streams if s.result is not None),
+    )
+
+
+def counts_json(found: Counts) -> dict[str, object]:
+    data = asdict(found)
+    data["tokens"] = {model: asdict(usage) for model, usage in found.tokens.items()}
+    return data
+
+
+def counts_from_json(data: Mapping[str, object]) -> Counts:
+    tokens = {model: Usage(**usage) for model, usage in dict(data.get("tokens") or {}).items()}  # type: ignore[arg-type]
+    return Counts(tokens=tokens, **{k: v for k, v in data.items() if k != "tokens"})  # type: ignore[arg-type]
+
+
+def skill_name(raw: str) -> str:
+    """A skill's short name: `asdlc:capture-intent` and `/asdlc:capture-intent` are `capture-intent`."""
+    return raw.strip().lstrip("/").split(":")[-1].split()[0] if raw.strip() else ""
+
+
+def skills_loaded(events: Iterable[Event]) -> tuple[str, ...]:
+    """The skills a session loaded, in order, by short name."""
+    return tuple(skill_name(str(e.input.get("skill", ""))) for e in events if e.kind == "tool" and e.name == "Skill")
+
+
+def commands(events: Iterable[Event]) -> tuple[str, ...]:
+    return tuple(e.command for e in events if e.kind == "tool" and e.command)
+
+
+def first(events: Sequence[Event], wanted: Callable[[Event], bool]) -> int | None:
+    """The index of the first event that matches, or None."""
+    return next((n for n, e in enumerate(events) if wanted(e)), None)
+
+
+def person_index(events: Sequence[Event], step: str) -> int | None:
+    return first(events, lambda e: e.kind == "person" and e.name == step)
+
+
+def runs_command(pattern: str) -> Callable[[Event], bool]:
+    """A predicate: a Bash call whose command text matches the regular expression anywhere."""
+    compiled = re.compile(pattern)
+    return lambda e: e.kind == "tool" and bool(e.command) and bool(compiled.search(e.command))
+
+
+_HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1.*?\n\2\b", re.S)
+_QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
+
+
+def shell_segments(command: str) -> tuple[str, ...]:
+    """The simple commands a shell line runs, with quoted text and here-documents blanked out, so a
+    word inside an argument (a plan that mentions `git push`) is never taken for a command run."""
+    bare = _QUOTED.sub("''", _HEREDOC.sub("", command))
+    return tuple(part.strip() for part in re.split(r"&&|\|\||;|\||\n|\$\(|\)|`", bare) if part.strip())
+
+
+def runs_program(pattern: str) -> Callable[[Event], bool]:
+    """A predicate: a Bash call that runs a command starting with the pattern, such as
+    `asdlc\\s+record-check`, after any leading VAR=value assignments."""
+    compiled = re.compile(r"^(?:\w+=\S*\s+)*(?:" + pattern + ")")
+    return lambda e: e.kind == "tool" and any(compiled.search(part) for part in shell_segments(e.command))
+
+
+def edits_under(folder: str) -> Callable[[Event], bool]:
+    """A predicate: an Edit, Write or NotebookEdit of a file under the folder."""
+    prefix = folder.rstrip("/") + "/"
+    return lambda e: e.kind == "tool" and e.name in ("Edit", "Write", "NotebookEdit", "MultiEdit") and \
+        str(e.input.get("file_path", "")).startswith(prefix)
+
+
+# --- the board and code repositories after a trial ---------------------------------------
+
+
+def frontmatter(text: str) -> dict[str, str | tuple[str, ...]]:
+    """The YAML subset Backlog.md writes: scalars, flow lists and block lists. Written here, not
+    imported from the plugin, so the plugin under test never grades itself."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    end = next((n for n, line in enumerate(lines[1:], start=1) if line.rstrip() == "---"), None)
+    if end is None:
+        return {}
+    fields: dict[str, str | tuple[str, ...]] = {}
+    key = ""
+    for line in lines[1:end]:
+        if line.startswith((" ", "\t", "-")) and key:
+            item = line.strip()
+            if item.startswith("- "):
+                current = fields.get(key, ())
+                fields[key] = (*(current if isinstance(current, tuple) else ()), _unquote(item[2:]))
+            continue
+        name, separator, raw = line.partition(":")
+        if not separator or not name.strip():
+            continue
+        key, raw = name.strip(), raw.strip()
+        if raw.startswith("[") and raw.endswith("]"):
+            fields[key] = tuple(v for v in (_unquote(part) for part in raw[1:-1].split(",")) if v)
+        else:
+            fields[key] = _unquote(raw) if raw else ()
+    return fields
+
+
+def _unquote(raw: str) -> str:
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "'\"":
+        return raw[1:-1].replace("''", "'")
+    return raw
+
+
+@dataclass(frozen=True)
+class BoardItem:
+    path: str
+    id: str
+    title: str
+    status: str
+    type: str
+    assignees: tuple[str, ...]
+    labels: tuple[str, ...]
+    parent: str
+    keys: Mapping[str, str | tuple[str, ...]]
+    text: str
+
+    @property
+    def draft(self) -> bool:
+        return "/drafts/" in f"/{self.path}"
+
+    def key(self, name: str) -> str:
+        value = self.keys.get(name, "")
+        return value if isinstance(value, str) else ",".join(value)
+
+    def section(self, name: str) -> str:
+        """A body section Backlog marks, such as PLAN, NOTES or DESCRIPTION, or COMMENTS."""
+        marker = "COMMENTS" if name == "COMMENTS" else f"SECTION:{name}"
+        found = re.search(rf"<!-- {marker}:BEGIN -->(.*?)<!-- {marker}:END -->", self.text, re.S)
+        return found[1].strip() if found else ""
+
+
+def board_item(path: str, text: str) -> BoardItem | None:
+    keys = frontmatter(text)
+    item_id = keys.get("id")
+    if not isinstance(item_id, str) or not item_id:
+        return None
+
+    def one(name: str) -> str:
+        value = keys.get(name, "")
+        return value if isinstance(value, str) else " ".join(value)
+
+    def many(name: str) -> tuple[str, ...]:
+        value = keys.get(name, ())
+        return (value,) if isinstance(value, str) and value else value if isinstance(value, tuple) else ()
+
+    return BoardItem(path, item_id.upper(), one("title"), one("status"), one("type").lower(), many("assignee"), many("labels"),
+                     one("parent_task_id").upper(), keys, text)
+
+
+@dataclass(frozen=True)
+class BoardCommit:
+    sha: str
+    subject: str
+    body: str
+    files: Mapping[str, str]  # every backlog/ markdown file at this commit
+
+    def items(self) -> dict[str, BoardItem]:
+        found = (board_item(path, text) for path, text in self.files.items() if "/tasks/" in path or "/drafts/" in path)
+        return {item.id if not item.draft else f"{item.id}@draft": item for item in found if item}
+
+    def item(self, item_id: str) -> BoardItem | None:
+        return self.items().get(item_id.upper())
+
+
+@dataclass(frozen=True)
+class RefUpdate:
+    ref: str
+    old: str
+    new: str
+    forced: bool  # the old tip isn't in the new one: history was rewritten
+
+
+@dataclass(frozen=True)
+class CodeRepo:
+    refs: Mapping[str, str]  # branch -> tip, on origin, after the trial
+    baseline: Mapping[str, str]  # branch -> tip, on origin, when the fixture was done
+    commits: Mapping[str, tuple[str, ...]]  # branch -> every commit reachable from its tip
+    updates: tuple[RefUpdate, ...]  # every update origin's reflogs saw during the trial
+    messages: Mapping[str, str] = field(default_factory=dict)  # commit -> its full message, for commits the trial added
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """Everything the checks see, copied out after the agent stopped. No check reads anything else."""
+
+    facts: Mapping[str, object]
+    board: tuple[BoardCommit, ...]  # board origin's main: the fixture's last commit first, then each one the trial pushed
+    clone: Mapping[str, str]  # the agent machine's board clone, working tree, backlog/ files (unpushed changes too)
+    code: Mapping[str, CodeRepo]
+    hooks: tuple[Mapping[str, object], ...]
+    gh_calls: tuple[tuple[str, ...], ...]
+    files: Mapping[str, str]  # anything else a case collected
+    events: tuple[Event, ...]  # every session's events in order, with person steps between them
+    finals: tuple[str, ...]  # each session's final message
+
+    @property
+    def final(self) -> BoardCommit:
+        return self.board[-1]
+
+    @property
+    def new_commits(self) -> tuple[BoardCommit, ...]:
+        return self.board[1:]
+
+    def clone_items(self) -> dict[str, BoardItem]:
+        found = (board_item(path, text) for path, text in self.clone.items() if "/tasks/" in path or "/drafts/" in path)
+        return {item.id if not item.draft else f"{item.id}@draft": item for item in found if item}
+
+
+def event_json(event: Event) -> dict[str, object]:
+    return {k: v for k, v in asdict(event).items() if v not in ("", {}, False, -1)} | {"session": event.session, "kind": event.kind}
+
+
+def event_from_json(data: Mapping[str, object]) -> Event:
+    return Event(**data)  # type: ignore[arg-type]
+
+
+def outcome_json(found: Outcome) -> dict[str, object]:
+    return {
+        "facts": dict(found.facts),
+        "board": [asdict(c) for c in found.board],
+        "clone": dict(found.clone),
+        "code": {name: {**asdict(repo), "updates": [asdict(u) for u in repo.updates]} for name, repo in found.code.items()},
+        "hooks": list(found.hooks), "gh_calls": [list(c) for c in found.gh_calls], "files": dict(found.files),
+        "events": [event_json(e) for e in found.events], "finals": list(found.finals),
+    }
+
+
+def outcome_from_json(data: Mapping[str, object]) -> Outcome:
+    code = {}
+    for name, raw in dict(data.get("code") or {}).items():
+        repo = dict(raw)
+        code[name] = CodeRepo(refs=repo["refs"], baseline=repo["baseline"], commits={k: tuple(v) for k, v in repo["commits"].items()},
+                              updates=tuple(RefUpdate(**u) for u in repo["updates"]), messages=repo.get("messages", {}))
+    return Outcome(
+        facts=data.get("facts", {}), board=tuple(BoardCommit(**c) for c in data.get("board", [])), clone=data.get("clone", {}),
+        code=code, hooks=tuple(data.get("hooks", [])), gh_calls=tuple(tuple(c) for c in data.get("gh_calls", [])),
+        files=data.get("files", {}), events=tuple(event_from_json(e) for e in data.get("events", [])), finals=tuple(data.get("finals", [])),
+    )
+
+
+def board_commits_before(found: Outcome, step: str) -> tuple[BoardCommit, ...]:
+    """The board commits that existed when a person step ran: the fixture's, then the trial's up to it."""
+    index = person_index(found.events, step)
+    if index is None:
+        return found.board
+    marked = found.events[index].board_commits
+    return found.board[:marked] if marked >= 0 else found.board
+
+
+# --- checks -----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    name: str
+    passed: bool
+    detail: str
+
+
+CheckFunction = Callable[[Outcome, Case], tuple[bool, str] | bool]
+
+
+def run_checks(found: Outcome, case: Case, resolve: Callable[[str], CheckFunction]) -> tuple[CheckResult, ...]:
+    """Every check the case names, in order. A check that raises fails, with why."""
+    results = []
+    for name in case.checks:
+        try:
+            verdict = resolve(name)(found, case)
+            passed, detail = verdict if isinstance(verdict, tuple) else (bool(verdict), "")
+        except Exception as error:  # a broken check must fail loudly, never pass
+            passed, detail = False, f"the check raised {type(error).__name__}: {error}"
+        results.append(CheckResult(name, bool(passed), detail))
+    return tuple(results)
+
+
+def validation_problems(case: str, reference: Sequence[CheckResult], null: Sequence[CheckResult]) -> list[str]:
+    """Practice 2: the reference run passes every check, and the null run fails at least one."""
+    problems = [f"{case}: the reference run fails {r.name}: {r.detail or 'no detail'}" for r in reference if not r.passed]
+    if null and all(r.passed for r in null):
+        problems.append(f"{case}: the null run passes every check, so the checks can't tell doing nothing from doing the work")
+    return problems
+
+
+# --- statistics and cost -----------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TrialResult:
+    case: str
+    kind: str
+    suite: str
+    trial: int
+    passed: bool
+    checks: tuple[CheckResult, ...]
+    counts: Counts
+    arm: str
+    model: str
+    plugin: str
+    folder: str = ""
+
+
+def pass_at_k(n: int, c: int, k: int) -> float:
+    """The chance that at least one of k trials passes, estimated from c passes in n."""
+    if n == 0 or k == 0:
+        return 0.0
+    k = min(k, n)
+    return 1.0 if n - c < k else 1.0 - math.comb(n - c, k) / math.comb(n, k)
+
+
+def pass_hat_k(n: int, c: int, k: int) -> float:
+    """pass^k: the chance that all k trials pass, estimated from c passes in n."""
+    if n == 0 or k == 0:
+        return 0.0
+    k = min(k, n)
+    return math.comb(c, k) / math.comb(n, k)
+
+
+def clustered_se(groups: Sequence[Sequence[float]]) -> float:
+    """The standard error of the mean of every trial, clustered by case: trials of one case
+    aren't independent, so each cluster's summed deviation counts as one unit."""
+    values = [v for group in groups for v in group]
+    if not values:
+        return 0.0
+    mean = sum(values) / len(values)
+    return math.sqrt(sum(sum(v - mean for v in group) ** 2 for group in groups)) / len(values)
+
+
+def detectable(se: float) -> float:
+    """The smallest difference in pass rate two runs of this size can tell apart (two-sided 5%, 80% power)."""
+    return (Z_ALPHA + Z_BETA) * math.sqrt(2) * se
+
+
+@dataclass(frozen=True)
+class Price:
+    model: str
+    input: float
+    output: float
+    cache_read: float
+    cache_write: float
+    cache_write_1h: float
+
+
+def parse_prices(text: str) -> tuple[str, tuple[Price, ...]]:
+    """The price table's version and its rows, dollars per million tokens."""
+    data = tomllib.loads(text)
+    rows = tuple(Price(model, float(p["input"]), float(p["output"]), float(p["cache_read"]), float(p["cache_write"]),
+                       float(p.get("cache_write_1h", p["cache_write"]))) for model, p in dict(data.get("models", {})).items())
+    return str(data.get("version", "unversioned")), rows
+
+
+def price_for(model: str, prices: Sequence[Price]) -> Price | None:
+    """The row whose model id is the longest prefix of this model's id."""
+    matching = [p for p in prices if model.startswith(p.model)]
+    return max(matching, key=lambda p: len(p.model)) if matching else None
+
+
+def cost(tokens: Mapping[str, Usage], prices: Sequence[Price]) -> tuple[float, tuple[str, ...]]:
+    """Dollars at API prices, and the models the table has no price for."""
+    total, unknown = 0.0, []
+    for model, usage in tokens.items():
+        price = price_for(model, prices)
+        if price is None:
+            if usage != Usage():
+                unknown.append(model)
+            continue
+        total += (usage.input * price.input + usage.output * price.output + usage.cache_read * price.cache_read
+                  + (usage.cache_write - usage.cache_write_1h) * price.cache_write + usage.cache_write_1h * price.cache_write_1h) / 1_000_000
+    return total, tuple(sorted(unknown))
+
+
+def summarise(trials: Sequence[TrialResult], prices: Sequence[Price]) -> dict[str, object]:
+    """Per case and overall: pass@k, pass^k, mean pass rate with standard error, what it can detect, counts and cost."""
+    by_case: dict[str, list[TrialResult]] = defaultdict(list)
+    for trial in trials:
+        by_case[trial.case].append(trial)
+    cases = {}
+    for name, runs in sorted(by_case.items()):
+        n, c = len(runs), sum(t.passed for t in runs)
+        mean = c / n
+        failing = Counter(r.name for t in runs for r in t.checks if not r.passed)
+        tokens: dict[str, Usage] = defaultdict(Usage)
+        for t in runs:
+            for model, usage in t.counts.tokens.items():
+                tokens[model] += usage
+        dollars, unknown = cost(tokens, prices)
+        cases[name] = {
+            "kind": runs[0].kind, "suite": runs[0].suite, "trials": n, "passed": c,
+            "pass_at_k": pass_at_k(n, c, n), "pass_hat_k": pass_hat_k(n, c, n), "k": n,
+            "mean": mean, "se": math.sqrt(mean * (1 - mean) / n) if n > 1 else 0.0,
+            "failing_checks": dict(failing), "cost_usd": dollars, "unpriced_models": unknown,
+            "turns": sum(t.counts.turns for t in runs), "tool_calls": sum(t.counts.tool_calls for t in runs),
+            "tool_errors": sum(t.counts.tool_errors for t in runs), "duration_ms": sum(t.counts.duration_ms for t in runs),
+            "cli_cost_usd": sum(t.counts.cli_cost_usd for t in runs),
+            "tokens": {m: asdict(u) for m, u in sorted(tokens.items())},
+        }
+    overall: dict[str, object] = {}
+    for label, wanted in (("all", None), *((str(s), str(s)) for s in Suite)):
+        groups = [[float(t.passed) for t in runs] for runs in by_case.values() if wanted is None or runs[0].suite == wanted]
+        values = [v for g in groups for v in g]
+        if not values:
+            continue
+        se = clustered_se(groups)
+        worst = 0.5 / math.sqrt(len(groups))  # a pass rate of one half, every trial of a case alike
+        overall[label] = {
+            "cases": len(groups), "trials": len(values), "mean": sum(values) / len(values), "se": se,
+            "detectable": detectable(se) if se > 0 else None, "detectable_worst_case": detectable(worst),
+        }
+    tokens: dict[str, Usage] = defaultdict(Usage)
+    for trial in trials:
+        for model, usage in trial.counts.tokens.items():
+            tokens[model] += usage
+    dollars, unknown = cost(tokens, prices)
+    return {
+        "cases": cases, "overall": overall,
+        "totals": {"trials": len(trials), "cost_usd": dollars, "unpriced_models": unknown,
+                   "cli_cost_usd": sum(t.counts.cli_cost_usd for t in trials), "turns": sum(t.counts.turns for t in trials),
+                   "tool_calls": sum(t.counts.tool_calls for t in trials), "tool_errors": sum(t.counts.tool_errors for t in trials),
+                   "duration_ms": sum(t.counts.duration_ms for t in trials),
+                   "tokens": {m: asdict(u) for m, u in sorted(tokens.items())}},
+    }
+
+
+def key_moments(events: Sequence[Event], limit: int = 12) -> list[str]:
+    """What a reader checks a check against: skills, subagents, asdlc and git pushes, person steps, errors, the end."""
+    moments = []
+    for event in events:
+        if event.kind == "person":
+            moments.append(f"[person] {event.name}: {event.text}")
+        elif event.kind == "tool" and event.name == "Skill":
+            moments.append(f"[skill] {event.input.get('skill', '')}")
+        elif event.kind == "tool" and event.name in ("Agent", "Task"):
+            moments.append(f"[agent] {event.input.get('subagent_type', '')} model={event.input.get('model', '')}")
+        elif event.kind == "tool" and re.search(r"\b(asdlc|git\b.*\bpush|gh )", event.command):
+            moments.append(f"[bash{' sub' if event.parent else ''}] {event.command.splitlines()[0][:160]}")
+        elif event.kind == "result" and event.error:
+            moments.append(f"[error] {event.name}: {event.text.strip().splitlines()[0][:160] if event.text.strip() else ''}")
+        elif event.kind == "end":
+            moments.append(f"[end] {event.text.strip()[:240]}")
+    return moments if len(moments) <= limit else [*moments[: limit - 3], "...", *moments[-2:]]
+
+
+def _detect_text(difference: float) -> str:
+    return f"{difference:.2f}" if difference < 1 else "more than the whole range, so no change at all (add cases and trials)"
+
+
+def report_lines(summary: Mapping[str, object], meta: Mapping[str, object], version: str,
+                 samples: Sequence[tuple[TrialResult, Sequence[str]]]) -> list[str]:
+    lines = [f"Eval run {meta.get('run', '')}: plugin {meta.get('plugin', '')}, arm {meta.get('arm', '')}, "
+             f"model {meta.get('model', '') or 'per case'}, {meta.get('where', '')}, prices {version}", ""]
+    lines.append("| Case | Kind | Suite | Passed | pass@k | pass^k | Mean (SE) | Failing checks |")
+    lines.append("|---|---|---|---|---|---|---|---|")
+    for name, case in dict(summary["cases"]).items():
+        failing = ", ".join(f"{check} x{count}" for check, count in case["failing_checks"].items()) or "-"
+        lines.append(f"| {name} | {case['kind']} | {case['suite']} | {case['passed']}/{case['trials']} | {case['pass_at_k']:.2f} "
+                     f"(k={case['k']}) | {case['pass_hat_k']:.2f} | {case['mean']:.2f} ({case['se']:.2f}) | {failing} |")
+    lines.append("")
+    for label, found in dict(summary["overall"]).items():
+        detect = _detect_text(found["detectable"]) if found["detectable"] is not None else \
+            f"not measured, since no trial differed from another; at a pass rate of one half it would be {_detect_text(found['detectable_worst_case'])}"
+        lines.append(f"- {label}: mean pass rate {found['mean']:.2f}, SE {found['se']:.2f} clustered by case, over "
+                     f"{found['cases']} cases and {found['trials']} trials. Smallest change two runs of this size can detect: {detect}.")
+    totals = summary["totals"]
+    lines += ["", f"Totals: {totals['trials']} trials, {totals['turns']} turns, {totals['tool_calls']} tool calls "
+                  f"({totals['tool_errors']} errors), {totals['duration_ms'] / 1000:.0f}s of agent time; "
+                  f"cost at API prices ${totals['cost_usd']:.4f} (Claude Code's own estimate ${totals['cli_cost_usd']:.4f})"
+                  + (f"; no price for {', '.join(totals['unpriced_models'])}" if totals["unpriced_models"] else "") + ".", ""]
+    lines.append("| Model | Input | Output | Cache read | Cache write (1h of it) |")
+    lines.append("|---|---|---|---|---|")
+    for model, usage in dict(totals["tokens"]).items():
+        lines.append(f"| {model} | {usage['input']} | {usage['output']} | {usage['cache_read']} | {usage['cache_write']} ({usage['cache_write_1h']}) |")
+    for trial, moments in samples:
+        verdict = "passed" if trial.passed else "FAILED: " + ", ".join(r.name for r in trial.checks if not r.passed)
+        lines += ["", f"### {trial.case} trial {trial.trial}: {verdict}"]
+        lines += [f"- {r.name}: {'pass' if r.passed else 'fail'}{': ' + r.detail if r.detail else ''}" for r in trial.checks]
+        lines += [f"    {m}" for m in moments]
+    return lines
+
+
+def sample(trials: Sequence[TrialResult], failing: int, passing: int) -> list[TrialResult]:
+    """Failing trials first, one per case before any second; then a few passing ones to check the checks."""
+    chosen: list[TrialResult] = []
+    for wanted, limit in ((False, failing), (True, passing)):
+        pool = [t for t in trials if t.passed == wanted]
+        seen: set[str] = set()
+        ordered = [t for t in pool if not (t.case in seen or seen.add(t.case))] + [t for t in pool]
+        for t in ordered:
+            if len([c for c in chosen if c.passed == wanted]) >= limit:
+                break
+            if t not in chosen:
+                chosen.append(t)
+    return chosen
+
+
+# --- the shell: fixtures, agents, outcomes -----------------------------------------------
+
+
+def _git(where: Path, *args: str, env: Mapping[str, str] | None = None, check: bool = True) -> str:
+    done = subprocess.run(["git", "-C", str(where), *args], capture_output=True, text=True, env=env)
+    if check and done.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} in {where}: {done.stderr.strip()}")
+    return done.stdout.strip()
+
+
+SEED_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Seed", "GIT_AUTHOR_EMAIL": "seed@example.com",
+            "GIT_COMMITTER_NAME": "Seed", "GIT_COMMITTER_EMAIL": "seed@example.com"}
+
+
+class Fixture:
+    """One trial's world, under a fresh temporary folder outside the repository.
+
+    `agent/` is everything the agent may see: its machine (home, clones, settings) and the
+    origins it pushes to. `others/` holds other engineers' machines and the seed, which the
+    agent never sees; in a container only `agent/` is mounted.
+    """
+
+    def __init__(self, root: Path, plugin: Path) -> None:
+        self.root = root
+        self.plugin = plugin  # the plugin whose scripts the fixture and the reference run use
+        self.agent = root / "agent"
+        self.others = root / "others"
+        self.origins = self.agent / "origins"
+        self.bin = self.agent / "bin"
+        self.tools = root / "tools"  # host tools on the agent's PATH, never mounted in a container
+        for folder in (self.agent, self.others, self.origins, self.bin, self.tools):
+            folder.mkdir(parents=True, exist_ok=True)
+        for name in ("asdlc", "asdlc-plugin"):
+            launcher = self.bin / name
+            launcher.write_text(
+                "#!/bin/sh\n"
+                f'if [ -n "$ASDLC_EVAL_PYTHON" ]; then exec "$ASDLC_EVAL_PYTHON" "{plugin / "scripts" / name}" "$@"; fi\n'
+                f'exec uv run --quiet --script "{plugin / "scripts" / name}" "$@"\n'
+            )
+            launcher.chmod(0o755)
+        for tool in ("uv", "backlog", "node", "python3", "git"):
+            found = shutil.which(tool)
+            if found and not (self.tools / tool).exists():
+                (self.tools / tool).symlink_to(found)
+        self.gh_log = self.agent / "gh-calls.jsonl"
+
+    def seed_env(self) -> dict[str, str]:
+        return {**os.environ, **SEED_ENV, "PATH": f"{self.bin}{os.pathsep}{self.tools}{os.pathsep}/usr/bin:/bin"}
+
+    def add_gh(self) -> None:
+        """A stand-in gh on the agent's PATH that records every call and only comments."""
+        script = self.bin / "gh"
+        script.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \"$@\")\" >> \"{self.gh_log}\"\n"
+            'case "$1 $2" in\n'
+            '  "--version "*) echo "gh version 2.80.0 (eval)";;\n'
+            '  "auth status") echo "Logged in to github.com (eval)";;\n'
+            '  "pr comment") echo "$3#issuecomment-1";;\n'
+            '  "pr view") echo "{}";;\n'
+            '  *) echo "eval gh: not available here" >&2; exit 1;;\n'
+            "esac\n"
+        )
+        script.chmod(0o755)
+
+
+@dataclass
+class Machine:
+    """One engineer's computer inside a fixture: their git identity, registry, board and clones."""
+
+    fixture: Fixture
+    name: str
+    home: Path
+    board: Path
+    env: dict[str, str]
+    clones: dict[str, Path] = field(default_factory=dict)
+
+    def run(self, *args: str, cwd: Path | None = None, ok: bool = True, env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        done = subprocess.run(list(args), cwd=cwd or self.board, capture_output=True, text=True, env={**os.environ, **self.env, **(env or {})})
+        if ok and done.returncode != 0:
+            raise RuntimeError(f"{self.name}: {' '.join(args)} failed ({done.returncode}): {done.stderr.strip() or done.stdout.strip()}")
+        return done
+
+    def asdlc(self, *args: str, cwd: Path | None = None, ok: bool = True) -> subprocess.CompletedProcess[str]:
+        return self.run(sys.executable, str(self.fixture.plugin / "scripts" / "asdlc"), *args, cwd=cwd, ok=ok)
+
+    def plugin(self, *args: str, ok: bool = True) -> subprocess.CompletedProcess[str]:
+        return self.run(sys.executable, str(self.fixture.plugin / "scripts" / "asdlc-plugin"), *args, ok=ok)
+
+    def json(self, *args: str, cwd: Path | None = None) -> dict[str, object]:
+        return json.loads(self.asdlc(*args, "--json", cwd=cwd).stdout)
+
+    def git(self, where: Path, *args: str) -> str:
+        return self.run("git", "-C", str(where), *args).stdout.strip()
+
+
+def machine(fixture: Fixture, name: str, board_origin: Path, *, agent: bool) -> Machine:
+    """An engineer's machine: home under agent/ for the agent's engineer, under others/ for anyone else."""
+    home = (fixture.agent if agent else fixture.others) / name
+    home.mkdir(parents=True)
+    gitconfig = home / ".gitconfig"
+    gitconfig.write_text(f"[asdlc]\n\tengineer = {name}\n[user]\n\tname = {name.title()}\n\temail = {name}@example.com\n"
+                         "[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n")
+    env = {"HOME": str(home), "GIT_CONFIG_GLOBAL": str(gitconfig), "GIT_CONFIG_NOSYSTEM": "1", "XDG_CONFIG_HOME": str(home / ".config"),
+           "XDG_STATE_HOME": str(home / ".local" / "state"), "ASDLC_BACKLOG": "backlog", "ASDLC_GH": "",
+           "PATH": f"{fixture.bin}{os.pathsep}{fixture.tools}{os.pathsep}/usr/bin:/bin", "ASDLC_EVAL_PYTHON": sys.executable}
+    board = home / "tasks"
+    found = Machine(fixture, name, home, board, env)
+    found.run("git", "clone", "--quiet", str(board_origin), str(board), cwd=home)
+    return found
+
+
+def bare(path: Path) -> Path:
+    """A bare origin that keeps a reflog, so a forced update during the trial is seen."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "--quiet", "--bare", "-b", "main", str(path)], check=True, capture_output=True, env={**os.environ, **SEED_ENV})
+    _git(path, "config", "core.logAllRefUpdates", "always")
+    return path
+
+
+# The scripted runs: a reference that does the right thing and a null that does nothing. Both
+# write the same stream-json a real session writes, so one parser and one set of checks serve all.
+
+
+class Script:
+    """A scripted session: each action really runs, and is written down as a session would be."""
+
+    def __init__(self, env: Mapping[str, str], cwd: Path, out: list[str], session_id: str) -> None:
+        self.env, self.cwd, self.out, self.session_id = dict(env), cwd, out, session_id
+        self.parent = ""
+        self.turns = 0
+        self._ids = 0
+
+    def _emit(self, record: dict[str, object]) -> None:
+        self.out.append(json.dumps({**record, "session_id": self.session_id, "parent_tool_use_id": self.parent or None}))
+
+    def _call(self, name: str, tool_input: Mapping[str, object], output: str, error: bool) -> None:
+        self._ids += 1
+        tool_id = f"ref_{self.session_id[:8]}_{self._ids}"
+        self.turns += 1
+        self._emit({"type": "assistant", "message": {"id": tool_id, "model": "reference", "content": [
+            {"type": "tool_use", "id": tool_id, "name": name, "input": dict(tool_input)}], "usage": {}}})
+        self._emit({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tool_id, "is_error": error, "content": output}]}})
+        if name in ("Agent", "Task"):
+            self.parent = tool_id
+
+    def bash(self, command: str, cwd: Path | None = None, ok: bool = True) -> subprocess.CompletedProcess[str]:
+        where = cwd or self.cwd
+        done = subprocess.run(["sh", "-c", command], cwd=where, capture_output=True, text=True, env={**os.environ, **self.env})
+        shown = command if where == self.cwd else f"cd {where} && {command}"
+        self._call("Bash", {"command": shown}, (done.stdout + done.stderr)[-4000:], done.returncode != 0)
+        if ok and done.returncode != 0:
+            raise RuntimeError(f"reference run: {command} failed ({done.returncode}): {done.stderr.strip() or done.stdout.strip()}")
+        return done
+
+    def write(self, path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        self._call("Write", {"file_path": str(path), "content": text}, "written", False)
+
+    def read(self, path: Path) -> str:
+        text = path.read_text()
+        self._call("Read", {"file_path": str(path)}, text[-4000:], False)
+        return text
+
+    def skill(self, name: str) -> None:
+        self._call("Skill", {"skill": name}, f"Launching skill: {name}", False)
+
+    def agent(self, subagent_type: str, prompt: str, model: str = "", effort: str = "") -> None:
+        """What follows runs as this subagent, until `back()`."""
+        self.parent = ""
+        self._call("Agent", {"subagent_type": subagent_type, "prompt": prompt, "model": model, "effort": effort}, "", False)
+
+    def back(self) -> None:
+        self.parent = ""
+
+    def say(self, text: str) -> None:
+        self.turns += 1
+        self._emit({"type": "assistant", "message": {"id": f"say_{len(self.out)}", "model": "reference", "content": [{"type": "text", "text": text}], "usage": {}}})
+
+    def end(self, text: str = "") -> None:
+        self.parent = ""
+        self.out.append(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text, "session_id": self.session_id,
+                                    "num_turns": self.turns, "duration_ms": 0, "total_cost_usd": 0, "modelUsage": {}}))
+
+
+@dataclass(frozen=True)
+class Options:
+    model: str = ""  # overrides every case's own model
+    arm: Arm = Arm.WITH_PLUGIN
+    container: bool = False
+    image: str = IMAGE
+    deny_read: tuple[str, ...] = ()  # host folders the agent must not read: this repository and the results
+
+
+def load_case(folder: Path) -> tuple[Case, ModuleType]:
+    """A case's definition and its module (fixture builder, reference run, person steps, checks)."""
+    case = parse_case((folder / "case.toml").read_text(), folder.name)
+    sys.modules.setdefault("asdlc_eval", sys.modules[__name__])
+    if str(EVALS) not in sys.path:
+        sys.path.insert(0, str(EVALS))
+    spec = importlib.util.spec_from_file_location(f"eval_case_{folder.name.replace('-', '_')}", folder / "case.py")
+    if spec is None or spec.loader is None:
+        raise CaseError(f"{folder.name}: no case.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    missing = [name for name in ("build", "reference") if not hasattr(module, name)]
+    if missing:
+        raise CaseError(f"{folder.name}: case.py has no {', '.join(missing)}")
+    return case, module
+
+
+def resolver(module: ModuleType, names: str) -> Callable[[str], Callable[..., object]]:
+    """Find a check or a person step by name: in the case's module, then in evals/<names>.py."""
+    shared = importlib.import_module(names)
+
+    def find(name: str) -> Callable[..., object]:
+        for where in (module, shared):
+            found = getattr(where, name, None)
+            if callable(found):
+                return found
+        raise CaseError(f"{module.__name__}: no {names[:-1]} named {name!r} in case.py or evals/{names}.py")
+    return find
+
+
+def all_cases(selected: Sequence[str]) -> list[Path]:
+    folders = sorted(p for p in CASES.iterdir() if (p / "case.toml").exists())
+    if selected:
+        unknown = sorted(set(selected) - {p.name for p in folders})
+        if unknown:
+            raise CaseError(f"no case named {', '.join(unknown)}; the cases are {', '.join(p.name for p in folders)}")
+        folders = [p for p in folders if p.name in selected]
+    return folders
+
+
+def _snapshot(origin: Path, sha: str) -> dict[str, str]:
+    listing = _git(origin, "ls-tree", "-r", "--name-only", sha, "--", "backlog")
+    paths = [p for p in listing.splitlines() if p.endswith(".md")]
+    if not paths:
+        return {}
+    done = subprocess.run(["git", "-C", str(origin), "cat-file", "--batch"], input="".join(f"{sha}:{p}\n" for p in paths).encode(),
+                          capture_output=True, check=True)
+    files, data = {}, done.stdout
+    for path in paths:
+        header, _, data = data.partition(b"\n")
+        parts = header.split()  # <sha> blob <size>, or <name> missing
+        size = int(parts[2]) if len(parts) == 3 else 0
+        files[path], data = data[:size].decode(errors="replace"), data[size + 1:]
+    return files
+
+
+def board_history(origin: Path, baseline: str) -> tuple[BoardCommit, ...]:
+    """The fixture's last board commit, then every commit the trial added to origin's main, oldest first."""
+    log = _git(origin, "log", "--reverse", "--format=%H%x1f%s%x1f%b%x1e", f"{baseline}..main")
+    shas = [(baseline, _git(origin, "log", "-1", "--format=%s", baseline), "")]
+    for record in log.split("\x1e"):
+        if record.strip():
+            sha, subject, body = (record.strip("\n").split("\x1f") + ["", ""])[:3]
+            shas.append((sha, subject, body.strip()))
+    return tuple(BoardCommit(sha, subject, body, _snapshot(origin, sha)) for sha, subject, body in shas)
+
+
+def code_repo(origin: Path, baseline: Mapping[str, str]) -> CodeRepo:
+    refs = {}
+    for line in _git(origin, "for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads").splitlines():
+        name, sha = line.split()
+        refs[name] = sha
+    commits = {name: tuple(_git(origin, "rev-list", sha).split()) for name, sha in refs.items()}
+    updates = []
+    logs = origin / "logs" / "refs" / "heads"
+    for log in sorted(logs.rglob("*")) if logs.exists() else ():
+        if not log.is_file():
+            continue
+        ref = str(log.relative_to(logs))
+        for line in log.read_text().splitlines():
+            old, new = line.split()[:2]
+            if set(old) == {"0"} or set(new) == {"0"} or (baseline.get(ref) and old == new):
+                continue
+            ancestor = subprocess.run(["git", "-C", str(origin), "merge-base", "--is-ancestor", old, new], capture_output=True).returncode == 0
+            updates.append(RefUpdate(ref, old, new, not ancestor))
+    known = set(_git(origin, "rev-list", *baseline.values()).split()) if baseline else set()
+    messages = {sha: _git(origin, "log", "-1", "--format=%B", sha) for shas in commits.values() for sha in shas if sha not in known}
+    return CodeRepo(refs, dict(baseline), commits, tuple(updates), messages)
+
+
+def code_refs(origin: Path) -> dict[str, str]:
+    found = {}
+    for line in _git(origin, "for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads").splitlines():
+        name, sha = line.split()
+        found[name] = sha
+    return found
+
+
+def clear_reflogs(origin: Path) -> None:
+    """Start the trial's reflog empty, so only the trial's own updates are judged."""
+    logs = origin / "logs"
+    if logs.exists():
+        shutil.rmtree(logs)
+
+
+def collect(facts: Mapping[str, object], baseline: Mapping[str, object], events: Sequence[Event], finals: Sequence[str],
+            extra: Mapping[str, str], fixture: Fixture) -> Outcome:
+    board_origin = Path(str(facts["board_origin"]))
+    clone = Path(str(facts["board"]))
+    clone_files = {str(p.relative_to(clone)): p.read_text(errors="replace") for p in sorted((clone / "backlog").rglob("*.md"))} \
+        if (clone / "backlog").exists() else {}
+    code = {name: code_repo(Path(str(path)), dict(baseline["code"][name]))  # type: ignore[index]
+            for name, path in dict(facts.get("code_origins", {})).items()}
+    hooks = []
+    for folder in [clone, *(Path(str(p)) for p in dict(facts.get("clones", {})).values())]:
+        log = folder / ".asdlc" / "hooks.jsonl"
+        if log.exists():
+            for line in log.read_text().splitlines():
+                try:
+                    hooks.append(json.loads(line))
+                except ValueError:
+                    continue
+    gh = tuple(tuple(json.loads(line)) for line in fixture.gh_log.read_text().splitlines() if line.strip()) if fixture.gh_log.exists() else ()
+    return Outcome(dict(facts), board_history(board_origin, str(baseline["board"])), clone_files, code, tuple(hooks), gh, dict(extra),
+                   tuple(events), tuple(finals))
+
+
+def _plain(value: object) -> object:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(k): _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
+
+
+def board_count(facts: Mapping[str, object]) -> int:
+    """How many board commits the outcome will hold right now: the fixture's last, plus the trial's."""
+    origin, baseline = Path(str(facts["board_origin"])), str(facts["_baseline_board"])
+    return 1 + int(_git(origin, "rev-list", "--count", f"{baseline}..main"))
+
+
+# --- running a trial ---------------------------------------------------------------------
+
+
+def trial(case: Case, module: ModuleType, plugin: Path, folder: Path, run_session: Callable[..., tuple[list[str], str]],
+          mode: str, fixture_root: Path) -> tuple[Outcome, tuple[Stream, ...], dict[str, object]]:
+    """Build the fixture, run every session with the person steps between them, and collect the outcome."""
+    fixture = Fixture(fixture_root, plugin)
+    facts = _plain(module.build(fixture))
+    assert isinstance(facts, dict)
+    baseline = {"board": _git(Path(str(facts["board_origin"])), "rev-parse", "main"),
+                "code": {name: code_refs(Path(str(p))) for name, p in dict(facts.get("code_origins", {})).items()}}
+    for origin in [facts["board_origin"], *dict(facts.get("code_origins", {})).values()]:
+        clear_reflogs(Path(str(origin)))
+    facts["_baseline_board"] = baseline["board"]
+    steps = resolver(module, "steps")
+    streams: list[Stream] = []
+    events: list[Event] = []
+    first_id = ""
+    for index, session in enumerate(case.runs):
+        said = []
+        for step in session.before:
+            said.append(str(steps(step)(fixture, facts) or ""))
+            code = {name: code_refs(Path(str(p))) for name, p in dict(facts.get("code_origins", {})).items()}
+            events.append(Event(index, "person", step, input={"code": code}, text=said[-1], board_commits=board_count(facts)))
+        prompt = fill(session.prompt, {**facts, "person": "\n".join(said)})
+        resume = "" if session.fresh or index == 0 else first_id
+        lines, session_id = run_session(index, prompt, resume, folder / f"session-{index + 1}.jsonl", fixture, facts, module, case, mode)
+        first_id = first_id or session_id
+        stream = parse_stream(lines, index)
+        streams.append(stream)
+        events.extend(stream.events)
+    events = list(merge_subagent_events(events, subagent_events(fixture)))
+    extra = dict(getattr(module, "collect", lambda f, x: {})(fixture, facts))
+    found = collect(facts, baseline, events, [s.result.get("result", "") if s.result else "" for s in streams], extra, fixture)
+    return found, tuple(streams), facts
+
+
+def subagent_events(fixture: Fixture) -> list[Event]:
+    """Tool calls from subagent transcripts Claude Code kept in the trial's config folder."""
+    found: list[Event] = []
+    for path in sorted((fixture.agent / "claude-config" / "projects").rglob("subagents/*.jsonl")):
+        stream = parse_stream(path.read_text(errors="replace").splitlines(), -1)
+        found.extend(replace(e, parent=e.parent or path.stem) for e in stream.events if e.kind in ("tool", "result"))
+    return found
+
+
+def scripted_session(index: int, prompt: str, resume: str, transcript: Path, fixture: Fixture, facts: Mapping[str, object],
+                     module: ModuleType, case: Case, mode: str) -> tuple[list[str], str]:
+    """The reference run (the case's scripted correct actions) or the null run (nothing)."""
+    session_id = resume or str(uuid.uuid4())
+    lines = [json.dumps({"type": "system", "subtype": "init", "session_id": session_id, "model": mode, "tools": []})]
+    script = Script(dict(facts["env"]), Path(str(facts["cwd"])), lines, session_id)  # type: ignore[arg-type]
+    if mode == "reference":
+        said = module.reference(script, fixture, facts, index)
+        script.end(str(said or ""))
+    else:
+        null = getattr(module, "null", None)
+        said = null(script, fixture, facts, index) if null else ""
+        script.end(str(said or ""))
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text("\n".join(lines) + "\n")
+    return lines, session_id
+
+
+PASS_THROUGH = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy",
+                "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "TERM", "LANG")
+
+
+def agent_settings(options: Options, container: bool, sandbox_available: bool) -> dict[str, object]:
+    """The session's own settings (practice 10): no web tools, no reading the suite, and in the
+    container a strict sandbox around Bash with no network beyond what Claude Code itself uses."""
+    settings: dict[str, object] = {"permissions": {"deny": ["WebFetch", "WebSearch", *(f"Read(/{p}/**)" for p in options.deny_read)]}}
+    if container or sandbox_available:
+        settings["sandbox"] = {
+            "enabled": True, "failIfUnavailable": container, "allowUnsandboxedCommands": False, "autoAllowBashIfSandboxed": False,
+            "enableWeakerNestedSandbox": container,  # an unprivileged container can't mount a fresh /proc; the container is the boundary
+            "network": {"allowedDomains": [], "strictAllowlist": True},
+            "filesystem": {"denyRead": list(options.deny_read)},
+        }
+    return settings
+
+
+def claude_arguments(case: Case, options: Options, prompt: str, resume: str, plugin: Path, settings: Path) -> list[str]:
+    model = options.model or case.model
+    words = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--plugin-dir", str(plugin), "--settings", str(settings),
+             "--permission-mode", case.permission_mode, "--permission-prompts", "none", "--max-turns", str(case.max_turns), "--max-budget-usd", str(case.max_budget_usd)]
+    if model and model != "default":
+        words += ["--model", model]
+    if case.effort and case.effort != "default":
+        words += ["--effort", case.effort]
+    if case.agent:
+        words += ["--agent", case.agent]
+    if resume:
+        words += ["--resume", resume]
+    return words
+
+
+def agent_env(facts: Mapping[str, object], fixture: Fixture, container: bool) -> dict[str, str]:
+    env = {k: v for k, v in dict(facts["env"]).items() if k != "ASDLC_EVAL_PYTHON"}  # type: ignore[arg-type]
+    env |= {"CLAUDE_CONFIG_DIR": str(fixture.agent / "claude-config"), "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+            "DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+    if container:
+        env["PATH"] = f"{fixture.bin}:/usr/local/bin:/usr/bin:/bin"
+        env["UV_CACHE_DIR"] = str(fixture.agent / "uv-cache")
+    else:
+        home = Path.home()
+        env["UV_CACHE_DIR"] = os.environ.get("UV_CACHE_DIR", str(home / ".cache" / "uv"))
+        env["UV_PYTHON_INSTALL_DIR"] = os.environ.get("UV_PYTHON_INSTALL_DIR", str(home / ".local" / "share" / "uv" / "python"))
+    return env
+
+
+def claude_session(options: Options, release: Path) -> Callable[..., tuple[list[str], str]]:
+    """A real session: `claude -p` natively, or inside the image with only the fixture and the release mounted."""
+    def run(index: int, prompt: str, resume: str, transcript: Path, fixture: Fixture, facts: Mapping[str, object],
+            module: ModuleType, case: Case, mode: str) -> tuple[list[str], str]:
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        settings = fixture.agent / "eval-settings.json"
+        sandbox = bool(shutil.which("bwrap") and shutil.which("socat"))
+        settings.write_text(json.dumps(agent_settings(options, options.container, sandbox), indent=2))
+        words = claude_arguments(case, options, prompt, resume, release, settings)
+        env = agent_env(facts, fixture, options.container)
+        cwd = str(facts["cwd"])
+        if options.container:
+            uid = f"{os.getuid()}:{os.getgid()}"
+            command = ["docker", "run", "--rm", "-i", "--user", uid, "-v", f"{fixture.agent}:{fixture.agent}",
+                       "-v", f"{release}:{release}:ro", "-w", cwd]
+            for key, value in env.items():
+                command += ["-e", f"{key}={value}"]
+            command += [f"-e{key}" for key in PASS_THROUGH if key in os.environ and key not in ("HTTPS_PROXY", "https_proxy")]
+            command += [options.image, "claude", *words]
+            process_env = dict(os.environ)
+        else:
+            command = [shutil.which("claude") or "claude", *words]
+            process_env = {**{k: os.environ[k] for k in PASS_THROUGH if k in os.environ}, **env}
+        started = time.monotonic()
+        with transcript.open("w") as out, transcript.with_suffix(".stderr").open("w") as err:
+            try:
+                subprocess.run(command, cwd=cwd, env=process_env, stdout=out, stderr=err, stdin=subprocess.DEVNULL,
+                               timeout=case.timeout_minutes * 60)
+            except subprocess.TimeoutExpired:
+                err.write(f"\neval: session stopped after {case.timeout_minutes} minutes\n")
+        lines = transcript.read_text(errors="replace").splitlines()
+        session_id = next((str(json.loads(l).get("session_id")) for l in lines if l.startswith("{") and '"session_id"' in l), resume)
+        print(f"  session {index + 1}: {len(lines)} lines in {time.monotonic() - started:.0f}s", flush=True)
+        return lines, session_id
+    return run
+
+
+def export_plugin(source: str, into: Path, arm: Arm) -> tuple[Path, str]:
+    """The plugin under test (R21): a git ref of this repository, exported, or a folder, copied;
+    never the working copy itself. The suite, the tests and the evals spec are left out."""
+    target = into / "plugin"
+    candidate = Path(source).expanduser()
+    if candidate.is_dir():
+        version = _git(candidate, "rev-parse", "--short", "HEAD", check=False) or "folder"
+        dirty = _git(candidate, "status", "--porcelain", check=False)
+        shutil.copytree(candidate, target, ignore=shutil.ignore_patterns(".git", *NOT_FOR_THE_AGENT))
+        version += "+uncommitted" if dirty else ""
+    else:
+        version = _git(ROOT, "rev-parse", "--short", source)
+        target.mkdir(parents=True)
+        excludes = [f":(exclude){p}" for p in (*NOT_FOR_THE_AGENT, *NOT_FOR_THE_AGENT_GLOBS)]
+        archive = subprocess.run(["git", "-C", str(ROOT), "archive", "--format=tar", source, "--", ".", *excludes], capture_output=True, check=True)
+        subprocess.run(["tar", "-x", "-C", str(target)], input=archive.stdout, check=True)
+    for pattern in NOT_FOR_THE_AGENT_GLOBS:
+        for found in target.glob(pattern):
+            found.unlink()
+    if arm == Arm.WITHOUT_SKILLS:
+        for folder in ("skills", "agents"):
+            shutil.rmtree(target / folder, ignore_errors=True)
+    for path in sorted(target.rglob("*"), reverse=True):
+        mode = path.stat().st_mode
+        path.chmod(mode & ~0o222)
+    target.chmod(target.stat().st_mode & ~0o222)
+    return target, version
+
+
+def make_writable(folder: Path) -> None:
+    for path in [folder, *folder.rglob("*")]:
+        if not path.is_symlink():
+            path.chmod(path.stat().st_mode | 0o200)
+
+
+# --- commands ------------------------------------------------------------------------------
+
+
+def validate(selected: Sequence[str], keep: bool = False, plugin_source: str = "") -> int:
+    """Practice 2: every case's reference run passes every check and its null run fails at least one. No model calls.
+
+    The fixtures and reference runs use this working copy's scripts, or with `plugin_source`
+    another version's: an eval change that follows a change to a command can be validated
+    against the branch that changes it."""
+    if plugin_source:
+        with tempfile.TemporaryDirectory(prefix="asdlc-eval-plugin-") as scratch:
+            plugin, _ = export_plugin(plugin_source, Path(scratch), Arm.WITH_PLUGIN)
+            try:
+                return _validate(selected, keep, plugin)
+            finally:
+                make_writable(Path(scratch))
+    return _validate(selected, keep, ROOT)
+
+
+def _validate(selected: Sequence[str], keep: bool, plugin: Path) -> int:
+    problems: list[str] = []
+    folders = all_cases(selected)
+    for folder in folders:
+        try:
+            case, module = load_case(folder)
+            checks = resolver(module, "checks")
+            for check in case.checks:
+                checks(check)
+            results = {}
+            for mode in ("reference", "null"):
+                with tempfile.TemporaryDirectory(prefix=f"asdlc-eval-{mode}-") as scratch:
+                    root = Path(scratch)
+                    found, _, _ = trial(case, module, plugin, root / "transcripts", scripted_session, mode, root / "fixture")
+                    results[mode] = run_checks(found, case, checks)
+                    if keep:
+                        shutil.copytree(root, RESULTS / "validate" / case.name / mode, dirs_exist_ok=True, symlinks=True)
+            failed_null = [r.name for r in results["null"] if not r.passed]
+            print(f"{case.name} ({case.kind}, {case.suite}): reference passes {sum(r.passed for r in results['reference'])}/"
+                  f"{len(results['reference'])}; null fails {len(failed_null)} ({', '.join(failed_null) or 'none'})", flush=True)
+            problems += validation_problems(case.name, results["reference"], results["null"])
+        except (CaseError, RuntimeError, subprocess.CalledProcessError, OSError) as error:
+            problems.append(f"{folder.name}: {error}")
+    for problem in problems:
+        print(f"FAILED {problem}")
+    print(f"validate: {len(folders)} cases, {'all valid' if not problems else f'{len(problems)} problems'}")
+    return 1 if problems else 0
+
+
+def default_plugin() -> str:
+    for ref in ("origin/main", "main"):
+        if subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", ref], capture_output=True).returncode == 0:
+            return ref
+    return "HEAD"
+
+
+def run(selected: Sequence[str], trials: int, options: Options, plugin_source: str, results: Path) -> int:
+    folders = all_cases(selected)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    with tempfile.TemporaryDirectory(prefix="asdlc-eval-plugin-") as scratch:
+        release, version = export_plugin(plugin_source, Path(scratch), options.arm)
+        out = results / f"{stamp}-{version.split('+')[0]}-{options.arm}"
+        out.mkdir(parents=True)
+        options = replace(options, deny_read=tuple(dict.fromkeys([str(ROOT), str(results.resolve())])))
+        meta = {"run": out.name, "plugin": version, "plugin_source": plugin_source, "arm": str(options.arm), "model": options.model,
+                "where": "container " + options.image if options.container else "native", "trials": trials,
+                "claude": subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.strip() if shutil.which("claude") else "",
+                "started": stamp}
+        (out / "run.json").write_text(json.dumps(meta, indent=2))
+        session = claude_session(options, release)
+        for folder in folders:
+            case, module = load_case(folder)
+            checks = resolver(module, "checks")
+            if options.arm not in case.arms:
+                print(f"{case.name}: not run under {options.arm} (it needs the plugin's agents)")
+                continue
+            for number in range(1, trials + 1):
+                where = out / case.name / f"trial-{number}"
+                print(f"{case.name} trial {number}/{trials}", flush=True)
+                with tempfile.TemporaryDirectory(prefix="asdlc-eval-") as scratch_fixture:
+                    try:
+                        found, streams, _ = trial(case, module, release, where, session, "agent", Path(scratch_fixture))
+                    finally:
+                        make_writable(Path(scratch_fixture))
+                    config = Path(scratch_fixture) / "agent" / "claude-config" / "projects"
+                    if config.exists():
+                        shutil.copytree(config, where / "claude-projects", dirs_exist_ok=True)
+                results_ = run_checks(found, case, checks)
+                tally = counts(streams, found.events)
+                passed = all(r.passed for r in results_)
+                (where / "outcome.json").write_text(json.dumps(outcome_json(found), indent=1))
+                (where / "trial.json").write_text(json.dumps({
+                    "case": case.name, "kind": str(case.kind), "suite": str(case.suite), "trial": number, "passed": passed,
+                    "checks": [asdict(r) for r in results_], "counts": counts_json(tally), "arm": str(options.arm),
+                    "model": options.model or case.model, "agent": case.agent, "plugin": version, "source": case.source}, indent=2))
+                print(f"  {'passed' if passed else 'FAILED'}: " + "; ".join(f"{r.name} {'ok' if r.passed else 'fail ' + r.detail}" for r in results_), flush=True)
+    print(f"results: {out}")
+    return report(out, 2)
+
+
+def regrade(folder: Path) -> int:
+    """Grade stored outcomes again with the checks as they are now, and count the stored
+    transcripts again with the parser as it is now: a check or a count fixed after a run judges
+    that run without paying for new transcripts. The old verdicts are kept beside the new."""
+    paths = sorted(folder.glob("*/trial-*/outcome.json"))
+    if not paths:
+        print(f"no trials in {folder}")
+        return 1
+    for path in paths:
+        data = json.loads((path.parent / "trial.json").read_text())
+        case, module = load_case(CASES / data["case"])
+        results = run_checks(outcome_from_json(json.loads(path.read_text())), case, resolver(module, "checks"))
+        passed = all(r.passed for r in results)
+        sessions = sorted(path.parent.glob("session-*.jsonl"), key=lambda p: int(p.stem.split("-")[1]))
+        streams = [parse_stream(p.read_text(errors="replace").splitlines(), n) for n, p in enumerate(sessions)]
+        if streams:
+            data["counts"] = counts_json(counts(streams, outcome_from_json(json.loads(path.read_text())).events))
+        if [asdict(r) for r in results] != data["checks"]:
+            data.setdefault("earlier_checks", []).append({"checks": data["checks"], "passed": data["passed"]})
+        data |= {"checks": [asdict(r) for r in results], "passed": passed}
+        (path.parent / "trial.json").write_text(json.dumps(data, indent=2))
+        print(f"{data['case']} trial {data['trial']}: {'passed' if passed else 'FAILED'}")
+    return report(folder, 2)
+
+
+def load_trials(folder: Path) -> list[TrialResult]:
+    found = []
+    for path in sorted(folder.glob("*/trial-*/trial.json")):
+        data = json.loads(path.read_text())
+        found.append(TrialResult(data["case"], data["kind"], data["suite"], data["trial"], data["passed"],
+                                 tuple(CheckResult(**c) for c in data["checks"]), counts_from_json(data["counts"]),
+                                 data["arm"], data["model"], data["plugin"], str(path.parent)))
+    return found
+
+
+def report(folder: Path | None, samples: int) -> int:
+    if folder is None:
+        runs = sorted(p for p in RESULTS.glob("*") if (p / "run.json").exists()) if RESULTS.exists() else []
+        if not runs:
+            print("no eval results yet: run `scripts/eval run` first")
+            return 1
+        folder = runs[-1]
+    trials = load_trials(folder)
+    if not trials:
+        print(f"no trials in {folder}")
+        return 1
+    version, prices = parse_prices(PRICES.read_text())
+    meta = json.loads((folder / "run.json").read_text()) if (folder / "run.json").exists() else {}
+    chosen = []
+    for t in sample(trials, samples, max(1, samples // 2)):
+        outcome = json.loads((Path(t.folder) / "outcome.json").read_text())
+        chosen.append((t, key_moments([event_from_json(e) for e in outcome.get("events", [])])))
+    print("\n".join(report_lines(summarise(trials, prices), meta, version, chosen)))
+    return 0
+
+
+def main(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(prog="eval", description=__doc__.split("\n\n")[0])
+    commands_ = parser.add_subparsers(dest="command", required=True)
+    checking = commands_.add_parser("validate", help="reference and null runs for every case, with no model calls")
+    checking.add_argument("--case", action="append", default=[])
+    checking.add_argument("--keep", action="store_true", help="keep the fixtures and transcripts under .eval-results/validate")
+    checking.add_argument("--plugin", default="", help="validate against this version's scripts: a git ref or a folder (default: this working copy)")
+    running = commands_.add_parser("run", help="run cases with real Claude Code agents")
+    running.add_argument("--case", action="append", default=[])
+    running.add_argument("--trials", type=int, default=DEFAULT_TRIALS)
+    running.add_argument("--model", default="", help="override every session's model (default: each case's, and asdlc route for workers)")
+    running.add_argument("--arm", choices=[str(a) for a in Arm], default=str(Arm.WITH_PLUGIN))
+    running.add_argument("--plugin", default="", help="the plugin under test: a git ref of this repository or a folder (default: origin/main)")
+    running.add_argument("--container", action="store_true", help="run each agent inside the eval image")
+    running.add_argument("--image", default=IMAGE)
+    running.add_argument("--results", default=str(RESULTS))
+    regrading = commands_.add_parser("regrade", help="grade a run's stored outcomes again with the checks as they are now")
+    regrading.add_argument("folder")
+    reporting = commands_.add_parser("report", help="statistics, counts, cost and a sample of transcripts")
+    reporting.add_argument("folder", nargs="?")
+    reporting.add_argument("--samples", type=int, default=3)
+    args = parser.parse_args(argv)
+    try:
+        match args.command:
+            case "validate":
+                return validate(args.case, args.keep, args.plugin)
+            case "run":
+                if args.trials < 1:
+                    parser.error("--trials must be at least 1")
+                options = Options(model=args.model, arm=Arm(args.arm), container=args.container, image=args.image)
+                return run(args.case, args.trials, options, args.plugin or default_plugin(), Path(args.results))
+            case "regrade":
+                return regrade(Path(args.folder))
+            case "report":
+                return report(Path(args.folder) if args.folder else None, args.samples)
+    except CaseError as error:
+        print(f"eval: {error}", file=sys.stderr)
+        return 2
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -1,0 +1,19 @@
+{
+  "name": "asdlc evals",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "CLAUDE_CODE_VERSION": "2.1.309",
+      "BACKLOG_VERSION": "1.55.2",
+      "UV_VERSION": "0.13.4",
+      "PYTHON_VERSION": "3.15"
+    }
+  },
+  "containerEnv": {
+    "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+    "UV_CACHE_DIR": "/tmp/uv-cache"
+  },
+  "postCreateCommand": "claude --version && uv --version && backlog --version && git --version",
+  "remoteUser": "node"
+}
