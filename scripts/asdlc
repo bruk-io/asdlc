@@ -31,16 +31,19 @@ Usage:
   asdlc [--board <path>] record-check <id> --as <worker> -- <command...>   (in the task's worktree)
   asdlc [--board <path>] finish <id> --as <worker> [--branch <b>] [--pr <url>] --notes <text> [--json]
   asdlc [--board <path>] review-next --as <reviewer> [--fallback] [--json]
-  asdlc [--board <path>] review-done <id> --as <reviewer> --verdict clean|changes --notes <text> [--json]
+  asdlc [--board <path>] review-done <id> --as <reviewer> --verdict clean|changes --findings important=<n>,nit=<n>
+        [--policy <name>]... --plan-matched yes|no --notes <text> [--json]
+  asdlc [--board <path>] intent-started <draft-id> [--at <time>]
   asdlc [--board <path>] doctor [--json]
   asdlc [--board <path>] permissions [--write] [--json]      (--write is a person's command)
-  asdlc [--board <path>] stats [--since <date>] [--json]
+  asdlc [--board <path>] stats [--since <date>] [--stage <stage>] [--json]
 
 The board is `--board`, else $ASDLC_BOARD, else `git config asdlc.board`, else the board
 clone the current directory is in. The engineer is `git config asdlc.engineer`; a worker
 is the engineer's name, a dot and a label, such as kyle.w1; a reviewer's label is r and a
 number, such as kyle.r1. The backlog CLI is
-$ASDLC_BACKLOG, else `backlog` on PATH. `claim`, `next`, `review-next` and `lead` append
+$ASDLC_BACKLOG, else `backlog` on PATH; `stats` asks $ASDLC_GH, else `gh` on PATH, for merge times
+(an empty ASDLC_GH asks nothing). `claim`, `next`, `review-next` and `lead` append
 each attempt to ${XDG_STATE_HOME:-~/.local/state}/asdlc/events.jsonl, which `stats` reads.
 """
 
@@ -62,7 +65,7 @@ import tomllib
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, fields as dataclass_fields, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -105,6 +108,11 @@ APPROVED_SIZE_KEY = "asdlc_plan_approved_size"  # the size label the task had wh
 RESERVED_KEY = "asdlc_reserved_for_author"  # the engineer a released, sent-back task stays reserved for, for one more stale_after
 ACCEPTED_FROM_KEY = "asdlc_accepted_from"  # the draft id an accepted item had, written by asdlc accept
 TRAILER = "Asdlc-Transaction"  # on every board commit asdlc makes, so an unpushed one is known as its own
+WORKER_TRAILER = "Asdlc-Worker"  # on every code commit a worker agent makes, so stats can tell a fix made by workers alone
+INTENT_STARTED_KEY = "asdlc_intent_started"  # when the conversation that became an intent draft began, from asdlc intent-started
+FINDINGS_KEY = "asdlc_review_findings"  # the last verdict's counts, important=N,nit=M, from asdlc review-done
+POLICIES_KEY = "asdlc_review_policies"  # the policies or rules the last verdict's findings cite
+PLAN_MATCHED_KEY = "asdlc_plan_matched"  # yes or no: whether the last reviewed diff still matched the plan
 PENDING = "asdlc-transaction.json"  # in the board clone's git folder while a change is being made
 _REVIEWER_LABEL = re.compile(r"^r\d+$")
 DRAFTS = "backlog/drafts/"
@@ -179,6 +187,11 @@ class Task:
     approved_hash: str = ""  # from APPROVED_HASH_KEY
     approved_size: str = ""  # from APPROVED_SIZE_KEY
     reserved_for_author: str = ""  # from RESERVED_KEY
+    documentation: tuple[str, ...] = ()  # the documents linked on it, such as an intent's spec
+    intent_started: str = ""  # from INTENT_STARTED_KEY
+    review_findings: str = ""  # from FINDINGS_KEY
+    review_policies: tuple[str, ...] = ()  # from POLICIES_KEY
+    plan_matched: str = ""  # from PLAN_MATCHED_KEY
 
 
 def is_draft(task: Task) -> bool:
@@ -317,6 +330,11 @@ def task_from(path: str, text: str) -> Task | None:
         approved_hash=text_field(APPROVED_HASH_KEY),
         approved_size=text_field(APPROVED_SIZE_KEY),
         reserved_for_author=text_field(RESERVED_KEY).removeprefix("@"),
+        documentation=tuple(d.lower() for d in _as_tuple(fields.get("documentation"))),
+        intent_started=text_field(INTENT_STARTED_KEY),
+        review_findings=text_field(FINDINGS_KEY),
+        review_policies=_as_tuple(fields.get(POLICIES_KEY)),
+        plan_matched=text_field(PLAN_MATCHED_KEY).lower(),
     )
 
 
@@ -768,11 +786,51 @@ def review_done_refusal(task: Task | None, task_id: str, reviewer: str) -> str |
     return None
 
 
-def review_comment(reviewer: str, kind: str, verdict: ReviewVerdict, notes: str) -> str:
+@dataclass(frozen=True)
+class ReviewRecord:
+    """What a review records beside its notes, for asdlc stats: its findings by severity, the policies or rules
+    they cite, and whether the diff still matched the plan."""
+
+    important: int
+    nit: int
+    policies: tuple[str, ...]
+    plan_matched: bool
+
+
+def parse_findings(raw: str) -> tuple[int, int]:
+    """`important=N,nit=M` (either may be left out, for 0) as (important, nit).
+
+    Raises:
+        AsdlcError: anything else.
+    """
+    counts = {"important": 0, "nit": 0}
+    for part in (p.strip() for p in raw.split(",") if p.strip()):
+        key, separator, value = part.partition("=")
+        if not separator or key.strip().lower() not in counts or not value.strip().isdigit():
+            raise AsdlcError(f"--findings is important=<n>,nit=<n>, such as important=1,nit=2, not '{raw}'")
+        counts[key.strip().lower()] = int(value.strip())
+    return counts["important"], counts["nit"]
+
+
+def review_record_refusal(verdict: ReviewVerdict, record: ReviewRecord) -> str | None:
+    """Why the counts don't fit the verdict, or None: changes needs an Important finding, clean has none."""
+    if verdict is ReviewVerdict.CHANGES and record.important < 1:
+        return "a changes verdict needs at least one Important finding: count it in --findings important=<n>, or record clean if there is none"
+    if verdict is ReviewVerdict.CLEAN and record.important:
+        return f"--findings has {record.important} Important finding(s), so the verdict is changes, not clean"
+    return None
+
+
+def review_comment(reviewer: str, kind: str, verdict: ReviewVerdict, notes: str, record: ReviewRecord | None = None) -> str:
     what = "changes requested" if verdict is ReviewVerdict.CHANGES else "clean"
     then = (" Back to In Progress for the author's worker." if verdict is ReviewVerdict.CHANGES
             else " It stays In Review for a person to merge.")
-    return f"Review by @{reviewer} ({kind or ReviewKind.CROSS_MACHINE}): {what}.{then}\n\n{notes.strip()}"
+    counted = ""
+    if record is not None:
+        cites = f" Cites: {', '.join(record.policies)}." if record.policies else ""
+        counted = (f"\n\nFindings: {record.important} Important, {record.nit} nit.{cites} "
+                   f"The diff {'matches' if record.plan_matched else 'does not match'} the plan.")
+    return f"Review by @{reviewer} ({kind or ReviewKind.CROSS_MACHINE}): {what}.{then}{counted}\n\n{notes.strip()}"
 
 
 # --- preferences, settings and the machine's registry: text in, data out ---------------
@@ -1131,8 +1189,10 @@ class Where:
     dirty: bool
 
 
-def check_note(command: Sequence[str], code: int, output: str, now: datetime, tail: int = CHECK_TAIL_LINES, where: Where | None = None) -> str:
-    """A task note recording one check: the command, its exit code, where it ran, and the end of its output."""
+def check_note(command: Sequence[str], code: int, output: str, now: datetime, tail: int = CHECK_TAIL_LINES, where: Where | None = None,
+               since_review: tuple[int, int] | None = None) -> str:
+    """A task note recording one check: the command, its exit code, where it ran, the end of its output and, on a task a
+    review sent back, how many of the branch's commits since the review carry the worker trailer (`since_review`)."""
     lines = output.rstrip("\n").splitlines()
     shown = lines[-tail:] if tail else []
     cut = f", last {len(shown)} of {len(lines)} lines" if len(lines) > len(shown) else ""
@@ -1143,7 +1203,8 @@ def check_note(command: Sequence[str], code: int, output: str, now: datetime, ta
     verdict = "passed" if code == 0 else "FAILED"
     place = (f" in {where.worktree} on {where.branch} at {where.commit[:12]}{' with uncommitted changes' if where.dirty else ''}"
              if where else "")
-    return f"Check {verdict}: `{shlex.join(command)}` exited {code} at {stamp}{place}{cut}:\n\n{fence}text\n" + "\n".join(shown) + f"\n{fence}"
+    after = f"\n\n{since_review_line(*since_review)}" if since_review is not None else ""
+    return f"Check {verdict}: `{shlex.join(command)}` exited {code} at {stamp}{place}{cut}:\n\n{fence}text\n" + "\n".join(shown) + f"\n{fence}{after}"
 
 
 def draft_parent(arguments: Sequence[str]) -> tuple[tuple[str, ...], str] | None:
@@ -2157,6 +2218,34 @@ def approve(board: Board, raw_id: str, engineer: str, shown: str | None = None) 
     return _transact(board, step)
 
 
+def intent_started(board: Board, raw_id: str, at: datetime, now: datetime) -> str:
+    """Record on an intent draft when the conversation that wrote it began, so stats can time conversation
+    to committed intent. An agent runs it right after creating the draft; it never overwrites a start.
+
+    Raises:
+        AsdlcError: not a draft intent, a time in the future, another start already recorded, or the change could not be pushed.
+    """
+    draft_id = normalise_id(raw_id, "draft")
+    stamp = at.astimezone(UTC).isoformat(timespec="seconds")
+    if at > now + timedelta(minutes=5):
+        raise AsdlcError(f"{stamp} is in the future: give the time the conversation began, such as the output of date -u +%Y-%m-%dT%H:%M:%SZ then")
+
+    def step(attempt: int) -> tuple[str | None, str]:
+        draft = next((t for t in _items(board) if t.id == draft_id and is_draft(t)), None)
+        if draft is None:
+            raise AsdlcError(f"{draft_id} is not a draft on the board: record the start on the intent's draft right after creating it, before it is accepted")
+        if draft.type != "intent":
+            raise AsdlcError(f"{draft_id} is a {draft.type or 'task'}, not an intent: only an intent's conversation is timed")
+        if draft.intent_started == stamp:
+            return None, f"{draft_id}: the conversation's start was already recorded at {stamp}"
+        if draft.intent_started:
+            raise AsdlcError(f"{draft_id} already records that its conversation began at {draft.intent_started}; asdlc doesn't change it")
+        _write_key(board, draft, INTENT_STARTED_KEY, yaml_quoted(stamp))
+        return f"Record when the conversation on {draft_id} began", f"{draft_id}: the conversation began at {stamp}"
+
+    return _transact(board, step)
+
+
 # --- registering this machine's code repositories ----------------------------------------
 
 
@@ -2296,6 +2385,15 @@ def _where(cwd: Path, task_id: str) -> Where:
                  _git(root, "rev-parse", "HEAD").stdout.strip(), bool(_git(root, "status", "--porcelain").stdout.strip()))
 
 
+def _since_review(worktree: Path, branch: str) -> tuple[int, int] | None:
+    """On a task a review sent back: of the branch's commits since what the reviewer saw (origin/<branch>, merges
+    aside), how many carry the worker trailer, and how many there are; None when the branch was never pushed."""
+    if _git(worktree, "rev-parse", "--verify", "--quiet", f"origin/{branch}").returncode != 0:
+        return None
+    log = _git(worktree, "log", "--no-merges", "--format=%B%x01", f"origin/{branch}..HEAD")
+    return worker_commits(log.stdout) if log.returncode == 0 else None
+
+
 def record_check(board: Board, raw_id: str, worker: str, command: Sequence[str], cwd: Path) -> int:
     """Run a check in the task's worktree, append its command, exit code, where it ran and its output
     tail to the task's notes, and return its exit code, so the evidence on the board comes from the
@@ -2315,7 +2413,8 @@ def record_check(board: Board, raw_id: str, worker: str, command: Sequence[str],
     except OSError as error:
         code, output = 127, f"could not run {command[0]}: {error}\n"
     print(output, end="", flush=True)
-    note = check_note(command, code, output, datetime.now(UTC), where=where)
+    note = check_note(command, code, output, datetime.now(UTC), where=where,
+                      since_review=_since_review(Path(where.worktree), task.branch or where.branch) if CHANGES_REQUESTED in task.labels else None)
 
     def step(attempt: int) -> tuple[str | None, None]:
         if refusal := holder_refusal(_find(_tasks(board), task_id), task_id, worker, "record checks on it"):
@@ -2660,15 +2759,20 @@ def review_next(board: Board, reviewer: str, engineer: str, now: datetime, fallb
                 _say(reason)
 
 
-def review_done(board: Board, raw_id: str, reviewer: str, verdict: ReviewVerdict, notes: str) -> dict[str, object]:
+def review_done(board: Board, raw_id: str, reviewer: str, verdict: ReviewVerdict, notes: str, record: ReviewRecord) -> dict[str, object]:
     """Record a review's findings on the task and act on the verdict: changes send it back to
-    In Progress for the author's worker, clean leaves it In Review for a person to merge.
+    In Progress for the author's worker, clean leaves it In Review for a person to merge. The
+    findings' counts, the policies they cite and whether the diff matched the plan are written
+    on the task for asdlc stats.
 
     Raises:
-        AsdlcError: no notes, the reviewer doesn't hold the review, backlog failed, or the change could not be pushed.
+        AsdlcError: no notes, counts that don't fit the verdict, the reviewer doesn't hold the review,
+            backlog failed, or the change could not be pushed.
     """
     if not notes.strip():
         raise AsdlcError("say what the review found in --notes, even when it is 'No findings'")
+    if refusal := review_record_refusal(verdict, record):
+        raise AsdlcError(refusal)
     task_id = normalise_id(raw_id, _prefix(board))
 
     def step(attempt: int) -> tuple[str | None, dict[str, object]]:
@@ -2676,7 +2780,7 @@ def review_done(board: Board, raw_id: str, reviewer: str, verdict: ReviewVerdict
         if refusal := review_done_refusal(task, task_id, reviewer):
             raise AsdlcError(refusal)
         assert task is not None
-        edit = ["task", "edit", task_id, "--comment", review_comment(reviewer, task.review_kind, verdict, notes), "--comment-author", f"@{reviewer}"]
+        edit = ["task", "edit", task_id, "--comment", review_comment(reviewer, task.review_kind, verdict, notes, record), "--comment-author", f"@{reviewer}"]
         match verdict:
             case ReviewVerdict.CHANGES:
                 edit += ["-s", IN_PROGRESS, "--add-label", CHANGES_REQUESTED, *(["--remove-label", REVIEW_PASSED] if REVIEW_PASSED in task.labels else [])]
@@ -2689,7 +2793,11 @@ def review_done(board: Board, raw_id: str, reviewer: str, verdict: ReviewVerdict
             raise AsdlcError(f"backlog could not record the review of {task_id}: {(done.stderr or done.stdout).strip()}")
         after = _find(_tasks(board), task_id) or task
         _write_key(board, after, REVIEWER_KEY, None)
+        _write_key(board, after, FINDINGS_KEY, yaml_quoted(f"important={record.important},nit={record.nit}"))
+        _write_key(board, after, POLICIES_KEY, json.dumps(list(record.policies)) if record.policies else None)
+        _write_key(board, after, PLAN_MATCHED_KEY, "yes" if record.plan_matched else "no")
         result = {"task": task_id, "verdict": str(verdict), "reviewer": reviewer, "kind": task.review_kind,
+                  "findings": {"important": record.important, "nit": record.nit}, "policies": list(record.policies), "plan_matched": record.plan_matched,
                   "status": IN_PROGRESS if verdict is ReviewVerdict.CHANGES else IN_REVIEW,
                   "workers": [w.removeprefix("@") for w in workers(task.assignees)]}
         return f"Review {task_id} by @{reviewer}: {verdict}", result
@@ -3490,57 +3598,390 @@ def doctor(explicit_board: str | None, cwd: Path, as_json: bool) -> int:
     return 1 if failed else 0
 
 
-# --- stats: how the pilot is going, from the board's history -------------------------------
+# --- stats: the playbook's numbers, by stage, from the board's history ----------------------
+#
+# The core replays the board's history (one Commit per board commit, oldest first) into a
+# Ledger: each task's and draft's life, each document's commits, and a Story per task. One
+# function per stage reads the Ledger through a Window and returns that stage's metrics, each
+# beside the playbook's own name for it. The shell reads git, the event log, the hook decision
+# logs and gh, and caches the parsed history by commit in the board clone's ignored .asdlc/.
+
+STATS_CACHE_VERSION = 1  # with Task's fields, the history cache's format; any other cache is rebuilt
+STAGES = frozendict({
+    "plan": ("Plan", ("01", "10")),
+    "design": ("Design", ("02",)),
+    "build": ("Build", ("03", "06")),
+    "test": ("Test", ("07", "08")),
+    "deploy": ("Deploy", ("05", "09", "10")),
+    "maintain": ("Maintain", ("12",)),
+    "coordination": ("Coordination", ()),
+})
+NOT_MEASURABLE = (
+    ("Change failure rate", "11", "deployment data: which deploys failed or were rolled back, joined to the changes they shipped"),
+    ("CI versus production regressions", "11", "incident data: regressions found in production, joined to the changes and the CI runs that passed them"),
+    ("DORA metrics", "11", "deployment and incident data: deploy times, lead time from commit to production, failures and time to restore"),
+    ("Pipeline failures triaged without paging", "11", "CI pipeline and paging data: which failures an agent triaged and which paged a person"),
+)
 
 
 @dataclass(frozen=True)
-class Snapshot:
-    """A task as one board commit left it."""
+class Check:
+    """One `asdlc record-check` note, read back from a task's notes."""
+
+    passed: bool
+    code: int
+    at: str  # when it ran, on the worker's machine
+    commit: str = ""
+    dirty: bool = False
+    since_review: tuple[int, int] | None = None  # commits since the review: (carrying the worker trailer, all)
+
+
+_NOTES = re.compile(r"<!-- SECTION:NOTES:BEGIN -->(.*?)<!-- SECTION:NOTES:END -->", re.S)
+_CHECK_HEAD = re.compile(r"^Check (passed|FAILED): `(.*)` exited (-?\d+) at (\S+?)"
+                         r"(?: in (.+) on (\S+) at ([0-9a-f]+)( with uncommitted changes)?)?(?:, last \d+ of \d+ lines)?:$")
+_SINCE_REVIEW = re.compile(rf"^Commits since the review: (\d+)(?:, (?:(all) with|(\d+) without) the {WORKER_TRAILER} trailer)?\.$")
+_DESCRIPTION = re.compile(r"<!-- SECTION:DESCRIPTION:BEGIN -->(.*?)<!-- SECTION:DESCRIPTION:END -->", re.S)
+_CRITERIA = re.compile(r"<!-- AC:BEGIN -->(.*?)<!-- AC:END -->", re.S)
+SKIP_NOTE = "size-1: plan approval skipped"
+
+
+def since_review_line(carrying: int, total: int) -> str:
+    """The line record-check adds to a check on a task a review sent back: how many of the branch's
+    commits since the review carry the worker agent's trailer."""
+    if not total:
+        return "Commits since the review: 0."
+    if carrying == total:
+        return f"Commits since the review: {total}, all with the {WORKER_TRAILER} trailer."
+    return f"Commits since the review: {total}, {total - carrying} without the {WORKER_TRAILER} trailer."
+
+
+def worker_commits(log: str) -> tuple[int, int]:
+    """`git log --no-merges --format=%B%x01` over the commits since the review: how many carry the
+    worker trailer, and how many there are."""
+    bodies = [body for body in log.split("\x01") if body.strip()]
+    return sum(bool(re.search(rf"(?m)^{WORKER_TRAILER}: \S", body)) for body in bodies), len(bodies)
+
+
+def _past_fence(lines: Sequence[str], index: int) -> int:
+    """The line after a fenced block that starts at or after `index` (blank lines first), else `index`."""
+    start = index
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    if start >= len(lines) or not lines[start].lstrip().startswith("```"):
+        return index
+    fence = re.match(r"`+", lines[start].lstrip())[0]
+    end = start + 1
+    while end < len(lines) and lines[end].strip() != fence:
+        end += 1
+    return min(end + 1, len(lines))
+
+
+def parse_checks(text: str) -> tuple[Check, ...]:
+    """The checks `record-check` appended to a task's notes, in order. Output inside a check's fence is skipped."""
+    found = _NOTES.search(text)
+    lines = found[1].splitlines() if found else []
+    checks: list[Check] = []
+    index = 0
+    while index < len(lines):
+        head = _CHECK_HEAD.match(lines[index].strip())
+        index += 1
+        if not head:
+            continue
+        index = _past_fence(lines, index)
+        since = None
+        while index < len(lines) and not _CHECK_HEAD.match(lines[index].strip()):
+            line = lines[index].strip()
+            if counted := _SINCE_REVIEW.match(line):
+                total = int(counted[1])
+                since = (total, total) if counted[2] or not total else (total - int(counted[3]), total)
+                index += 1
+                break
+            if line:
+                break
+            index += 1
+        checks.append(Check(head[1] == "passed", int(head[3]), head[4], head[7] or "", bool(head[8]), since))
+    return tuple(checks)
+
+
+def substance(title: str, text: str) -> str:
+    """A digest of what an intent asks for (title, description, acceptance criteria), ticked boxes aside:
+    a commit that changes it changes the intent, one that only comments or moves it doesn't."""
+    description = found[1].strip() if (found := _DESCRIPTION.search(text)) else ""
+    criteria = re.sub(r"- \[[ xX]\]", "- [ ]", found[1].strip()) if (found := _CRITERIA.search(text)) else ""
+    return hashlib.sha256("\x00".join((title, description, criteria)).encode()).hexdigest()[:12]
+
+
+@dataclass(frozen=True)
+class Item:
+    """A task or draft file as one board commit left it, with what stats reads from its body."""
+
+    task: Task
+    substance: str = ""
+    checks: tuple[Check, ...] = ()
+    skip_noted: bool = False  # its notes say why a size-1 plan skipped approval
+
+
+@dataclass(frozen=True)
+class DocItem:
+    id: str
+    title: str
+    type: str
+
+
+def item_from(path: str, text: str) -> Item | None:
+    if (task := task_from(path, text)) is None:
+        return None
+    return Item(task, substance(task.title, text), parse_checks(text), SKIP_NOTE in (found[1] if (found := _NOTES.search(text)) else ""))
+
+
+def doc_from(text: str) -> DocItem | None:
+    fields = frontmatter(text)
+    doc_id = fields.get("id")
+    if not isinstance(doc_id, str) or not doc_id:
+        return None
+    title, kind = fields.get("title", ""), fields.get("type", "")
+    return DocItem(doc_id.lower(), title if isinstance(title, str) else " ".join(title), kind if isinstance(kind, str) else "")
+
+
+@dataclass(frozen=True)
+class Change:
+    path: str
+    item: Item | DocItem | None  # None: the file was deleted
+
+
+@dataclass(frozen=True)
+class Commit:
+    sha: str
+    when: datetime  # the committer's clock, on whichever machine made it
+    changes: tuple[Change, ...]
+
+
+_FOLDERS = (("backlog/archive/drafts/", "archived-drafts"), ("backlog/archive/tasks/", "archived-tasks"), ("backlog/drafts/", "drafts"),
+            ("backlog/tasks/", "tasks"), ("backlog/completed/", "completed"), ("backlog/docs/", "docs"))
+HISTORY_PATHS = tuple(prefix.rstrip("/") for prefix, _ in _FOLDERS)
+
+
+def folder_of(path: str) -> str:
+    return next((name for prefix, name in _FOLDERS if path.startswith(prefix)), "")
+
+
+@dataclass(frozen=True)
+class Seen:
+    index: int  # the commit's place in the board's history: orders events without trusting anyone's clock
+    when: datetime
+    item: Item
+    folder: str
+
+
+@dataclass(frozen=True)
+class End:
+    """How a draft's life ended: accepted (into a task), archived, or deleted."""
+
+    index: int
+    when: datetime
+    how: str
+    into: str = ""
+
+
+@dataclass(frozen=True)
+class Life:
+    """One task, or one draft until it was accepted, archived or deleted. Backlog reuses a draft's id
+    once it is promoted, so each draft life is keyed by its id and a generation: DRAFT-2#1."""
+
+    key: str
+    seen: tuple[Seen, ...]
+    end: End | None = None
+
+    @property
+    def id(self) -> str:
+        return self.key.partition("#")[0]
+
+
+@dataclass(frozen=True)
+class DocLife:
+    id: str
+    title: str
+    type: str
+    commits: tuple[tuple[int, datetime], ...]
+
+    def is_spec(self) -> bool:
+        return self.type == "specification" or self.title.lower().startswith("spec")
+
+
+@dataclass(frozen=True)
+class Reviewed:
+    """One review verdict, read from the commit asdlc review-done made."""
 
     when: datetime
-    task: Task
+    index: int
+    clean: bool
+    reviewer: str
+    kind: str
+    important: int | None  # None: the review recorded no structured findings (before --findings existed)
+    nit: int | None
+    policies: tuple[str, ...]
+    plan_matched: bool | None
+    checks: int  # how many checks the task had then
 
 
 @dataclass(frozen=True)
-class History:
-    """What happened to one task, read from its snapshots in order."""
+class Story:
+    """What happened to one task, read from its life in order (and its draft's, for when it began)."""
 
+    id: str
+    type: str
     project: str
+    size: str
+    status: str
+    labels: tuple[str, ...]
+    reviewer: str
+    references: tuple[str, ...]
+    authors: frozenset[str]  # the engineers whose workers held it
+    first_index: int
+    first_when: datetime
     claims: tuple[datetime, ...]  # To Do to In Progress with a worker
-    entered_review: tuple[datetime, ...]
-    review_claims: tuple[tuple[datetime, str], ...]  # when, and the kind of review
-    changes: tuple[datetime, ...]  # changes-requested added
-    done: datetime | None
+    held: tuple[tuple[str, datetime, datetime | None], ...]  # (engineer, from, until) while their worker held it In Progress
+    entered_review: tuple[tuple[datetime, int, int], ...]  # (when, commit index, checks then)
+    review_claims: tuple[tuple[datetime, str], ...]  # (when, kind)
+    verdicts: tuple[Reviewed, ...]
+    plan_written: datetime | None
+    approvals: tuple[datetime, ...]
+    done: datetime | None  # the latest move to Done, while it is Done
+    first_done_index: int | None
+    checks: tuple[Check, ...]
+    skip_noted: bool
+
+    @property
+    def pull(self) -> str | None:
+        return review_refs(self.references)[1]
 
 
-def history(snapshots: Sequence[Snapshot]) -> History:
-    """Every transition that matters, from one task's snapshots in time order."""
-    claims, entered, reviews, changes = [], [], [], []
-    done = None
+@dataclass(frozen=True)
+class Ledger:
+    lives: frozendict[str, Life]
+    docs: frozendict[str, DocLife]
+    stories: frozendict[str, Story]
+
+
+def _story(key: str, seen: Sequence[Seen], began: Seen) -> Story:
+    claims: list[datetime] = []
+    entered: list[tuple[datetime, int, int]] = []
+    review_claims: list[tuple[datetime, str]] = []
+    verdicts: list[Reviewed] = []
+    approvals: list[datetime] = []
+    held: list[tuple[str, datetime, datetime | None]] = []
+    holding: dict[str, datetime] = {}
+    authors: frozenset[str] = frozenset()
+    plan_written = done = None
+    first_done = None
     previous: Task | None = None
-    for snapshot in snapshots:
-        task, when = snapshot.task, snapshot.when
+    for snapshot in seen:
+        task, when = snapshot.item.task, snapshot.when
         if is_status(task, IN_PROGRESS) and workers(task.assignees) and (previous is None or is_status(previous, TO_DO)):
             claims.append(when)
         if is_status(task, IN_REVIEW) and (previous is None or not is_status(previous, IN_REVIEW)):
-            entered.append(when)
+            entered.append((when, snapshot.index, len(snapshot.item.checks)))
         if task.reviewer and (previous is None or previous.reviewer != task.reviewer):
-            reviews.append((when, task.review_kind or str(ReviewKind.CROSS_MACHINE)))
-        if CHANGES_REQUESTED in task.labels and (previous is None or CHANGES_REQUESTED not in previous.labels):
-            changes.append(when)
+            review_claims.append((when, task.review_kind or str(ReviewKind.CROSS_MACHINE)))
+        if previous is not None and previous.reviewer and not task.reviewer:
+            clean = REVIEW_PASSED in task.labels and REVIEW_PASSED not in previous.labels
+            if clean or (CHANGES_REQUESTED in task.labels and CHANGES_REQUESTED not in previous.labels):
+                try:
+                    important, nit = parse_findings(task.review_findings) if task.review_findings else (None, None)
+                except AsdlcError:
+                    important, nit = None, None
+                matched = {"yes": True, "no": False}.get(task.plan_matched)
+                verdicts.append(Reviewed(when, snapshot.index, clean, previous.reviewer, previous.review_kind or str(ReviewKind.CROSS_MACHINE),
+                                         important, nit, task.review_policies, matched, len(snapshot.item.checks)))
+        if task.plan_hash and plan_written is None:
+            plan_written = when
+        if task.plan_approved_by and (previous is None or (previous.plan_approved_by, previous.approved_hash) != (task.plan_approved_by, task.approved_hash)):
+            approvals.append(when)
         if is_status(task, DONE) and (previous is None or not is_status(previous, DONE)):
             done = when
+            first_done = snapshot.index if first_done is None else first_done
         elif not is_status(task, DONE):
             done = None
+        now_held = {owner_of(w) for w in workers(task.assignees)} if is_status(task, IN_PROGRESS) else set()
+        if workers(task.assignees):
+            authors = frozenset(owner_of(w) for w in workers(task.assignees))
+        for engineer in [e for e in holding if e not in now_held]:
+            held.append((engineer, holding.pop(engineer), when))
+        for engineer in sorted(now_held - holding.keys()):
+            holding[engineer] = when
         previous = task
-    return History(snapshots[-1].task.project if snapshots else "", tuple(claims), tuple(entered), tuple(reviews), tuple(changes), done)
+    last = seen[-1].item
+    held += [(engineer, start, None) for engineer, start in holding.items()]
+    return Story(
+        id=key, type=last.task.type, project=last.task.project, size=size_of(last.task), status=last.task.status, labels=last.task.labels,
+        reviewer=last.task.reviewer, references=last.task.references, authors=authors, first_index=began.index, first_when=began.when,
+        claims=tuple(claims), held=tuple(held), entered_review=tuple(entered), review_claims=tuple(review_claims), verdicts=tuple(verdicts),
+        plan_written=plan_written, approvals=tuple(approvals), done=done, first_done_index=first_done, checks=last.checks, skip_noted=last.skip_noted,
+    )
 
 
-def histories(snapshots: Iterable[Snapshot]) -> dict[str, History]:
-    by_id: dict[str, list[Snapshot]] = {}
-    for snapshot in sorted(snapshots, key=lambda s: s.when):
-        by_id.setdefault(snapshot.task.id, []).append(snapshot)
-    return {task_id: history(found) for task_id, found in by_id.items()}
+def replay(commits: Sequence[Commit]) -> Ledger:
+    """The board's history, oldest commit first, as each task's and draft's life and each document's commits."""
+    seen: dict[str, list[Seen]] = {}
+    ends: dict[str, End] = {}
+    open_draft: dict[str, str] = {}  # a draft id -> the key of its open life
+    generation: Counter[str] = Counter()
+    present: dict[str, Item] = {}  # path -> what it holds now, so a deletion is known by id
+    docs: dict[str, list[tuple[int, datetime]]] = {}
+    doc_meta: dict[str, DocItem] = {}
+    for index, commit in enumerate(commits):
+        gone: set[str] = set()
+        drafted: set[str] = set()
+        archived: set[str] = set()
+        accepted: dict[str, str] = {}
+        for change in commit.changes:
+            folder = folder_of(change.path)
+            if folder == "docs":
+                if isinstance(change.item, DocItem):
+                    docs.setdefault(change.item.id, []).append((index, commit.when))
+                    doc_meta[change.item.id] = change.item
+                continue
+            if not isinstance(change.item, Item):
+                if (old := present.pop(change.path, None)) is not None and folder == "drafts":
+                    gone.add(old.task.id)
+                continue
+            item = change.item
+            present[change.path] = item
+            task_id = item.task.id
+            match folder:
+                case "drafts":
+                    drafted.add(task_id)
+                    if (key := open_draft.get(task_id)) is None:
+                        generation[task_id] += 1
+                        key = open_draft[task_id] = f"{task_id}#{generation[task_id]}"
+                    seen.setdefault(key, []).append(Seen(index, commit.when, item, folder))
+                case "archived-drafts":
+                    archived.add(task_id)
+                case _:
+                    if task_id not in seen and item.task.accepted_from:
+                        accepted[item.task.accepted_from] = task_id
+                    seen.setdefault(task_id, []).append(Seen(index, commit.when, item, folder))
+        for draft_id in sorted(gone - drafted):
+            if (key := open_draft.pop(draft_id, None)) is not None:
+                how = "accepted" if draft_id in accepted else "archived" if draft_id in archived else "deleted"
+                ends[key] = End(index, commit.when, how, accepted.get(draft_id, ""))
+    lives = {key: Life(key, tuple(found), ends.get(key)) for key, found in seen.items()}
+    origin = {life.end.into: life for life in lives.values() if life.end and life.end.how == "accepted"}
+    stories = {key: _story(key, life.seen, (origin[key] if key in origin else life).seen[0])
+               for key, life in lives.items() if "#" not in key}
+    return Ledger(frozendict(lives), frozendict({d: DocLife(d, doc_meta[d].title, doc_meta[d].type, tuple(c)) for d, c in docs.items()}),
+                  frozendict(stories))
+
+
+@dataclass(frozen=True)
+class Window:
+    """What a report counts: events from `since` on (all of them when None), judged at `now`."""
+
+    since: datetime | None
+    now: datetime
+
+    def has(self, when: datetime | None) -> bool:
+        return when is not None and (self.since is None or when >= self.since)
 
 
 def percentile(values: Sequence[float], q: float) -> float | None:
@@ -3556,111 +3997,593 @@ def _spread(spans: Sequence[timedelta]) -> dict[str, object]:
     return {"count": len(seconds), "median": percentile(seconds, 0.5), "p90": percentile(seconds, 0.9)}
 
 
-def published_plugins(log: Iterable[tuple[datetime, str]]) -> tuple[tuple[datetime, str], ...]:
-    """The tasks repository's first publish of each repository plugin: asdlc-plugin's "Add the <slug> plugin" commits."""
-    found = [(when, m[1]) for when, subject in log if (m := re.fullmatch(r"Add the (\S+) plugin", subject.strip()))]
-    return tuple(sorted(found))
-
-
-def board_stats(by_task: Mapping[str, History], current: Sequence[Task], texts: Mapping[str, str],
-                published: Sequence[tuple[datetime, str]], events: Sequence[Mapping[str, object]], since: datetime | None) -> dict[str, object]:
-    """The pilot's numbers: everything from `since` on (everything, when None)."""
-    def after(when: datetime | None) -> bool:
-        return when is not None and (since is None or when >= since)
-
-    claimed = sorted(task_id for task_id, h in by_task.items() if any(after(c) for c in h.claims))
-    to_review, to_done, waits, waiting = [], [], [], []
-    for task_id, h in by_task.items():
-        if first := next((c for c in h.claims if after(c)), None):
-            if reviewed := next((r for r in h.entered_review if r >= first), None):
-                to_review.append(reviewed - first)
-        if after(h.done) and (entered := next((r for r in h.entered_review if r <= h.done), None)):
-            to_done.append(h.done - entered)
-        for index, entered in enumerate(h.entered_review):
-            if not after(entered):
-                continue
-            until = h.entered_review[index + 1] if index + 1 < len(h.entered_review) else None
-            claim = next((when for when, _ in h.review_claims if when >= entered and (until is None or when < until)), None)
-            if claim is not None:
-                waits.append(claim - entered)
-            elif until is None:
-                waiting.append(task_id)
-    now = {task.id: task for task in current}
-    waiting = [task_id for task_id in waiting if task_id in now and is_status(now[task_id], IN_REVIEW) and not now[task_id].reviewer
-               and REVIEW_PASSED not in now[task_id].labels]
-    reviews = [(task_id, kind) for task_id, h in by_task.items() for when, kind in h.review_claims if after(when)]
-    reviewed = sorted({task_id for task_id, _ in reviews})
-    rounds = {task_id: sum(after(when) for when in by_task[task_id].changes) for task_id in reviewed}
-    same = sum(kind == ReviewKind.SAME_MACHINE for _, kind in reviews)
-    attempts: dict[str, Counter[str]] = {}
-    for event in events:
-        try:
-            when = datetime.fromisoformat(str(event["time"]))
-        except (KeyError, ValueError):
-            continue
-        if after(when if when.tzinfo else when.replace(tzinfo=UTC)):
-            attempts.setdefault(str(event.get("command", "")), Counter())[str(event.get("outcome", ""))] += 1
-    claims_made = sum(attempts.get(c, Counter())[Attempt.CLAIMED] for c in ("claim", "next"))
-    lost = sum(attempts.get(c, Counter())[Attempt.LOST] for c in ("claim", "next"))
-    onboardings = []
-    for when, plugin in published:
-        if not after(when):
-            continue
-        starts = [(c, task_id) for task_id, h in by_task.items() if h.project == plugin for c in h.claims if c <= when]
-        start, task_id = max(starts) if starts else (None, None)
-        onboardings.append({"plugin": plugin, "published": when.isoformat(timespec="seconds"), "task": task_id,
-                            "seconds": (when - start).total_seconds() if start else None})
-    small = [{"id": task_id, "recorded": "size-1: plan approval skipped" in texts.get(task_id, "")}
-             for task_id in claimed if task_id in now and "size-1" in now[task_id].labels]
-    return {
-        "since": since.isoformat(timespec="seconds") if since else None,
-        "tasks": {"claimed": len(claimed), "in_review": sum(is_status(t, IN_REVIEW) for t in current),
-                  "done": sum(after(h.done) for h in by_task.values())},
-        "claim_to_review": _spread(to_review),
-        "review_to_done": _spread(to_done),
-        "review_wait": _spread(waits) | {"waiting_now": sorted(waiting)},
-        "changes_requested": {"reviewed_tasks": len(reviewed), "round_trips": sum(rounds.values()),
-                              "per_task": (sum(rounds.values()) / len(reviewed)) if reviewed else None, "by_task": rounds},
-        "reviews": {"total": len(reviews), "same_machine": same, "share_same_machine": (same / len(reviews)) if reviews else None},
-        "races": {"claimed": claims_made, "lost": lost, "lost_per_claim": (lost / claims_made) if claims_made else None,
-                  "by_command": {command: dict(sorted(counts.items())) for command, counts in sorted(attempts.items())}},
-        "onboardings": onboardings,
-        "plan_approval_skipped": small,
-    }
-
-
 def _duration(seconds: object) -> str:
     if not isinstance(seconds, (int, float)):
         return "-"
     return f"{int(seconds)}s" if seconds < 60 else human(timedelta(seconds=float(seconds)))
 
 
-def stats_lines(report: Mapping[str, object], log: str) -> list[str]:
-    def spread(key: str, what: str) -> str:
-        found = report[key]
-        return f"{what}: median {_duration(found['median'])}, p90 {_duration(found['p90'])} ({found['count']})"
+def _spread_text(found: Mapping[str, object]) -> str:
+    return f"median {_duration(found['median'])}, p90 {_duration(found['p90'])} ({found['count']})"
 
-    tasks, changes, reviews, races = report["tasks"], report["changes_requested"], report["reviews"], report["races"]
-    share = f" ({reviews['share_same_machine']:.0%})" if reviews["share_same_machine"] is not None else ""
+
+def _share(count: int, of: int) -> dict[str, object]:
+    return {"count": count, "of": of, "share": count / of if of else None}
+
+
+def _share_text(found: Mapping[str, object]) -> str:
+    share = found["share"]
+    return f"{found['count']} of {found['of']}" + (f" ({share:.0%})" if isinstance(share, float) else "")
+
+
+def _status_is(status: str, wanted: str) -> bool:
+    return status.casefold() == wanted.casefold()
+
+
+def _week(when: datetime) -> str:
+    year, week, _ = when.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def _iso(raw: str) -> datetime | None:
+    try:
+        found = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    return found if found.tzinfo else found.replace(tzinfo=UTC)
+
+
+def _metric(play: str, playbook: str, label: str, source: str, text: str, **values: object) -> dict[str, object]:
+    return {"label": label, "play": play, "playbook": playbook, "measured": True, "source": source, "text": text, **values}
+
+
+def _unmeasured(play: str, playbook: str, label: str, needs: str) -> dict[str, object]:
+    return {"label": label, "play": play, "playbook": playbook, "measured": False, "needs": needs, "text": f"not measured: {needs}"}
+
+
+def _stage(name: str, metrics: Mapping[str, Mapping[str, object]]) -> dict[str, object]:
+    title, plays = STAGES[name]
+    return {"title": title, "plays": list(plays), "metrics": dict(metrics)}
+
+
+# The intents: each draft intent with the task it was accepted as, and each intent made as a task.
+
+@dataclass(frozen=True)
+class IntentLife:
+    draft: Life | None
+    task: Life | None
+
+    @property
+    def id(self) -> str:
+        return self.task.id if self.task else self.draft.id if self.draft else ""
+
+    @property
+    def seen(self) -> tuple[Seen, ...]:
+        return (*(self.draft.seen if self.draft else ()), *(self.task.seen if self.task else ()))
+
+
+def intents(ledger: Ledger) -> tuple[IntentLife, ...]:
+    became = {life.key: life.end.into for life in ledger.lives.values() if life.end and life.end.how == "accepted"}
+    from_drafts = set(became.values())
+    found = []
+    for key, life in ledger.lives.items():
+        if not any(s.item.task.type == "intent" for s in life.seen):
+            continue
+        if "#" in key:
+            found.append(IntentLife(life, ledger.lives.get(became.get(key, ""))))
+        elif key not in from_drafts:
+            found.append(IntentLife(None, life))
+    return tuple(sorted(found, key=lambda i: i.seen[0].index))
+
+
+def spec_docs(ledger: Ledger, intent: IntentLife) -> tuple[DocLife, ...]:
+    """The specification documents linked from the intent at any point: type specification, or titled Spec."""
+    linked = {doc for s in intent.seen for doc in s.item.task.documentation}
+    return tuple(ledger.docs[d] for d in sorted(linked) if d in ledger.docs and ledger.docs[d].is_spec())
+
+
+def family(ledger: Ledger, intent: IntentLife) -> tuple[Life, ...]:
+    """The lives under an intent, at any depth: its accepted children and its children still drafts."""
+    accepted = {life.key for life in ledger.lives.values() if life.end and life.end.how == "accepted"}
+    current = [life for life in ledger.lives.values() if life.key not in accepted and (life.end is None or "#" not in life.key)]
+    ids = {intent.id}
+    found: dict[str, Life] = {}
+    while True:
+        more = [life for life in current if life.seen[-1].item.task.parent in ids and life.key not in found and life.id != intent.id]
+        if not more:
+            return tuple(found.values())
+        found |= {life.key: life for life in more}
+        ids |= {life.id for life in more}
+
+
+def _first_child_plan(ledger: Ledger, intent: IntentLife) -> int | None:
+    return min((s.index for life in family(ledger, intent) for s in life.seen if s.item.task.plan_hash), default=None)
+
+
+def _spec_start(ledger: Ledger, intent: IntentLife) -> tuple[int, datetime] | None:
+    return min(((i, w) for doc in spec_docs(ledger, intent) for i, w in doc.commits[:1]), default=None)
+
+
+def _accept_waits(ledger: Ledger, window: Window) -> list[timedelta]:
+    """An intent draft's first commit to the commit that accepted it, for each accepted in the window."""
+    return [i.draft.end.when - i.draft.seen[0].when for i in intents(ledger)
+            if i.draft and i.draft.end and i.draft.end.how == "accepted" and window.has(i.draft.end.when)]
+
+
+# One function per stage.
+
+def plan_stage(ledger: Ledger, window: Window) -> dict[str, object]:
+    """Play 01, capture intent, and the accept gate of play 10."""
+    starts: list[timedelta] = []
+    unrecorded: list[str] = []
+    ended: Counter[str] = Counter()
+    churn: dict[str, int] = {}
+    for intent in intents(ledger):
+        if (draft := intent.draft) is not None:
+            created = draft.seen[0]
+            if window.has(created.when):
+                started = _iso(next((s.item.task.intent_started for s in draft.seen if s.item.task.intent_started), ""))
+                if started is not None:
+                    starts.append(max(created.when - started, timedelta()))
+                else:
+                    unrecorded.append(draft.id)
+            if draft.end is not None and window.has(draft.end.when):
+                ended[draft.end.how] += 1
+        if (spec := _spec_start(ledger, intent)) is not None:
+            ordered = sorted(intent.seen, key=lambda s: s.index)
+            churn[intent.id] = sum(1 for before, after in zip(ordered, ordered[1:])
+                                   if after.index > spec[0] and after.item.substance != before.item.substance and window.has(after.when))
+    started = _spread(starts)
+    closed = ended["archived"] + ended["deleted"]
+    survival = _share(ended["accepted"], ended["accepted"] + closed)
+    accept = _spread(_accept_waits(ledger, window))
+    missing = f"; {len(unrecorded)} intent(s) with no start recorded ({', '.join(unrecorded)})" if unrecorded else ""
+    return _stage("plan", {
+        "conversation_to_intent": _metric(
+            "01", "Conversation to committed intent (leading)", "conversation to committed intent",
+            "asdlc_intent_started on each intent draft (asdlc intent-started), to the commit that created the draft",
+            _spread_text(started) + missing, **started, unrecorded=unrecorded),
+        "survival_rate": _metric(
+            "01", "Survival rate (lagging)", "intent survival rate", "intent drafts accepted, archived or deleted on the board",
+            f"{_share_text(survival)} intents accepted; {ended['archived']} archived, {ended['deleted']} deleted without acceptance",
+            **survival, archived=ended["archived"], deleted=ended["deleted"]),
+        "post_spec_churn": _metric(
+            "01", "Post-spec churn", "post-spec churn", "commits changing an intent's title, description or criteria after its first linked spec document",
+            f"{sum(churn.values())} commit(s) changed an intent after its spec, over {len(churn)} intent(s) with a spec"
+            + (f"; most {max(churn.values())} ({max(churn, key=churn.get)})" if any(churn.values()) else ""),
+            commits=sum(churn.values()), intents=len(churn), by_intent=churn),
+        "accept_wait": _metric(
+            "10", "Gate wait: accept", "draft to accept wait", "an intent draft's first commit to the commit that accepted it",
+            _spread_text(accept), **accept),
+    })
+
+
+def design_stage(ledger: Ledger, window: Window) -> dict[str, object]:
+    """Play 02, requirements and design: how soon the spec follows the intent, and how much it moves once plans exist."""
+    spans: list[timedelta] = []
+    rework: dict[str, int] = {}
+    for intent in intents(ledger):
+        if (spec := _spec_start(ledger, intent)) is None:
+            continue
+        if window.has(spec[1]):
+            draft = intent.draft
+            accepted = draft is not None and draft.end is not None and draft.end.how == "accepted" and draft.end.index < spec[0]
+            start = draft.end.when if accepted else intent.seen[0].when
+            spans.append(max(spec[1] - start, timedelta()))
+        if (planned := _first_child_plan(ledger, intent)) is not None:
+            rework[intent.id] = sum(1 for doc in spec_docs(ledger, intent) for i, when in doc.commits if i > planned and window.has(when))
+    to_spec = _spread(spans)
+    return _stage("design", {
+        "intent_to_spec": _metric(
+            "02", "Intent to spec", "intent to first spec", "the intent's commit (or its accept, when the spec came after it) to the first commit of a spec document linked on it",
+            _spread_text(to_spec), **to_spec),
+        "spec_rework": _metric(
+            "02", "Spec rework", "spec rework", "commits to an intent's spec documents after the first child task's plan was written",
+            f"{sum(rework.values())} spec commit(s) after planning began, over {len(rework)} intent(s) with planned children",
+            commits=sum(rework.values()), intents=len(rework), by_intent=rework),
+    })
+
+
+def _concurrency(spans: Iterable[tuple[datetime, datetime | None]], window: Window) -> tuple[int, int | None]:
+    """The peak and the time-weighted median of how many spans overlap, over the time at least one is open."""
+    points: list[tuple[datetime, int]] = []
+    for start, until in spans:
+        start = max(start, window.since) if window.since else start
+        until = until or window.now
+        if until > start:
+            points += [(start, 1), (until, -1)]
+    level = peak = 0
+    last: datetime | None = None
+    weights: Counter[int] = Counter()
+    for when, step in sorted(points, key=lambda p: (p[0], p[1])):
+        if last is not None and level > 0:
+            weights[level] += (when - last).total_seconds()
+        level += step
+        peak = max(peak, level)
+        last = when
+    total, running = sum(weights.values()), 0.0
+    for level, weight in sorted(weights.items()):
+        running += weight
+        if running >= total / 2:
+            return peak, level
+    return peak, None
+
+
+def merge_time(story: Story, merged: Mapping[str, datetime]) -> tuple[datetime | None, str]:
+    """When the task's pull request merged, from gh when it could say, else the task's Done commit."""
+    if story.id in merged:
+        return merged[story.id], "gh"
+    return story.done, "Done commit"
+
+
+def _approval_waits(stories: Iterable[Story], window: Window) -> list[timedelta]:
+    return [s.approvals[0] - s.plan_written for s in stories if s.approvals and s.plan_written and window.has(s.approvals[0])]
+
+
+def _merge_waits(stories: Iterable[Story], merged: Mapping[str, datetime], window: Window) -> list[timedelta]:
+    waits = []
+    for s in stories:
+        at, _ = merge_time(s, merged)
+        if window.has(s.done) and at is not None and (passed := [v.when for v in s.verdicts if v.clean and v.when <= at]):
+            waits.append(at - passed[-1])
+    return waits
+
+
+def _throughput_text(engineer: str, found: Mapping[str, object]) -> str:
+    weeks = ", ".join(f"{week} {n}" for week, n in found["weeks"].items()) or "none Done"
+    rate = found["rework_rate"]
+    return f"{engineer}: {weeks}; rework {rate:.1f} per reviewed task" if isinstance(rate, float) else f"{engineer}: {weeks}; rework -"
+
+
+def build_stage(ledger: Ledger, merged: Mapping[str, datetime], window: Window) -> dict[str, object]:
+    """Play 03, plan mode through merge, and play 06, parallel sessions."""
+    stories = list(ledger.stories.values())
+    to_review: list[timedelta] = []
+    for s in stories:
+        if (first := next((c for c in s.claims if window.has(c)), None)) and (reviewed := next((w for w, _, _ in s.entered_review if w >= first), None)):
+            to_review.append(reviewed - first)
+    done = [s for s in stories if window.has(s.done)]
+    reviewed_done = [s for s in done if s.verdicts]
+    first_pass = _share(sum(s.verdicts[0].clean for s in reviewed_done), len(reviewed_done))
+    to_merge: list[timedelta] = []
+    sources: Counter[str] = Counter()
+    for s in done:
+        at, source = merge_time(s, merged)
+        if s.approvals and at is not None:
+            to_merge.append(at - s.approvals[-1])
+            sources[source] += 1
+    verdicts = [(s, v) for s in stories for v in s.verdicts if window.has(v.when)]
+    rounds = {s.id: sum(not v.clean for v in s.verdicts if window.has(v.when)) for s in stories if any(window.has(v.when) for v in s.verdicts)}
+    matched = [v.plan_matched for _, v in verdicts if v.plan_matched is not None]
+    plan_matched = _share(sum(matched), len(matched))
+    approval = _spread(_approval_waits(stories, window))
+    claimed = sorted((s for s in stories if any(window.has(c) for c in s.claims)), key=lambda s: id_key(s.id))
+    skipped = [s for s in claimed if s.size == "size-1" and not s.approvals]
+    skip = _share(len(skipped), len(claimed))
+    engineers = sorted({e for s in stories for e, _, _ in s.held})
+    parallel = {}
+    for engineer in engineers:
+        peak, median = _concurrency(((start, until) for s in stories for e, start, until in s.held if e == engineer), window)
+        parallel[engineer] = {"peak": peak, "median": median}
+    throughput: dict[str, dict[str, object]] = {}
+    for engineer in sorted({e for s in stories for e in s.authors}):
+        weeks: Counter[str] = Counter(_week(s.done) for s in done if engineer in s.authors and s.done)
+        theirs = [s for s in stories if engineer in s.authors and any(window.has(v.when) for v in s.verdicts)]
+        trips = sum(rounds.get(s.id, 0) for s in theirs)
+        throughput[engineer] = {"weeks": dict(sorted(weeks.items())), "reviewed": len(theirs), "round_trips": trips,
+                                "rework_rate": trips / len(theirs) if theirs else None}
+    to_review_spread, merge_spread = _spread(to_review), _spread(to_merge)
+    worst = max(rounds.items(), key=lambda r: r[1], default=None)
+    return _stage("build", {
+        "claim_to_review": _metric("03", "Claim to In Review", "claim to In Review", "a task's first claim to its first move to In Review",
+                                   _spread_text(to_review_spread), **to_review_spread),
+        "first_pass_merge": _metric(
+            "03", "Merged from the first pass", "merged from the first pass", "tasks Done whose first review verdict was clean",
+            f"{_share_text(first_pass)} reviewed tasks Done; {len(done) - len(reviewed_done)} Done without a recorded review", **first_pass,
+            unreviewed=len(done) - len(reviewed_done)),
+        "approval_to_merge": _metric(
+            "03", "Approval to merge", "plan approval to merge", "the last plan approval to the pull request's merge (gh pr view --json mergedAt), else the Done commit",
+            _spread_text(merge_spread) + (f"; merge times from {', '.join(f'{k} {n}' for k, n in sorted(sources.items()))}" if sources else ""),
+            **merge_spread, sources=dict(sources)),
+        "rework_cycles": _metric(
+            "03", "Rework cycles", "rework cycles", "changes-requested verdicts per reviewed task",
+            f"{sum(rounds.values())} round trip(s) over {len(rounds)} reviewed task(s)"
+            + (f", {sum(rounds.values()) / len(rounds):.1f} per task, most {worst[1]} ({worst[0]})" if worst else ""),
+            reviewed_tasks=len(rounds), round_trips=sum(rounds.values()), per_task=sum(rounds.values()) / len(rounds) if rounds else None, by_task=rounds),
+        "plan_matched": _metric(
+            "03", "Diff still matches the plan", "diff matches the plan", "review-done --plan-matched on each verdict",
+            f"{_share_text(plan_matched)} reviews; {len(verdicts) - len(matched)} without it recorded", **plan_matched, unrecorded=len(verdicts) - len(matched)),
+        "approval_wait": _metric("03", "Plan written to approved", "plan written to approved", "the first commit with a plan to the first asdlc approve",
+                                 _spread_text(approval), **approval),
+        "size1_skipped_approval": _metric(
+            "03", "Small tasks that skipped approval", "size-1 tasks that skipped approval", "claimed size-1 tasks with no recorded approval",
+            f"{_share_text(skip)} claimed tasks" + (f": {', '.join(s.id + ('' if s.skip_noted else ' (no note says why)') for s in skipped)}" if skipped else ""),
+            **skip, tasks=[{"id": s.id, "noted": s.skip_noted} for s in skipped]),
+        "parallel_claims": _metric(
+            "06", "Parallel sessions per engineer", "concurrent claims per engineer", "the spans each engineer's workers held tasks In Progress",
+            "; ".join(f"{e} peak {p['peak']}, median {p['median'] if p['median'] is not None else '-'}" for e, p in parallel.items()) or "no claims",
+            by_engineer=parallel),
+        "throughput": _metric(
+            "06", "Tasks merged per engineer per week, with rework rate", "Done per engineer per week",
+            "tasks Done by the engineer whose workers built them, and changes-requested verdicts per reviewed task of theirs",
+            "; ".join(_throughput_text(e, t) for e, t in throughput.items()) or "no tasks",
+            by_engineer=throughput),
+    })
+
+
+def test_stage(ledger: Ledger, window: Window) -> dict[str, object]:
+    """Play 07, the feedback loop, and play 08, evals."""
+    first_pass = baseline = 0
+    first_counted = baseline_counted = 0
+    per_task: list[int] = []
+    failed = total = 0
+    for s in ledger.stories.values():
+        if not s.checks:
+            continue
+        start = s.checks[0]
+        if window.has(_iso(start.at)):
+            baseline_counted += 1
+            baseline += start.passed
+        after = start if start.dirty else next((c for c in s.checks[1:] if c.commit != start.commit or c.dirty), None)
+        if after is not None and window.has(_iso(after.at)):
+            first_counted += 1
+            first_pass += after.passed
+        counted = [c for c in s.checks if window.has(_iso(c.at))]
+        if counted:
+            per_task.append(len(counted))
+            total += len(counted)
+            failed += sum(not c.passed for c in counted)
+    first = _share(first_pass, first_counted)
+    green = _share(baseline, baseline_counted)
+    failures = _share(failed, total)
+    return _stage("test", {
+        "first_pass_checks": _metric(
+            "07", "First-pass check success", "first-pass check success",
+            "each task's first record-check after a change (the worker's baseline check, before any change, is counted apart)",
+            f"{_share_text(first)} tasks passed their first check after a change; baselines green {_share_text(green)}", **first, baseline=green),
+        "checks_per_task": _metric(
+            "07", "Checks per task", "checks per task", "record-check notes on each task",
+            f"median {percentile(per_task, 0.5) or 0}, p90 {percentile(per_task, 0.9) or 0}, max {max(per_task, default=0)} over {len(per_task)} task(s)",
+            tasks=len(per_task), checks=total, median=percentile(per_task, 0.5), p90=percentile(per_task, 0.9), max=max(per_task, default=None)),
+        "failed_checks": _metric("07", "Failed checks", "failed checks", "record-check notes that exited non-zero",
+                                 f"{_share_text(failures)} checks failed", **failures),
+        "eval_pass_rate": _unmeasured("08", "Eval pass rate", "eval pass rate",
+                                      "there is no eval suite yet; it needs eval results recorded per change, which play 08's eval gate will add"),
+    })
+
+
+_REFUSAL_RULES = (
+    ("an existing test, and this is a fix branch", "test edited on a fix branch"),
+    ("is on the board: change the board with asdlc board", "board file edited by hand"),
+    ("is not in a claimed task's worktree", "code edited outside a claimed worktree"),
+    ("merging a pull request is a person's decision", "pull request merge"),
+    ("approving or requesting changes on a pull request", "pull request approval"),
+    ("asdlc accept promotes", "accept"),
+    ("asdlc approve records", "plan approval"),
+    ("asdlc permissions --write", "permissions --write"),
+    ("promoting a draft accepts it", "draft promotion"),
+    ("archiving or demoting accepted work", "archive or demote"),
+    ("setting a task to", "To Do or Done"),
+    ("a task goes In Progress only through a claim", "In Progress by hand"),
+    ("a task goes to review only through asdlc finish", "In Review by hand"),
+    ("who holds a task changes only through", "assignees by hand"),
+    ("the review-passed and changes-requested labels", "review labels by hand"),
+    ("a task's size decides", "resizing accepted work"),
+    ("created without --draft", "task created without --draft"),
+    ("a force push rewrites a task branch", "force push"),
+    ("changes reach it through review", "push to a default branch"),
+)
+
+
+def refusal_rule(hook: str, reason: str) -> str:
+    """The guard rule a logged refusal came from, read from its reason, which each rule words its own way."""
+    return next((rule for marker, rule in _REFUSAL_RULES if marker in reason), f"{hook or 'a hook'}: other")
+
+
+def deploy_stage(ledger: Ledger, decisions: Sequence[Mapping[str, object]], merged: Mapping[str, datetime], window: Window) -> dict[str, object]:
+    """Play 09, review, with play 05's policies cited by findings and play 10's gates and guards."""
+    stories = list(ledger.stories.values())
+    waits: list[timedelta] = []
+    waiting: list[str] = []
+    durations: list[timedelta] = []
+    for s in stories:
+        entries = s.entered_review
+        for index, (entered, _, _) in enumerate(entries):
+            if not window.has(entered):
+                continue
+            until = entries[index + 1][0] if index + 1 < len(entries) else None
+            claim = next((when for when, _ in s.review_claims if when >= entered and (until is None or when < until)), None)
+            if claim is not None:
+                waits.append(claim - entered)
+            elif until is None and _status_is(s.status, IN_REVIEW) and not s.reviewer and REVIEW_PASSED not in s.labels:
+                waiting.append(s.id)
+        for verdict in s.verdicts:
+            if window.has(verdict.when) and (claims := [w for w, _ in s.review_claims if w <= verdict.when]):
+                durations.append(verdict.when - claims[-1])
+    rounds_with = rounds_alone = rounds_unrecorded = 0
+    for s in stories:
+        for verdict in (v for v in s.verdicts if not v.clean):
+            back = next((e for e in s.entered_review if e[1] > verdict.index), None)
+            if back is None or not window.has(back[0]):
+                continue
+            found = [c.since_review for c in s.checks[verdict.checks:back[2]] if c.since_review is not None]
+            if not found:
+                rounds_unrecorded += 1
+            else:
+                rounds_with += 1
+                rounds_alone += found[-1][0] == found[-1][1]
+    alone = _share(rounds_alone, rounds_with)
+    recorded = [(s, v) for s in stories for v in s.verdicts if window.has(v.when) and v.important is not None]
+    tasks_with_findings = {s.id for s, _ in recorded}
+    important = sum(v.important or 0 for _, v in recorded)
+    nits = sum(v.nit or 0 for _, v in recorded)
+    unrecorded = sum(1 for s in stories for v in s.verdicts if window.has(v.when) and v.important is None)
+    by_policy: dict[str, Counter[str]] = {}
+    for _, v in recorded:
+        for policy in v.policies:
+            by_policy.setdefault(policy, Counter())[_week(v.when)] += 1
+    done_at = {s.id: s.first_done_index for s in stories if s.first_done_index is not None}
+    escaped: list[dict[str, object]] = []
+    for s in stories:
+        if s.type != "bug" or not window.has(s.first_when):
+            continue
+        refs = sorted({r.strip().upper() for r in s.references} & {i for i, at in done_at.items() if at <= s.first_index})
+        if refs:
+            escaped.append({"id": s.id, "refs": refs, "week": _week(s.first_when)})
+    per_week = Counter(str(e["week"]) for e in escaped)
+    reviews = [(s.id, kind) for s in stories for when, kind in s.review_claims if window.has(when)]
+    same = sum(kind == ReviewKind.SAME_MACHINE for _, kind in reviews)
+    to_done: list[timedelta] = []
+    for s in stories:
+        if window.has(s.done) and (entered := next((w for w, _, _ in s.entered_review if w <= s.done), None)):
+            to_done.append(s.done - entered)
+    accept = _spread(_accept_waits(ledger, window))
+    approval = _spread(_approval_waits(stories, window))
+    merging = _spread(_merge_waits(stories, merged, window))
+    refusals: Counter[str] = Counter()
+    for entry in decisions:
+        when = _iso(str(entry.get("time", "")))
+        if entry.get("verdict") == "deny" and window.has(when):
+            refusals[refusal_rule(str(entry.get("hook", "")), str(entry.get("reason", "")))] += 1
+    wait, duration, done_spread = _spread(waits), _spread(durations), _spread(to_done)
+    gates = {"accept": accept, "approval": approval, "merge": merging}
+    return _stage("deploy", {
+        "time_to_first_review": _metric(
+            "09", "Time to first review", "time to first review", "each move to In Review to the next review claim",
+            _spread_text(wait) + (f"; waiting now: {', '.join(sorted(waiting))}" if waiting else ""), **wait, waiting_now=sorted(waiting)),
+        "review_duration": _metric("09", "Review duration", "review duration", "a review claim to its verdict", _spread_text(duration), **duration),
+        "worker_only_fixes": _metric(
+            "09", "Changes fixed by the worker alone", "changes fixed by worker commits only",
+            f"the record-check notes of each changes-requested round: whether every commit since the review carries {WORKER_TRAILER}",
+            f"{_share_text(alone)} rounds fixed with worker commits only; {rounds_unrecorded} round(s) without it recorded",
+            **alone, unrecorded=rounds_unrecorded),
+        "defects_caught": _metric(
+            "09", "Defects caught before merge", "Important findings per reviewed task", "review-done --findings on each verdict",
+            f"{important} Important and {nits} nit finding(s) over {len(tasks_with_findings)} reviewed task(s)"
+            + (f", {important / len(tasks_with_findings):.1f} Important per task" if tasks_with_findings else "")
+            + (f"; {unrecorded} verdict(s) without findings recorded" if unrecorded else ""),
+            important=important, nits=nits, tasks=len(tasks_with_findings),
+            important_per_task=important / len(tasks_with_findings) if tasks_with_findings else None, unrecorded=unrecorded),
+        "findings_by_policy": _metric(
+            "05", "Findings citing a policy (lagging: should fall)", "reviews citing each policy, by week", "review-done --policy on each verdict",
+            "; ".join(f"{p}: {', '.join(f'{w} {n}' for w, n in sorted(c.items()))}" for p, c in sorted(by_policy.items())) or "no policy cited",
+            by_policy={p: dict(sorted(c.items())) for p, c in sorted(by_policy.items())}),
+        "defects_escaped": _metric(
+            "09", "Defects escaped", "bugs against Done tasks, by week", "bug tasks whose --ref names a task that was Done when the bug was filed",
+            f"{len(escaped)} bug(s)" + (f": {', '.join(f'{w} {n}' for w, n in sorted(per_week.items()))}" if escaped else ""),
+            count=len(escaped), by_week=dict(sorted(per_week.items())), bugs=escaped),
+        "same_machine_reviews": _metric(
+            "09", "Same-machine reviews", "same-machine reviews", "review claims marked same-machine (the fallback)",
+            f"{_share_text(_share(same, len(reviews)))} reviews", **_share(same, len(reviews))),
+        "review_to_done": _metric("09", "In Review to Done", "In Review to Done", "a task's first move to In Review to its Done commit",
+                                  _spread_text(done_spread), **done_spread),
+        "gate_waits": _metric(
+            "10", "Gate waits", "gate waits", "accept: draft to accept; approval: plan written to approved; merge: clean review to merge (gh, else Done)",
+            f"accept {_spread_text(gates['accept'])}; approval {_spread_text(approval)}; merge {_spread_text(merging)}", **gates),
+        "guard_refusals": _metric(
+            "10", "Guard refusals by rule", "guard refusals by rule", "the hook decision logs (.asdlc/hooks.jsonl) on this machine",
+            f"{sum(refusals.values())} refusal(s)" + (f": {', '.join(f'{r} {n}' for r, n in refusals.most_common())}" if refusals else ""),
+            total=sum(refusals.values()), by_rule=dict(refusals.most_common())),
+    })
+
+
+def maintain_stage() -> dict[str, object]:
+    return _stage("maintain", {
+        "closing_the_loop": _unmeasured(
+            "12", "Closing the loop on metrics", "closing the loop",
+            "play 12 isn't built yet: it needs detection bands over these numbers in versioned config, and a diagnosis written as an intent (spec R19)"),
+    })
+
+
+def published_plugins(log: Iterable[tuple[datetime, str]]) -> tuple[tuple[datetime, str], ...]:
+    """The tasks repository's first publish of each repository plugin: asdlc-plugin's "Add the <slug> plugin" commits."""
+    found = [(when, m[1]) for when, subject in log if (m := re.fullmatch(r"Add the (\S+) plugin", subject.strip()))]
+    return tuple(sorted(found))
+
+
+def coordination_stage(ledger: Ledger, subjects: Sequence[tuple[datetime, str]], events: Sequence[Mapping[str, object]], window: Window) -> dict[str, object]:
+    """The shared board itself: races lost, claims reaped and released, onboardings."""
+    attempts: dict[str, Counter[str]] = {}
+    for event in events:
+        if window.has(_iso(str(event.get("time", "")))):
+            attempts.setdefault(str(event.get("command", "")), Counter())[str(event.get("outcome", ""))] += 1
+    claims_made = sum(attempts.get(c, Counter())[Attempt.CLAIMED] for c in ("claim", "next"))
+    lost = sum(attempts.get(c, Counter())[Attempt.LOST] for c in ("claim", "next"))
+    reaped: Counter[str] = Counter()
+    released = 0
+    for when, subject in subjects:
+        if not window.has(when):
+            continue
+        if found := re.match(r"Reap the (claim|lead|review|reservation) on ", subject):
+            reaped[found[1]] += 1
+        elif re.match(r"Release (?:the lead on )?\S+ from @", subject):
+            released += 1
+    onboardings = []
+    for when, plugin in published_plugins(subjects):
+        if not window.has(when):
+            continue
+        starts = [(c, s.id) for s in ledger.stories.values() if s.project == plugin for c in s.claims if c <= when]
+        start, task_id = max(starts) if starts else (None, None)
+        onboardings.append({"plugin": plugin, "published": when.isoformat(timespec="seconds"), "task": task_id,
+                            "seconds": (when - start).total_seconds() if start else None})
+    races = {"claimed": claims_made, "lost": lost, "lost_per_claim": lost / claims_made if claims_made else None,
+             "by_command": {command: dict(sorted(counts.items())) for command, counts in sorted(attempts.items())}}
     per = f"{races['lost_per_claim']:.2f}" if races["lost_per_claim"] is not None else "-"
-    worst = max(changes["by_task"].items(), key=lambda item: item[1], default=None)
-    lines = [
-        f"since {report['since'] or 'the board began'}",
-        f"tasks: {tasks['claimed']} claimed, {tasks['in_review']} in review now, {tasks['done']} done",
-        spread("claim_to_review", "claim to In Review"),
-        spread("review_to_done", "In Review to Done"),
-        spread("review_wait", "review wait") + (f"; waiting now: {', '.join(report['review_wait']['waiting_now'])}" if report["review_wait"]["waiting_now"] else ""),
-        f"changes requested: {changes['round_trips']} round trip(s) over {changes['reviewed_tasks']} reviewed task(s)"
-        + (f", {changes['per_task']:.1f} per task, most {worst[1]} ({worst[0]})" if worst else ""),
-        f"reviews: {reviews['total']}, {reviews['same_machine']} same-machine{share}",
-        f"lost races per claim: {per} ({races['lost']} lost, {races['claimed']} claimed; this machine's log, {log})",
-    ]
-    lines += [f"onboarded {o['plugin']} at {o['published']}" + (f", {_duration(o['seconds'])} after {o['task']} was claimed" if o["task"] else "")
-              for o in report["onboardings"]] or ["onboardings: none"]
-    skipped = report["plan_approval_skipped"]
-    lines.append("plan approval skipped (size-1): " + (", ".join(f"{s['id']}{'' if s['recorded'] else ' (no note says why)'}" for s in skipped) or "none"))
+    return _stage("coordination", {
+        "lost_races": _metric("", "", "lost races per claim", "this machine's event log (claim, next, review-next, lead)",
+                              f"{per} ({lost} lost, {claims_made} claimed)", **races),
+        "reaped": _metric("", "", "holds reaped", "the board's 'Reap the <hold> on <id>' commits",
+                          ", ".join(f"{n} {hold}(s)" for hold, n in sorted(reaped.items())) or "none", by_hold=dict(sorted(reaped.items())),
+                          released_reservations=reaped["reservation"]),
+        "released": _metric("", "", "released by hand", "the board's 'Release <id> from @<worker>' commits", str(released), count=released),
+        "onboardings": _metric(
+            "", "", "onboardings", "the tasks repository's 'Add the <slug> plugin' commits, from the newest claim in that repository before each",
+            "; ".join(f"{o['plugin']} at {o['published']}" + (f", {_duration(o['seconds'])} after {o['task']} was claimed" if o["task"] else "")
+                      for o in onboardings) or "none", onboardings=onboardings),
+    })
+
+
+def stats_report(ledger: Ledger, subjects: Sequence[tuple[datetime, str]], events: Sequence[Mapping[str, object]],
+                 decisions: Sequence[Mapping[str, object]], merged: Mapping[str, datetime], window: Window,
+                 stages: Sequence[str] = tuple(STAGES)) -> dict[str, object]:
+    """Every stage's numbers (or the ones asked for), the tasks summary, and what the board can't measure."""
+    makers: dict[str, Callable[[], dict[str, object]]] = {
+        "plan": lambda: plan_stage(ledger, window),
+        "design": lambda: design_stage(ledger, window),
+        "build": lambda: build_stage(ledger, merged, window),
+        "test": lambda: test_stage(ledger, window),
+        "deploy": lambda: deploy_stage(ledger, decisions, merged, window),
+        "maintain": maintain_stage,
+        "coordination": lambda: coordination_stage(ledger, subjects, events, window),
+    }
+    stories = ledger.stories.values()
+    return {
+        "since": window.since.isoformat(timespec="seconds") if window.since else None,
+        "tasks": {"claimed": sum(any(window.has(c) for c in s.claims) for s in stories),
+                  "in_review": sum(_status_is(s.status, IN_REVIEW) for s in stories),
+                  "done": sum(window.has(s.done) for s in stories)},
+        "stages": {name: makers[name]() for name in stages},
+        "not_measurable": [{"metric": name, "play": play, "needs": needs} for name, play, needs in NOT_MEASURABLE],
+    }
+
+
+def stats_lines(report: Mapping[str, object]) -> list[str]:
+    tasks = report["tasks"]
+    lines = [f"since {report['since'] or 'the board began'} (times are commit times from each machine's clock)",
+             f"tasks: {tasks['claimed']} claimed, {tasks['in_review']} in review now, {tasks['done']} done"]
+    for stage in report["stages"].values():
+        plays = f" (play {', '.join(stage['plays'])})" if stage["plays"] else ""
+        lines += ["", f"{stage['title']}{plays}"]
+        for found in stage["metrics"].values():
+            named = f" [play {found['play']}: {found['playbook']}]" if found["playbook"] else ""
+            lines.append(f"  {found['label']}: {found['text']}{named}")
+    if len(report["stages"]) == len(STAGES):
+        lines += ["", "Not measurable from the board"]
+        lines += [f"  {m['metric']} (play {m['play']}): needs {m['needs']}" for m in report["not_measurable"]]
     return lines
 
+
+# The shell: the board's history from git, cached by commit; the logs; gh.
 
 def batch_objects(output: bytes) -> list[str | None]:
     """`git cat-file --batch` output as each object's text, None where git said it is missing."""
@@ -3679,49 +4602,153 @@ def batch_objects(output: bytes) -> list[str | None]:
     return found
 
 
-def _snapshots(board: Board, ref: str) -> list[Snapshot]:
-    log = _board_git(board, "-c", "core.quotePath=false", "log", "--reverse", "--no-renames", "--diff-filter=AM", "--format=%x00%H %ct",
-                     "--name-only", ref, "--", "backlog/tasks").stdout
-    pairs: list[tuple[str, datetime, str]] = []
-    commit, when = "", None
+def cache_key() -> str:
+    """The history cache's format: a version, and Task's fields, so a cache from another release is rebuilt."""
+    return f"{STATS_CACHE_VERSION}:{','.join(f.name for f in dataclass_fields(Task))}"
+
+
+def change_json(change: Change) -> list[object]:
+    match change.item:
+        case Item() as item:
+            return [change.path, {"item": asdict(item)}]
+        case DocItem() as doc:
+            return [change.path, {"doc": asdict(doc)}]
+        case _:
+            return [change.path, None]
+
+
+def _tuples(value: object) -> object:
+    return tuple(_tuples(v) for v in value) if isinstance(value, list) else value
+
+
+def change_from_json(raw: Sequence[object]) -> Change:
+    path, record = str(raw[0]), raw[1]
+    if isinstance(record, dict) and isinstance(found := record.get("item"), dict):
+        task = Task(**{k: _tuples(v) for k, v in found["task"].items()})
+        checks = tuple(Check(**{k: _tuples(v) for k, v in c.items()}) for c in found.get("checks", ()))
+        return Change(path, Item(task, found.get("substance", ""), checks, bool(found.get("skip_noted"))))
+    if isinstance(record, dict) and isinstance(found := record.get("doc"), dict):
+        return Change(path, DocItem(**found))
+    return Change(path, None)
+
+
+def _stats_folder(board: Board) -> Path:
+    return board.path / ".asdlc" / "stats"
+
+
+def _read_json(path: Path) -> dict[str, object]:
+    try:
+        found = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
+def _write_cache(folder: Path, name: str, data: Mapping[str, object]) -> None:
+    """A cache file in the board clone's .asdlc/stats/, which ignores itself; a cache that can't be written is only slower."""
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        if not (folder / ".gitignore").exists():
+            (folder / ".gitignore").write_text("*\n")
+        _write_atomically(folder / name, json.dumps(data))
+    except OSError as error:
+        _say(f"could not write the stats cache in {folder}, so the next run reads the history again: {error}")
+
+
+def _board_history(board: Board, ref: str) -> list[Commit]:
+    """Every commit on `ref` that touched the board's tasks, drafts, archive or documents, oldest first, each
+    change parsed; parsed commits come from the cache in .asdlc/stats/history.json."""
+    log = _board_git(board, "-c", "core.quotePath=false", "log", "--reverse", "--topo-order", "--no-renames", "--format=%x00%H %ct",
+                     "--name-status", ref, "--", *HISTORY_PATHS).stdout
+    listed: list[tuple[str, datetime, list[tuple[str, str]]]] = []
     for line in log.splitlines():
         if line.startswith("\x00"):
-            commit, stamp = line[1:].split()
-            when = datetime.fromtimestamp(int(stamp), UTC)
-        elif line.strip().endswith(".md") and when is not None:
-            pairs.append((commit, when, line.strip()))
-    if not pairs:
-        return []
-    batch = subprocess.run(["git", "cat-file", "--batch"], cwd=board.path, env=dict(board.env), capture_output=True,
-                           input="".join(f"{c}:{p}\n" for c, _, p in pairs).encode())
-    return [Snapshot(when, task) for (_, when, path), text in zip(pairs, batch_objects(batch.stdout))
-            if text is not None and (task := task_from(path, text))]
+            sha, stamp = line[1:].split()
+            listed.append((sha, datetime.fromtimestamp(int(stamp), UTC), []))
+        elif "\t" in line and listed:
+            status, _, path = line.partition("\t")
+            if path.endswith(".md") and folder_of(path):
+                listed[-1][2].append((status[:1], path))
+    folder = _stats_folder(board)
+    cache = _read_json(folder / "history.json")
+    parsed = cache.get("commits") if cache.get("key") == cache_key() and isinstance(cache.get("commits"), dict) else {}
+    wanted = [(sha, path) for sha, _, changes in listed if sha not in parsed for status, path in changes if status != "D"]
+    texts: dict[tuple[str, str], str | None] = {}
+    if wanted:
+        batch = subprocess.run(["git", "cat-file", "--batch"], cwd=board.path, env=dict(board.env), capture_output=True,
+                               input="".join(f"{sha}:{path}\n" for sha, path in wanted).encode())
+        texts = dict(zip(wanted, batch_objects(batch.stdout)))
+    for sha, _, changes in listed:
+        if sha in parsed:
+            continue
+        found = []
+        for status, path in changes:
+            text = None if status == "D" else texts.get((sha, path))
+            item = None if text is None else (doc_from(text) if folder_of(path) == "docs" else item_from(path, text))
+            found.append(change_json(Change(path, item)))
+        parsed[sha] = found
+    if wanted:
+        _write_cache(folder, "history.json", {"key": cache_key(), "commits": parsed})
+    return [Commit(sha, when, tuple(change_from_json(c) for c in parsed.get(sha, ()))) for sha, when, _ in listed]
 
 
-def stats(board: Board, since: datetime | None, as_json: bool) -> int:
-    """Read the board's history (fetched, never changed) and this machine's event log."""
+def _merged_times(board: Board, stories: Iterable[Story]) -> dict[str, datetime]:
+    """When each Done task's pull request merged, from `gh pr view --json mergedAt`, cached once known."""
+    folder = _stats_folder(board)
+    cache = {url: when for url, when in _read_json(folder / "merged.json").items() if isinstance(when, str)}
+    gh = os.environ.get("ASDLC_GH", shutil.which("gh") or "")  # an empty ASDLC_GH asks gh nothing
+    found: dict[str, datetime] = {}
+    asked = False
+    for story in stories:
+        if story.done is None or not (url := story.pull):
+            continue
+        if url not in cache and gh:
+            asked = True
+            try:
+                done = subprocess.run([gh, "pr", "view", url, "--json", "mergedAt"], capture_output=True, text=True, timeout=20)
+                merged = json.loads(done.stdout).get("mergedAt") if done.returncode == 0 else None
+            except (OSError, ValueError, subprocess.TimeoutExpired, AttributeError):
+                merged = None
+            if isinstance(merged, str) and merged:
+                cache[url] = merged
+        if (when := _iso(cache.get(url, ""))) is not None:
+            found[story.id] = when
+    if asked:
+        _write_cache(folder, "merged.json", cache)
+    return found
+
+
+def _hook_logs(board: Board) -> list[Path]:
+    """The hook decision logs on this machine: the board clone's and each registered repository's."""
+    folders = [board.path, *(entry.path for entry in _registry().values())]
+    return [path for folder in dict.fromkeys(folders) if (path := folder / ".asdlc" / "hooks.jsonl").is_file()]
+
+
+def stats(board: Board, since: datetime | None, stage: str | None, as_json: bool) -> int:
+    """Read the board's history (fetched, never changed), this machine's logs and gh, and report by stage."""
     try:
         _fetch(board)
     except AsdlcError as error:
         _say(f"could not fetch the board, so this is as of the last fetch: {error}")
     ref = f"origin/{BOARD_BRANCH}" if _board_git(board, "rev-parse", "--verify", "--quiet", f"origin/{BOARD_BRANCH}", check=False).returncode == 0 else "HEAD"
-    current = _tasks(board, ref)
-    bodies = subprocess.run(["git", "cat-file", "--batch"], cwd=board.path, env=dict(board.env), capture_output=True,
-                            input="".join(f"{ref}:{task.path}\n" for task in current).encode()).stdout if current else b""
-    texts = {task.id: text or "" for task, text in zip(current, batch_objects(bodies))}
-    subjects = _board_git(board, "log", "--format=%ct%x00%s", ref).stdout.splitlines()
-    published = published_plugins((datetime.fromtimestamp(int(stamp), UTC), subject) for line in subjects for stamp, _, subject in [line.partition("\x00")] if stamp.isdigit())
+    ledger = replay(_board_history(board, ref))
+    lines = _board_git(board, "log", "--format=%ct%x00%s", ref).stdout.splitlines()
+    subjects = [(datetime.fromtimestamp(int(stamp), UTC), subject) for line in lines for stamp, _, subject in [line.partition("\x00")] if stamp.isdigit()]
     log = _events_file()
     events = parse_events(log.read_text()) if log.is_file() else ()
-    report = board_stats(histories(_snapshots(board, ref)), current, texts, published, events, since)
-    _emit(report | {"board": str(board.path), "events": str(log)}, as_json, stats_lines(report, str(log)))
+    hook_logs = _hook_logs(board)
+    decisions = [entry for path in hook_logs for entry in parse_events(path.read_text())]
+    merged = _merged_times(board, ledger.stories.values())
+    report = stats_report(ledger, subjects, events, decisions, merged, Window(since, datetime.now(UTC)), (stage,) if stage else tuple(STAGES))
+    sources = {"board": str(board.path), "events": str(log), "hook_logs": [str(p) for p in hook_logs], "cache": str(_stats_folder(board))}
+    _emit(report | sources, as_json, [*stats_lines(report), "", f"from the board's history, this machine's event log ({log}) and hook logs "
+                                      f"({', '.join(sources['hook_logs']) or 'none yet'})"])
     return 0
 
 
 def _since(raw: str | None) -> datetime | None:
     """Raises: AsdlcError: not an ISO 8601 date or time."""
     return None if raw is None else _when(raw)
-
 
 
 SCAFFOLDING = Path(__file__).resolve().parent.parent / "templates" / "board"
@@ -3861,10 +4888,16 @@ def _parser() -> argparse.ArgumentParser:
     add("permissions", "the Claude Code allow rules normal work needs on this machine; --write adds them to the tasks clone's local settings (a person's command)",
         json_output=True).add_argument("--write", action="store_true", help="merge them into the tasks clone's .claude/settings.local.json, keeping what is there, after a backup")
     add("doctor", "check that this machine is ready: tools, identity, the board, settings, repositories, plugins and leftovers", json_output=True)
-    measuring = add("stats", "how the pilot is going: claims, review times, round trips, races, onboardings", json_output=True)
+    measuring = add("stats", "the playbook's numbers by stage, from the board's history and this machine's logs", json_output=True)
     measuring.add_argument("--since", help="count from this date or time, as ISO 8601 (else from the board's start)")
+    measuring.add_argument("--stage", choices=list(STAGES), help="only this stage's numbers")
+    starting = add("intent-started", "record on an intent draft when the conversation that wrote it began", task="the intent's draft, such as DRAFT-3")
+    starting.add_argument("--at", help="when the conversation began, as ISO 8601 (else now)")
     finishing = add("review-done", "record a review's findings and verdict on the task", task="the task", who=reviewer, json_output=True)
     finishing.add_argument("--verdict", required=True, choices=[str(v) for v in ReviewVerdict], help="clean, or changes to send it back to its author")
+    finishing.add_argument("--findings", required=True, help="how many findings of each severity, important=<n>,nit=<n> (0 for none)")
+    finishing.add_argument("--policy", action="append", default=[], help="a policy or rule a finding cites, once per policy (repeat it)")
+    finishing.add_argument("--plan-matched", required=True, choices=["yes", "no"], help="whether the diff still matches the task's plan")
     finishing.add_argument("--notes", required=True, help="the findings, as they go on the task")
     return parser
 
@@ -3991,7 +5024,10 @@ def main(argv: Sequence[str]) -> int:
             case "lead-of":
                 return lead_of_command(board, arguments.id, as_json)
             case "stats":
-                return stats(board, _since(arguments.since), as_json)
+                return stats(board, _since(arguments.since), arguments.stage, as_json)
+            case "intent-started":
+                _check_backlog()
+                print(intent_started(board, arguments.id, _when(arguments.at), datetime.now(UTC)))
             case "reap":
                 _check_backlog()
                 return reap(board, _when(arguments.now), parse_duration(arguments.older_than) if arguments.older_than else None, as_json)
@@ -4021,7 +5057,10 @@ def main(argv: Sequence[str]) -> int:
             case "review-done":
                 _check_backlog()
                 reviewer = reviewer_for(arguments.worker, _engineer(cwd))
-                result = review_done(board, arguments.id, reviewer, ReviewVerdict(arguments.verdict), arguments.notes)
+                important, nit = parse_findings(arguments.findings)
+                policies = tuple(dict.fromkeys(p.strip() for p in arguments.policy if p.strip()))
+                record = ReviewRecord(important, nit, policies, arguments.plan_matched == "yes")
+                result = review_done(board, arguments.id, reviewer, ReviewVerdict(arguments.verdict), arguments.notes, record)
                 line = (f"{result['task']}: changes requested by @{reviewer}; it is In Progress for @{', @'.join(result['workers']) or 'its author'} again"
                         if result["verdict"] == ReviewVerdict.CHANGES else
                         f"{result['task']} passed review by @{reviewer} ({result['kind']}); it stays In Review for a person to merge")

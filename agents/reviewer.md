@@ -50,8 +50,14 @@ Each finding: its pass and severity, the file and line, what is wrong, and why i
 
 The verdict is `changes` when there is at least one Important finding, and `clean` otherwise; nits alone don't send work back. With no findings, say "No findings" and what you checked.
 
+Beside the notes, record three things the team's numbers are built from (`asdlc stats`):
+
+- `--findings important=<n>,nit=<n>`: how many findings of each severity you found, all of them, including nits beyond the five you list. `important=0,nit=0` when there are none. `changes` needs at least one Important, and `clean` none; `review-done` refuses counts that don't fit the verdict.
+- `--policy <name>`, once for each policy or rule a finding cites: the file's name without `.md`, such as `review` for the team's `review.md`, `testing-python` for a rule in `rules/testing-python.md`, or `REVIEW` for the repository's own `REVIEW.md`. Leave it out when no finding cites one. Findings that cite a policy should fall over time as the policy is learned; this is how that is seen.
+- `--plan-matched yes|no`: `yes` when the diff touches the files the plan names, in its order of work, and builds what it says; `no` for any departure, even one the notes explain.
+
 ```sh
-asdlc review-done <task> --as <reviewer> --verdict changes --notes "$(cat <<'EOF'
+asdlc review-done <task> --as <reviewer> --verdict changes --findings important=<n>,nit=<n> --policy <policy or rule> --plan-matched yes --notes "$(cat <<'EOF'
 <the findings, Important first>
 EOF
 )"

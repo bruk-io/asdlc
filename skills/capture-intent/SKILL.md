@@ -11,6 +11,8 @@ Small work doesn't need one. If the request fits in a handful of tool calls, do 
 
 ## Interview first
 
+Note the time as the conversation starts, before the first question: `date -u +%Y-%m-%dT%H:%M:%SZ`. The board records it on the draft (below), and `asdlc stats` times conversation to committed intent from it.
+
 When someone describes a problem rather than a finished intent, ask what an analyst would ask until the answers are concrete: what they can't do today, who is affected, what better looks like, what must not break, and what is out of scope. Keep their words. Translating the problem into engineering terms is the spec's job, and doing it here loses what they meant.
 
 If they are not there to ask, write the draft from what you have and turn every gap into an open question.
@@ -47,6 +49,7 @@ EOF
 - The intent names no repository (`--project`) and has no size: its lead splits it into child tasks that do.
 - Don't assign it. An assignee on accepted work reserves it for that person's workers.
 - `asdlc` prints the draft's id, `DRAFT-<n>`. Draft ids are reused once a draft is promoted, so refer to it by title as well as id.
+- Right after creating it, record when the conversation started, with the time you noted: `asdlc intent-started <DRAFT-n> --at <the time you noted>`. Never edit the draft's file for it: every board change goes through `asdlc`. If you didn't note a time, leave it out rather than guess; stats counts the intent as having no start recorded.
 
 ## Open the gate
 

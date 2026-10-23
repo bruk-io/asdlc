@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Stage metrics
+
+- `asdlc stats` reports the playbook's numbers by stage (plan, design, build, test, deploy, maintain) and for coordination, each beside the playbook's name for it; `--stage <name>` for one stage, stage keys in `--json`, `--since` as before. A number that can't be computed says what it needs; change failure rate, CI-versus-production regressions, DORA and pipeline triage are listed as needing deployment and incident data. The parsed board history is cached by commit in the tasks clone's ignored `.asdlc/stats/`, and merge times come from `gh pr view --json mergedAt` when it can say.
+- `asdlc review-done` requires `--findings important=<n>,nit=<n>` and `--plan-matched yes|no`, and takes `--policy <name>` for each policy or rule a finding cites; it refuses counts that don't fit the verdict and records them on the task.
+- `asdlc intent-started <draft> [--at <time>]` records when the conversation behind an intent began; the `capture-intent` skill runs it.
+- The worker agent signs its commits with an `Asdlc-Worker: <worker>` trailer, and `record-check` on a task sent back by a review notes how many commits since the review carry it.
+- `docs/guide.md` gains "What the numbers mean": each number, its source, and the clock-skew caveat.
+
 ## 0.1.0 - 2026-10-22
 
 The team pilot: several engineers, each with one orchestrator session and its workers, sharing one board. [docs/guide.md](docs/guide.md) is the page for a developer joining it.

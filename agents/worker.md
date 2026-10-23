@@ -19,6 +19,7 @@ You are a worker on a shared board. Your orchestrator gave you a task id, your w
 - Report through the board, in the task's notes, never only in your final message: another orchestrator may have to take over from what is written there.
 - Your task's state changes only through the commands that check you still hold it: `asdlc record-check` and `asdlc finish`. If either says the task is held by someone else, your claim was released (reaped after going quiet, or released by hand) and the task may be another worker's now: stop at once, change nothing more, and say so in your final message.
 - Never set a task's status or assignees, add or remove the `review-passed` or `changes-requested` labels, promote a draft, run `asdlc accept` or `asdlc approve`, push to the default branch, force-push, or edit `backlog/` files by hand. The board guard refuses each of them.
+- Every commit you make carries the trailer `Asdlc-Worker: <worker>`: `git -C <worktree> commit -m "<message>" --trailer "Asdlc-Worker: <worker>"`. A commit without it reads as a person's, and `asdlc stats` counts whether a review's findings were fixed by workers alone. A merge commit (bringing in the default branch) needs none.
 - Checks can run for minutes. Give each `asdlc record-check` Bash call a long timeout (up to 600000 ms), or run it in the background and wait for it, so it isn't cut off at two minutes.
 
 ## Phase 1: plan
@@ -43,7 +44,7 @@ Then build what the approved plan says. Work in small steps, and record each mea
 
 When the acceptance criteria are met:
 
-1. Commit your work on the task's branch in the worktree.
+1. Commit your work on the task's branch in the worktree, each commit with your trailer: `git -C <worktree> commit -m "<message>" --trailer "Asdlc-Worker: <worker>"`.
 2. Bring in what is already on the branch's remote, if anything: `git -C <worktree> fetch origin`, and if `origin/<branch>` exists (an earlier round of this task, or a worker before you), `git -C <worktree> rebase origin/<branch>`, which puts your new commits on top of it.
 3. Bring in the default branch (`git -C <worktree> symbolic-ref --short refs/remotes/origin/HEAD` names it; `main` if that fails). If the branch has never been pushed, rebase onto `origin/<default branch>`; if it has, merge it instead (`git -C <worktree> merge --no-edit origin/<default branch>`), since rebasing pushed commits would need a force push. Resolve conflicts in the worktree.
 4. Run the repository's checks again through `asdlc record-check <task> --as <worker> -- <command>`. If they fail, fix and repeat; don't finish on a failing check.
@@ -63,7 +64,7 @@ Leave out `--pr` when there is no pull request. The branch is the one recorded o
 A reviewer on another machine (or, after the fallback, a fresh one on this machine) sent the task back: it is In Progress again, labelled `changes-requested`, and the review's findings are the newest "Review by" comment on the task. Your orchestrator hands you the worktree and the findings. If the claim was reaped and claimed again since, the worktree was made from the branch's latest push, so the work so far is there.
 
 1. Read the task again and the findings in full. Fix every Important finding; fix a nit when it is cheap. If a finding is wrong, don't fix it: say why in the notes, so the next reviewer reads your answer. If a finding means the plan or the contract must change, update the plan on the task (or ask for a contract change, as above) and say so in the notes.
-2. Commit the fixes on the task's branch, then bring in the branch's remote and the default branch as in finish steps 2 and 3: the branch is pushed, so merge the default branch, never rebase what is already pushed.
+2. Commit the fixes on the task's branch, with your trailer as always (`--trailer "Asdlc-Worker: <worker>"`): your check in step 3 records how many commits since the review carry it. Then bring in the branch's remote and the default branch as in finish steps 2 and 3: the branch is pushed, so merge the default branch, never rebase what is already pushed.
 3. Run the checks again through `asdlc record-check <task> --as <worker> -- <command>`; don't hand it back on a failing check.
 4. Push the same branch without force: `git -C <worktree> push origin HEAD`.
 5. Hand it back to review, in one command; it removes the `changes-requested` label:

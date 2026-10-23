@@ -291,6 +291,15 @@ class SkillCommandsTest(unittest.TestCase):
                 self.assertIsNot(outcome.verdict, guard.Verdict.DENY, outcome.reason)
 
 
+    def test_the_commands_the_numbers_need_are_walked(self) -> None:
+        """The worker's signed commits, the reviewer's recorded counts and the intent's start are among the commands checked."""
+        found = skill_commands()
+        for where, part in (("agents/worker.md", '--trailer "Asdlc-Worker: kyle.w1"'), ("agents/reviewer.md", "--findings important=1,nit=1"),
+                            ("agents/reviewer.md", "--plan-matched yes"), ("skills/capture-intent/SKILL.md", "asdlc intent-started")):
+            with self.subTest(where=where, part=part):
+                self.assertTrue(any(w == where and part in command for w, command in found), f"{where} gives no command with {part}")
+
+
 def rule_matches(rule: str, command: str) -> bool:
     """A Bash allow rule against a simple command, as code.claude.com's permissions page describes it: a `*` matches any
     text; a trailing ` *` (or `:*`) that is the rule's only wildcard also matches the bare command; otherwise exact."""
