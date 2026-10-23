@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Evals
+
+- `scripts/eval validate`, `run` and `report`: real Claude Code agents run headless against throwaway fixtures, with person steps between resumed sessions, graded afterwards by deterministic checks outside the agent's reach; reference and null runs for every case; trials, pass@k, pass^k, clustered standard errors and the smallest detectable change; tokens, turns, tool calls and cost at versioned API prices.
+- The first suite in `evals/`: six regression and three capability cases, each citing its source.
+- `.devcontainer/`: the eval image (Claude Code 2.1.309, uv with Python 3.15, Backlog.md 1.55.2, git, bubblewrap and socat), also the repository's dev container.
+- `./scripts/check` runs `scripts/eval validate`.
+
 ### Stage metrics
 
 - `asdlc stats` reports the playbook's numbers by stage (plan, design, build, test, deploy, maintain) and for coordination, each beside the playbook's name for it; `--stage <name>` for one stage, stage keys in `--json`, `--since` as before. A number that can't be computed says what it needs; change failure rate, CI-versus-production regressions, DORA and pipeline triage are listed as needing deployment and incident data. The parsed board history is cached by commit in the tasks clone's ignored `.asdlc/stats/`, and merge times come from `gh pr view --json mergedAt` when it can say.

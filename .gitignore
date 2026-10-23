@@ -1,3 +1,5 @@
 # The hook decision log is per machine (spec R26); collecting logs comes with the session index (R27).
 .asdlc/
 __pycache__/
+# Eval runs: transcripts, outcomes and counts, kept on the machine that ran them.
+.eval-results/

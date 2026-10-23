@@ -202,6 +202,26 @@ Change failure rate, CI-versus-production regressions, the DORA metrics, and pip
 
 The event log and the hook decision logs are this machine's: each engineer's `asdlc stats` counts their own races and refusals, and the board's numbers are the same for everyone.
 
+## Running evals
+
+This section is for whoever changes the plugin itself. The eval suite runs real Claude Code agents, headless, against throwaway fixtures (a tasks repository, a code repository, an engineer's machine), and grades what they did with deterministic checks the agent never sees. How to write a case is in [`evals/README.md`](../evals/README.md).
+
+```sh
+scripts/eval validate                        # every case's reference and null runs; no model calls
+scripts/eval run --case small-request-no-intent --trials 1
+scripts/eval run                             # every case, 3 trials each
+scripts/eval report                          # the latest run: pass rates, counts, cost, sample transcripts
+scripts/eval regrade .eval-results/<run>     # grade a run again after fixing a check; no model calls
+```
+
+- **Validate** builds each case's fixture twice: a scripted reference run must pass every check, and a run that does nothing must fail at least one. It is free and deterministic, and `./scripts/check` runs it.
+- **Run** builds a fresh fixture for every trial in a temporary folder, runs `claude -p` with the case's prompt, performs the case's person steps between sessions (approving plans, say) and resumes the same session, then grades the outcome. Each case runs `--trials` times (3 by default). Real runs count against your Claude subscription or API key, so start with one case and one trial.
+- **The plugin under test** is `--plugin <git ref or folder>`, `origin/main` by default: exported to a temporary folder, read-only, without `evals/`, `tests/` or the evals spec, so the agent can't read its answers and never runs from your working copy (R21).
+- **Models** follow each case (`model` in its `case.toml`) and, for workers, `asdlc route`; `--model` overrides the session's model. `--arm without-skills` runs with the plugin's scripts, hooks and commands but no skills or agents, to measure what the skills add; cases that need the plugin's agents are skipped there.
+- **Isolation.** Each trial's agent gets a fresh Claude Code configuration folder (no other plugins, no memory), its own home and git identity, the narrow rules `asdlc permissions --write` gives a pilot machine, permission prompts answered "no" (`--permission-prompts none`), no web tools, and a rule denying reads of this repository. Background tasks are off, so workers run in the foreground and the session waits for them.
+- **In the container**, `--container` runs each session inside the eval image instead: only the fixture is mounted (read-write) and the release (read-only), Bash runs in Claude Code's sandbox with no network of its own, and the image holds no credentials. Build the image once with `docker build -t asdlc-evals:local .devcontainer`, and pass `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or `ANTHROPIC_API_KEY` in your environment. The same image is the repository's dev container.
+- **Results** go to `.eval-results/<time>-<commit>-<arm>/` (ignored by git): per trial, every session's transcript, subagent transcripts, `outcome.json` and `trial.json` with each check's verdict and the counts. `report` gives each case's pass@k, pass^k and mean pass rate, the overall mean with its standard error clustered by case, the smallest change a run of that size can detect, tokens by model, turns, tool calls and errors, cost at API prices from `evals/prices.toml` beside Claude Code's own figure, and the key moments of a few failing and passing transcripts, so you can check the checks.
+
 ## Stop and remove it
 
 To stop for the day, tell your orchestrator to stop, or close the session. Claims it held go stale and are released after `stale_after`. To hand them back now, list them with `asdlc mine --as <you>` and release each:
