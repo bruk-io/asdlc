@@ -2304,3 +2304,32 @@ class OldBoardPolicyTest(unittest.TestCase):
         self.assertIn("plugins/team/review.md", refused.stderr)
         self.assertIn("asdlc init-board", refused.stderr)
         self.assertEqual(team.task("TASK-1").reviewer, "")
+
+
+# --- the third review round ----------------------------------------------------------
+
+
+@needs_backlog
+class InitBoardBehindTest(unittest.TestCase):
+    """Third review, Minor 1: re-running init-board on a clone that is behind origin goes through the board's own
+    transaction (catch up, commit with the trailer, push), so the clone is never left with a commit asdlc refuses."""
+
+    def test_missing_scaffolding_is_pushed_from_a_clone_behind_origin(self) -> None:
+        boards = Boards(self, [])
+        kyle, ann = boards.clone("kyle"), boards.clone("ann")
+        _git(kyle, "rm", "-q", "plugins/team/review.md")
+        _git(kyle, "commit", "-qm", "An older board")
+        _git(kyle, "push", "-q", "origin", "main")
+        self.assertEqual(_asdlc("--board", str(ann), "board", "task", "create", *_sized("T1")).returncode, 0)
+        done = _asdlc("init-board", str(kyle))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(_git(kyle, "rev-list", "--count", "origin/main..HEAD"), "0", "nothing left unpushed")
+        self.assertIn("plugins/team/review.md", _git(boards.origin, "ls-tree", "-r", "--name-only", "main"))
+        self.assertIn("Asdlc-Transaction:", _git(boards.origin, "log", "-1", "--format=%B", "main"))
+        self.assertEqual(sorted(boards.on_origin()), ["TASK-1"], "the other clone's task is kept")
+        listed = _asdlc("--board", str(kyle), "board", "task", "list", "--plain")
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+
+    def test_the_foreign_commit_refusal_says_to_rebase_before_pushing(self) -> None:
+        refusal = asdlc.foreign_refusal(Path("/b"), [asdlc.Unpushed("a" * 40, "Our edit", False)])
+        self.assertIn("git -C /b pull --rebase origin main", refusal)

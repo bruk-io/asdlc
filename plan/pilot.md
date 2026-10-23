@@ -141,3 +141,18 @@ The reviewer re-ran its experiments against `ff14a32` (exp_guard2, exp2c, exp_pe
 
 - **Minor 6, a phantom claim when SIGTERM lands during a push git accepted.** The push reached origin but the signal arrived before asdlc returned; the claim stands on the board with nobody working on it until `reap`. Rare, and it predates this change.
 - **Startup warnings** from the `git -C <folder>/*` rules, one per rule, in sessions started in the tasks clone.
+
+## Third review round
+
+The third review found the branch ready to pilot, with five minor items; four are fixed here, each with a regression test first.
+
+| Finding | What changed | Regression test |
+|---|---|---|
+| 1. Re-running `init-board` on a clone behind origin committed locally, without the trailer, and wedged the clone | On a board with a remote and history, the config and missing scaffolding go through `_transact` (caught up, one commit with the trailer, pushed with the retry); `_squash` and `_transact` take the paths a change covers. A fresh board still commits locally for its first push. The foreign-commit refusal says `git pull --rebase` before pushing. | `test_asdlc.InitBoardBehindTest` (two tests) |
+| 2. The reviewer offered `gh pr review --comment`, which no rule covers | Dropped: the reviewer posts with `gh pr comment` only. A new test checks that every command the worker and reviewer agents give is covered by an allow rule `asdlc permissions` writes, using the documented wildcard semantics. | `test_guard_board.BackgroundPermissionsTest.test_every_command_the_agents_give_is_allowed` |
+| 3. Bare git forms and worktree housekeeping | The permissions page says a trailing ` *` matches the bare command only when it is the rule's one wildcard; the `git -C <folder>/* <sub> *` rules have two, so each subcommand also gets a bare rule. `mv`, `rm`, `restore`, `stash` and `reset` are allowed in `<clone>.worktrees/*` only. | `BackgroundPermissionsTest.test_the_rule_matcher_follows_the_documented_wildcards`, `test_bare_git_forms_and_worktree_housekeeping_are_allowed` |
+| 4. The guide overpromised | It says background workers and reviewers run without prompts, the orchestrator's foreground work (onboarding) may ask for a few reads, Claude Code must be started in the tasks clone for the rules to apply, and to watch the first worker on day one. | (documentation) |
+
+### Risk to verify on the pilot's first day
+
+- **Minor 5, the settings scope.** That workers and reviewers launched from a session started in the tasks clone run under its `.claude/settings.local.json` is not confirmed against Claude Code's subagents documentation (the page could not be fetched). On day one, watch the first worker run to its pushed branch without a prompt; if it stops at one, record the command and widen or move the rules before more engineers start.

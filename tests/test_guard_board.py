@@ -12,6 +12,8 @@ from tests.support import ROOT, git, hook_payload, load, make_repo, run_script
 
 load("hooks/decision_log.py")
 guard = load("hooks/guard_board.py")
+load("scripts/repo_slug.py")
+asdlc = load("scripts/asdlc")
 
 CODE = Path("/work/app")
 BOARD = Path("/work/board")
@@ -249,7 +251,7 @@ _FILLED = {
     "<reviewer>": "kyle.r1", "<N>": "1", "<n>": "1", "<worktree>": str(WORKTREE), "<repo>": str(CODE), "<review>": "/work/app.worktrees/review-task-1-kyle.r1",
     "<branch>": "task-1-x", "<default branch>": "main", "<doc-id>": "doc-1",
 }
-_COMMAND = re.compile(r"^(asdlc|asdlc-plugin|backlog|git|gh|cd|uv run)\b")
+_COMMAND = re.compile(r"^(asdlc|asdlc-plugin|backlog|git|gh|cd|uv run) \S")
 # What the skills name as a person's, or as never to do: the guard refuses these by design.
 _REFUSED_BY_DESIGN = re.compile(r"asdlc (accept|approve)\b|permissions --write|-s Done|gh pr merge|--approve|--request-changes|"
                                 r"--force|git push origin main")
@@ -287,6 +289,54 @@ class SkillCommandsTest(unittest.TestCase):
                 if _REFUSED_BY_DESIGN.search(command):
                     continue
                 self.assertIsNot(outcome.verdict, guard.Verdict.DENY, outcome.reason)
+
+
+def rule_matches(rule: str, command: str) -> bool:
+    """A Bash allow rule against a simple command, as code.claude.com's permissions page describes it: a `*` matches any
+    text; a trailing ` *` (or `:*`) that is the rule's only wildcard also matches the bare command; otherwise exact."""
+    if not (rule.startswith("Bash(") and rule.endswith(")")):
+        return False
+    pattern = rule[5:-1]
+    if pattern.endswith(":*"):
+        pattern = pattern[:-2] + " *"
+    if pattern.count("*") == 1 and pattern.endswith(" *") and command == pattern[:-2]:
+        return True
+    return re.fullmatch(".*".join(re.escape(part) for part in pattern.split("*")), command) is not None
+
+
+class BackgroundPermissionsTest(unittest.TestCase):
+    """Third review: every command the worker and reviewer agents run is covered by an allow rule asdlc permissions writes,
+    so a background agent never stops at a prompt."""
+
+    RULES = asdlc.permission_rules((("acme-app", CODE),), BOARD, {}, (ROOT,))
+
+    def test_the_rule_matcher_follows_the_documented_wildcards(self) -> None:
+        self.assertTrue(rule_matches("Bash(ls *)", "ls"))
+        self.assertTrue(rule_matches("Bash(git log *)", "git log --oneline"))
+        self.assertFalse(rule_matches("Bash(* --help *)", "npm --help"))
+        self.assertFalse(rule_matches("Bash(git -C /w/* status *)", "git -C /w/task-1 status"), "two wildcards: no bare match")
+
+    def test_bare_git_forms_and_worktree_housekeeping_are_allowed(self) -> None:
+        for command in ("git -C /work/app.worktrees/task-1 status", "git -C /work/app.worktrees/task-1 diff", "git -C /work/app.worktrees/task-1 log",
+                        "git -C /work/app.worktrees/task-1 mv a b", "git -C /work/app.worktrees/task-1 rm old.py", "git -C /work/app.worktrees/task-1 restore x",
+                        "git -C /work/app.worktrees/task-1 stash", "git -C /work/app.worktrees/task-1 reset --hard HEAD~1", "git -C /work/app fetch"):
+            with self.subTest(command=command):
+                self.assertTrue(any(rule_matches(rule, command) for rule in self.RULES.allow), command)
+        for command in ("git -C /work/app reset --hard", "git -C /work/app rm x", "git -C /work/board.worktrees/plugin-x reset --hard"):
+            with self.subTest(command=command):
+                self.assertFalse(any(rule_matches(rule, command) for rule in self.RULES.allow), command)
+
+    def test_every_command_the_agents_give_is_allowed(self) -> None:
+        found = [(where, command) for where, command in skill_commands() if where.startswith("agents/")]
+        self.assertGreater(len(found), 25)
+        for where, command in found:
+            if _REFUSED_BY_DESIGN.search(command) or "${CLAUDE_PLUGIN_ROOT}" in command:
+                continue  # a person's or refused by design; the uv fallback when asdlc isn't on PATH, which doctor fails
+            for part in re.split(r"\s*(?:&&|\|\||;|\|)\s*", command):
+                if part.startswith("cd ") or not part or re.fullmatch(r"git -C \S+", part):
+                    continue  # a cd into a worktree, an additional directory, is read-only; a bare `git -C <path>` is prose
+                with self.subTest(where=where, command=part):
+                    self.assertTrue(any(rule_matches(rule, part) for rule in self.RULES.allow), f"no allow rule covers: {part}")
 
 
 class PushTest(unittest.TestCase):

@@ -72,7 +72,7 @@ EOF
 )"
 ```
 
-`gh pr review <url> --comment --body ...` is fine too. Never `--approve` and never `--request-changes`; the board guard refuses them, and merging. If `gh` is missing, not signed in, or the remote isn't GitHub, skip this step and say so in your final message; the findings are on the task either way.
+Use `gh pr comment`, the one form your permissions allow; never a pull request review (gh pr review), whose `--approve` and `--request-changes` the board guard refuses anyway, as it does merging. If `gh` is missing, not signed in, or the remote isn't GitHub, skip this step and say so in your final message; the findings are on the task either way.
 
 ## 6. Finish
 

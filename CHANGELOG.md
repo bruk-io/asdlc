@@ -75,3 +75,9 @@ An independent review of the combined pilot ran each claim below as an experimen
 - Recovering from an interrupted command restores only `backlog/` and names other dirty files; only trailer-marked commits that touch nothing outside `backlog/` count as asdlc's own, and a person's commit on top of an interrupted change is kept, with how to keep it.
 - The guard reads attached short flags (`-a@kyle.w2`, `-lreview-passed`).
 - `doctor` flags a tasks repository without `plugins/team/review.md`, and `review-next` refuses to claim a review there; re-run `asdlc init-board` to add it.
+
+### Third review round (this release)
+
+- Re-running `asdlc init-board` on a shared board pushes the missing scaffolding through the board's own transaction, never leaving a local commit; the refusal for commits asdlc didn't make says to `git pull --rebase` before pushing.
+- `asdlc permissions` adds bare forms of each worktree git subcommand and allows `mv`, `rm`, `restore`, `stash` and `reset` in task worktrees; the reviewer posts with `gh pr comment` only.
+- The guide says what runs without prompts, that Claude Code starts in the tasks clone, and to watch the first worker on day one.
