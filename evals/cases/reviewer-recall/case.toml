@@ -1,8 +1,8 @@
-source = "spec/agentic-sdlc-plugin-evals.md (Deploy, Reviewer recall; the stand-in for the code owner at the change gate, R6), with the defect the cross-machine review demonstration seeds (tests/test_demo_review.py): a login counted before it is checked."
+source = "spec/agentic-sdlc-plugin-evals.md (Deploy, Reviewer recall; the stand-in for the code owner at the change gate, R6), with the defect the cross-machine review demonstration seeds (tests/test_demo_review.py): a login counted before it is checked. Also the first real eval run of approval-before-build (plan/evals.md, What the real transcripts showed): background workers were refused `cd <worktree> && ... git ...` lines and `git -C <worktree> ls-files`, with nobody there to approve (no_permission_denials)."
 kind = "outcome"
 suite = "capability"
 description = "The change under review counts successful logins as failures, against its acceptance criteria, and its tests do not notice. The reviewer sends it back with an Important finding that names the defect."
-checks = ["sent_back_naming_the_defect"]
+checks = ["sent_back_naming_the_defect", "no_permission_denials"]
 arms = ["with-plugin"]
 
 [run]
