@@ -51,6 +51,7 @@ import random
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -935,10 +936,22 @@ def stale_holds(items: Iterable[Task], touched: Mapping[str, datetime], now: dat
 _HOLD_WORDS = frozendict({Hold.CLAIM: "claim", Hold.LEAD: "lead", Hold.REVIEW: "review claim"})
 
 
+def kept_on_release(task: Task) -> tuple[str, ...]:
+    """The assignees a released claim leaves: the people it was reserved for and, when a review
+    asked for changes, the engineer whose worker built it, so it goes back to them first."""
+    kept = people(task.assignees)
+    if CHANGES_REQUESTED not in task.labels:
+        return kept
+    return (*kept, *(f"@{o}" for o in sorted({owner_of(w) for w in workers(task.assignees)}) if f"@{o}" not in kept))
+
+
 def reap_comment(stale: Stale, after: timedelta) -> str:
     what = _HOLD_WORDS[stale.hold]
-    kept = people(stale.task.assignees)
+    kept = kept_on_release(stale.task)
     keeping = f" It stays reserved for {', '.join(kept)}." if stale.hold is Hold.CLAIM and kept else ""
+    if stale.hold is Hold.CLAIM and CHANGES_REQUESTED in stale.task.labels:
+        keeping += (f" A review asked for changes, so it goes back to its author first; its branch{' ' + stale.task.branch if stale.task.branch else ''} "
+                    "holds the work so far, and the next claim resumes it.")
     keeping += " Another reviewer may claim it with asdlc review-next." if stale.hold is Hold.REVIEW else ""
     return (
         f"Released by asdlc reap: the {what} held by {', '.join(stale.holders)} had no board update for "
@@ -1195,7 +1208,8 @@ def _locked(board: Board) -> Iterator[None]:
                 break
             except BlockingIOError:
                 if time.monotonic() > deadline:
-                    raise AsdlcError(f"another asdlc command has held the board at {board.path} for {LOCK_WAIT_SECONDS}s; try again") from None
+                    raise AsdlcError(f"another asdlc command holds the lock on the board at {board.path} (it holds it while it changes and pushes "
+                                     f"the board) and still had it after {LOCK_WAIT_SECONDS}s; try again in a moment") from None
                 time.sleep(0.05)
         try:
             yield
@@ -1259,8 +1273,40 @@ def _find(tasks: Iterable[Task], task_id: str) -> Task | None:
     return next((task for task in tasks if task.id == task_id), None)
 
 
+def _git_dir(board: Board) -> Path:
+    return Path(_board_git(board, "rev-parse", "--absolute-git-dir").stdout.strip())
+
+
+def _pending(board: Board) -> dict[str, str] | None:
+    """The marker an asdlc change leaves in the clone's git folder while it runs: its id and the
+    commit it started from. One still there means that change was interrupted."""
+    path = _git_dir(board) / PENDING
+    try:
+        found = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return found if isinstance(found, dict) else {}
+
+
+def _begin(board: Board) -> str:
+    """Write the marker for a change starting now, level with origin/main; its id goes in the commit's trailer."""
+    found = {"id": f"{os.getpid()}-{time.time_ns()}", "base": _board_git(board, "rev-parse", "HEAD").stdout.strip()}
+    (_git_dir(board) / PENDING).write_text(json.dumps(found) + "\n")
+    return found["id"]
+
+
+def _end(board: Board) -> None:
+    """Remove the marker, unless the change's own commits are still unpushed (then the next command drops them)."""
+    if _ahead(board) == 0:
+        (_git_dir(board) / PENDING).unlink(missing_ok=True)
+
+
 def _require_ready(board: Board) -> None:
     """Raises: AsdlcError: the clone is off main, or has uncommitted changes to tracked files."""
+    if _pending(board) is not None:
+        _say("an earlier asdlc command was interrupted; undoing its unfinished change to the board's files")
+        _board_git(board, "reset", "--quiet", "--hard", "HEAD")
+        _board_git(board, "clean", "-fdq", "--", "backlog")
     branch = _board_git(board, "branch", "--show-current").stdout.strip()
     if branch != BOARD_BRANCH:
         raise AsdlcError(f"the board at {board.path} is on '{branch or 'a detached HEAD'}'; asdlc works on {BOARD_BRANCH} only")
@@ -1278,10 +1324,13 @@ def _rebase(board: Board) -> str | None:
     return ", ".join(files) or "the board"
 
 
-def _drop_own(board: Board) -> None:
-    """Drop this command's unpushed commits. Every asdlc change starts level with
-    origin/main, so they are the only commits not on it; nobody else's change is lost."""
+def _drop_own(board: Board, clean: bool = False) -> None:
+    """Drop this command's unpushed commits. Every asdlc change starts level with origin/main,
+    so they are the only commits not on it; nobody else's change is lost. `clean` also removes
+    files a failed or interrupted backlog command left in backlog/."""
     _board_git(board, "reset", "--quiet", "--hard", f"origin/{BOARD_BRANCH}")
+    if clean:
+        _board_git(board, "clean", "-fdq", "--", "backlog")
 
 
 def _push(board: Board) -> tuple[Push, str]:
@@ -1294,16 +1343,15 @@ class Published(StrEnum):
     REPLAY = "replay"
 
 
-def _publish(board: Board, own: bool) -> Published:
-    """Push to origin/main, rebasing and retrying when someone else pushed first.
+def _publish(board: Board) -> Published:
+    """Push this command's commit to origin/main, rebasing and retrying when someone else pushed first.
 
-    `own` says the unpushed commits are this command's, so they may be dropped: a rebase
-    that conflicts drops them and fails, and one that leaves two tasks sharing an id (two
-    clones creating a task at once) drops them and asks for the command to run again.
-    Earlier unpushed commits (`own` false) are never dropped.
+    A rebase that conflicts drops the change and fails; one that leaves two tasks sharing an id
+    (two clones creating a task at once) drops it and asks for the command to run again.
 
     Raises:
-        AsdlcError: the push failed, a rebase conflicted, or other agents kept pushing first.
+        AsdlcError: the push failed, a rebase conflicted, or other agents kept pushing first;
+            the change was dropped each time.
     """
     rng = random.Random()
     for attempt in range(1, PUSH_ATTEMPTS + 1):
@@ -1314,47 +1362,105 @@ def _publish(board: Board, own: bool) -> Published:
             case Push.PUSHED:
                 return Published.DONE
             case Push.FAILED:
-                raise AsdlcError(f"the push to origin/{BOARD_BRANCH} failed; the change is committed in {board.path} and the next asdlc command pushes it:\n{error}")
+                _drop_own(board)
+                raise AsdlcError(f"the push to origin/{BOARD_BRANCH} failed, so the change was undone; nothing was changed:\n{error}")
             case Push.RETRY:
                 time.sleep(backoff(attempt, rng))
                 _fetch(board)
                 if conflict := _rebase(board):
-                    if not own:
-                        raise AsdlcError(f"an earlier unpushed board change to {conflict} conflicts with origin/{BOARD_BRANCH}; resolve it in {board.path} by hand")
                     _drop_own(board)
                     raise AsdlcError(f"your change to {conflict} conflicts with a change another agent pushed first, so it was not applied. The board is now at origin/{BOARD_BRANCH}: check the task and run the command again.")
                 if duplicate_ids(_items(board)) - duplicate_ids(_items(board, f"origin/{BOARD_BRANCH}")):
-                    if not own:
-                        raise AsdlcError(f"two tasks now share an id in {board.path}; fix it by hand before pushing")
                     _drop_own(board)
                     return Published.REPLAY
-    if own:
-        _drop_own(board)
-        raise AsdlcError(f"gave up after {PUSH_ATTEMPTS} attempts because other agents kept pushing first; nothing was changed, try again")
-    raise AsdlcError(f"gave up pushing after {PUSH_ATTEMPTS} attempts; the change stays committed in {board.path}")
+    _drop_own(board)
+    raise AsdlcError(f"gave up after {PUSH_ATTEMPTS} attempts because other agents kept pushing first; nothing was changed, try again")
+
+
+@dataclass(frozen=True)
+class Unpushed:
+    sha: str
+    subject: str
+    own: bool  # asdlc made it: its trailer says so, or the interrupted change's marker covers it
+
+
+def unpushed_commits(log: str, interrupted: frozenset[str]) -> tuple[Unpushed, ...]:
+    """`git log --format=%H%x00%B%x01` over origin/main..HEAD, each commit marked as asdlc's own or not."""
+    found = []
+    for entry in log.split("\x01"):
+        sha, _, body = entry.strip("\n").partition("\x00")
+        if sha.strip():
+            own = bool(re.search(rf"(?m)^{TRAILER}: ", body)) or sha.strip() in interrupted
+            found.append(Unpushed(sha.strip(), body.strip().splitlines()[0] if body.strip() else "", own))
+    return tuple(found)
+
+
+def foreign_refusal(board: Path, foreign: Sequence[Unpushed]) -> str:
+    listed = "; ".join(f"{c.sha[:12]} {c.subject}" for c in foreign)
+    return (f"the board clone at {board} has {len(foreign)} commit(s) on {BOARD_BRANCH} that aren't on origin and that asdlc didn't make "
+            f"({listed}). asdlc never pushes or drops them: push them yourself (git -C {board} push origin {BOARD_BRANCH}) or remove them "
+            f"(git -C {board} reset --hard origin/{BOARD_BRANCH}), then run the command again.")
 
 
 def _catch_up(board: Board) -> None:
-    """Fetch, rebase anything left unpushed and push it, so local main equals origin/main.
+    """Fetch and bring local main level with origin/main. Unpushed commits an interrupted asdlc
+    command left are dropped, never pushed later: by now the board may have moved on, and a
+    claim pushed late would be a claim nobody is working on.
 
     Raises:
-        AsdlcError: the fetch failed, or earlier unpushed changes can't be pushed.
+        AsdlcError: the fetch failed, or local main has unpushed commits asdlc didn't make.
     """
     _fetch(board)
-    if conflict := _rebase(board):
-        raise AsdlcError(f"an earlier unpushed board change to {conflict} conflicts with origin/{BOARD_BRANCH}; resolve it in {board.path} by hand")
-    if pending := _ahead(board):
-        _say(f"pushing {pending} earlier board change(s) first")
-        _publish(board, own=False)
+    marker = _pending(board)
+    base = (marker or {}).get("base", "")
+    interrupted = frozenset()
+    if base and _board_git(board, "cat-file", "-e", f"{base}^{{commit}}", check=False).returncode == 0:
+        interrupted = frozenset(_board_git(board, "rev-list", f"{base}..HEAD").stdout.split())
+    log = _board_git(board, "log", "--format=%H%x00%B%x01", f"origin/{BOARD_BRANCH}..HEAD").stdout
+    commits = unpushed_commits(log, interrupted)
+    if foreign := [c for c in commits if not c.own]:
+        raise AsdlcError(foreign_refusal(board.path, foreign))
+    if commits:
+        _say(f"dropping {len(commits)} unpushed board change(s) an interrupted asdlc command left ({'; '.join(c.subject for c in commits)}); "
+             "they were never pushed, so nobody saw them")
+    _board_git(board, "reset", "--quiet", "--hard", f"origin/{BOARD_BRANCH}")
+    (_git_dir(board) / PENDING).unlink(missing_ok=True)
 
 
 def _backlog_committed(board: Board, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    """Run one backlog command. Raises: AsdlcError: it changed the board without committing."""
+    """Run one backlog command. Raises: AsdlcError: it changed the board without committing it."""
     done = _board_backlog(board, args)
     loose = _board_git(board, "status", "--porcelain", "--", "backlog").stdout.strip()
     if done.returncode == 0 and loose:
         raise AsdlcError(f"backlog changed the board without committing it (is auto_commit on, and git's user set?):\n{loose}")
     return done
+
+
+def _mark(board: Board, transaction: str) -> None:
+    """Make this command's commits one commit with its trailer, keeping backlog's messages."""
+    if not _ahead(board):
+        return
+    messages = _board_git(board, "log", "--reverse", "--format=%B", f"origin/{BOARD_BRANCH}..HEAD").stdout.strip()
+    _board_git(board, "reset", "--quiet", "--soft", f"origin/{BOARD_BRANCH}")
+    _board_git(board, "commit", "--quiet", "--no-verify", "-m", f"{messages}\n\n{TRAILER}: {transaction}")
+
+
+@contextmanager
+def _change(board: Board) -> Iterator[str]:
+    """One asdlc change to the board: locked, level with origin/main, its marker written; on any
+    exception (a refusal, a failed push, SIGINT or SIGTERM) its unpushed commits are dropped.
+    A change killed outright leaves the marker, and the next command drops what it left."""
+    with _locked(board):
+        _require_ready(board)
+        _catch_up(board)
+        transaction = _begin(board)
+        try:
+            yield transaction
+        except BaseException:
+            _drop_own(board, clean=True)
+            raise
+        finally:
+            _end(board)
 
 
 def board_command(board: Board, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -1364,19 +1470,21 @@ def board_command(board: Board, args: Sequence[str]) -> subprocess.CompletedProc
         AsdlcError: the board isn't ready, or the change can't be pushed.
     """
     under = draft_parent(args)
-    with _locked(board):
-        _require_ready(board)
-        _catch_up(board)
+    with _change(board) as transaction:
         if under is not None and not any(is_draft(t) and t.id == under[1] for t in _items(board)):
             raise AsdlcError(f"{under[1]} is not a draft on the board, so it can't be a draft's parent")
         for _ in range(PUSH_ATTEMPTS):
             done = _backlog_committed(board, under[0] if under else args)
-            if done.returncode == 0 and under is not None:
+            if done.returncode != 0:
+                _drop_own(board, clean=True)
+                return done
+            if under is not None:
                 _set_draft_parent(board, under[1])
-            if done.returncode != 0 or _publish(board, own=True) is Published.DONE:
+            _mark(board, transaction)
+            if _publish(board) is Published.DONE:
                 return done
             _say("another agent created a task with the same id first; running the command again")
-    raise AsdlcError(f"gave up after {PUSH_ATTEMPTS} attempts because other agents kept creating tasks with the same id; nothing was changed")
+        raise AsdlcError(f"gave up after {PUSH_ATTEMPTS} attempts because other agents kept creating tasks with the same id; nothing was changed")
 
 
 def _set_draft_parent(board: Board, parent: str) -> None:
@@ -1395,13 +1503,13 @@ def _set_draft_parent(board: Board, parent: str) -> None:
     _board_git(board, "commit", "--quiet", "--no-verify", "--amend", "--no-edit")
 
 
-def _squash(board: Board, message: str) -> bool:
-    """Everything this command changed on the board as one commit on origin/main; False when nothing changed."""
+def _squash(board: Board, message: str, transaction: str) -> bool:
+    """Everything this command changed on the board as one commit on origin/main, with its trailer; False when nothing changed."""
     _board_git(board, "add", "-A", "--", "backlog")
     _board_git(board, "reset", "--quiet", "--soft", f"origin/{BOARD_BRANCH}")
     if _board_git(board, "diff", "--cached", "--quiet", check=False).returncode == 0:
         return False
-    _board_git(board, "commit", "--quiet", "--no-verify", "-m", message)
+    _board_git(board, "commit", "--quiet", "--no-verify", "-m", f"{message}\n\n{TRAILER}: {transaction}")
     return True
 
 
@@ -1421,16 +1529,10 @@ def _transact[R](board: Board, step: Step[R]) -> R:
             Nothing is left unpushed either way.
     """
     rng = random.Random()
-    with _locked(board):
-        _require_ready(board)
-        _catch_up(board)
+    with _change(board) as transaction:
         for attempt in range(1, PUSH_ATTEMPTS + 1):
-            try:
-                message, result = step(attempt)
-            except BaseException:
-                _drop_own(board)
-                raise
-            if message is None or not _squash(board, message):
+            message, result = step(attempt)
+            if message is None or not _squash(board, message, transaction):
                 _drop_own(board)
                 return result
             outcome, error = _push(board)
@@ -1505,14 +1607,29 @@ def default_branch(repo: Path) -> str:
     return head.stdout.strip().removeprefix("origin/") if head.returncode == 0 and head.stdout.strip() else "main"
 
 
-def make_worktree(repo: Path, task: Task, worker: str, board: Path) -> Path:
-    """The task's worktree, made from origin's default branch, with its marker.
+def _has_ref(repo: Path, ref: str) -> bool:
+    return _git(repo, "rev-parse", "--verify", "--quiet", ref).returncode == 0
+
+
+def _ancestor(repo: Path, older: str, newer: str) -> bool:
+    return _git(repo, "merge-base", "--is-ancestor", older, newer).returncode == 0
+
+
+def make_worktree(repo: Path, task: Task, worker: str, board: Path) -> tuple[Path, str | None]:
+    """The task's worktree, with its marker, on the task's recorded branch, and where it resumed from.
+
+    A branch someone already pushed (an earlier round, or a worker whose claim was reaped) is
+    resumed from `origin/<branch>`, and a local copy behind it is brought up to it; only a branch
+    nobody pushed starts from origin's default branch. A pushed branch is never started again from
+    the default branch, so nothing has to be force-pushed over it.
 
     Raises:
         AsdlcError: the path holds another task, or git could not add the worktree.
     """
     path = worktree_path(repo, task.id)
     marker = path / MARKER
+    branch = task.branch or branch_name(task)
+    resumed = None
     if marker.exists():
         recorded = json.loads(marker.read_text()).get("task")
         if recorded != task.id:
@@ -1521,10 +1638,20 @@ def make_worktree(repo: Path, task: Task, worker: str, board: Path) -> Path:
         base = default_branch(repo)
         if _git(repo, "fetch", "--quiet", "origin", base).returncode != 0:
             _say(f"could not fetch origin/{base}; branching from the last fetched copy")
-        branch = branch_name(task)
-        if _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
+        pushed = _git(repo, "fetch", "--quiet", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}").returncode == 0
+        remote = f"refs/remotes/origin/{branch}"
+        if _has_ref(repo, f"refs/heads/{branch}"):
             added = _git(repo, "worktree", "add", str(path), branch)
-        elif _git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{base}").returncode == 0:
+            if pushed and path.is_dir():
+                resumed = f"origin/{branch}"
+                if _ancestor(repo, branch, remote):
+                    _git(path, "merge", "--quiet", "--ff-only", remote)
+                elif not _ancestor(repo, remote, branch):
+                    _say(f"{branch} here and origin/{branch} have diverged: rebase your commits onto origin/{branch} in {path} before pushing")
+        elif pushed:
+            added = _git(repo, "worktree", "add", "--no-track", "-b", branch, str(path), remote)
+            resumed = f"origin/{branch}"
+        elif _has_ref(repo, f"refs/remotes/origin/{base}"):
             added = _git(repo, "worktree", "add", "--no-track", "-b", branch, str(path), f"origin/{base}")
         else:
             raise AsdlcError(f"claimed {task.id}, but {repo} has no origin/{base} to branch from, so no worktree was made")
@@ -1535,7 +1662,7 @@ def make_worktree(repo: Path, task: Task, worker: str, board: Path) -> Path:
     exclude.parent.mkdir(parents=True, exist_ok=True)
     if (updated := with_exclude(exclude.read_text() if exclude.exists() else "", MARKER)) is not None:
         exclude.write_text(updated)
-    return path
+    return path, resumed
 
 
 # --- who and where: the engineer, preferences, settings and this machine's repositories --
@@ -1695,7 +1822,7 @@ def _reap_one(board: Board, found: Stale, now: datetime, after: timedelta) -> St
         text = reap_comment(current, after)
         match current.hold:
             case Hold.CLAIM:
-                done = _board_backlog(board, ["task", "edit", current.task.id, "-s", TO_DO, "-a", ",".join(people(current.task.assignees)),
+                done = _board_backlog(board, ["task", "edit", current.task.id, "-s", TO_DO, "-a", ",".join(kept_on_release(current.task)),
                                               "--comment", text, "--comment-author", REAPER])
                 if done.returncode != 0:
                     raise AsdlcError(f"backlog could not release {current.task.id}: {(done.stderr or done.stdout).strip()}")
@@ -1718,7 +1845,7 @@ def reap(board: Board, now: datetime, older_than: timedelta | None, as_json: boo
     after = older_than or _settings(board).stale_after
     released = [r for found in stale_holds(_items(board, origin), _touched(board, origin), now, after) if (r := _reap_one(board, found, now, after))]
     rows = [{"id": s.task.id, "hold": str(s.hold), "holders": [h.removeprefix("@") for h in s.holders], "idle": human(s.idle),
-             "kept": [p.removeprefix("@") for p in people(s.task.assignees)] if s.hold is Hold.CLAIM else []} for s in released]
+             "kept": [p.removeprefix("@") for p in kept_on_release(s.task)] if s.hold is Hold.CLAIM else []} for s in released]
     lines = [f"released the {r['hold']} on {r['id']} held by {', '.join('@' + h for h in r['holders'])}: idle {r['idle']}" for r in rows]
     _emit({"stale_after": human(after), "released": rows}, as_json, lines or [f"nothing stale (stale_after {human(after)})"])
     return 0
@@ -1996,7 +2123,10 @@ def _claim_on_board(board: Board, task_id: str, worker: str, registry: Mapping[s
         done = _board_backlog(board, ["task", "edit", task_id, "-s", IN_PROGRESS, "-a", ",".join(assignees)])
         if done.returncode != 0:
             raise AsdlcError(f"backlog did not record the claim on {task_id}: {(done.stderr or done.stdout).strip()}")
-        return f"Claim {task_id} for @{worker}", Claimed(replace(task, status=IN_PROGRESS, assignees=assignees))
+        branch = task.branch or branch_name(task)
+        if not task.branch:
+            _write_key(board, task, BRANCH_KEY, branch)
+        return f"Claim {task_id} for @{worker}", Claimed(replace(task, status=IN_PROGRESS, assignees=assignees, branch=branch))
 
     return _transact(board, step)
 
@@ -2007,7 +2137,8 @@ def _claim_report(board: Board, task: Task, worker: str, cwd: Path, registry: Ma
     chosen = route(task, _tasks(board))
     report: dict[str, object] = {
         "claimed": True, "task": task.id, "title": task.title, "worker": worker, "project": task.project or None,
-        "parent": task.parent or None, "model": None, "effort": None, "repo": None, "worktree": None, "branch": None, "note": None,
+        "parent": task.parent or None, "model": None, "effort": None, "repo": None, "worktree": None, "branch": None, "resumed_from": None,
+        "changes_requested": CHANGES_REQUESTED in task.labels, "note": None,
     }
     if isinstance(chosen, Route):
         report |= {"model": chosen.model, "effort": chosen.effort}
@@ -2018,8 +2149,8 @@ def _claim_report(board: Board, task: Task, worker: str, cwd: Path, registry: Ma
         repo = code_repo(cwd, board.path)
     match repo:
         case Path():
-            path = make_worktree(repo, task, worker, board.path)
-            report |= {"repo": str(repo), "worktree": str(path), "branch": branch_name(task)}
+            path, resumed = make_worktree(repo, task, worker, board.path)
+            report |= {"repo": str(repo), "worktree": str(path), "branch": task.branch or branch_name(task), "resumed_from": resumed}
         case str() as why:
             report["note"] = f"on the board only: {why}, so no worktree was made"
     return report
@@ -2028,6 +2159,10 @@ def _claim_report(board: Board, task: Task, worker: str, cwd: Path, registry: Ma
 def _claim_lines(report: Mapping[str, object]) -> list[str]:
     model = f" ({report['model']}, {report['effort']})" if report["model"] else ""
     head = f"claimed {report['task']} for @{report['worker']}{model}"
+    if report["resumed_from"]:
+        head += f", resuming {report['branch']} from {report['resumed_from']}"
+    if report["changes_requested"]:
+        head += "; a review asked for changes: the findings are in its newest 'Review by' comment"
     return [head, str(report["worktree"])] if report["worktree"] else [f"{head} {report['note']}"]
 
 
@@ -3142,7 +3277,14 @@ def _when(raw: str | None) -> datetime:
     return found if found.tzinfo else found.replace(tzinfo=UTC)
 
 
+def _stopped(signum: int, frame: object) -> None:
+    """SIGTERM or SIGHUP: unwind like Ctrl-C, so a change in progress drops its unpushed commit."""
+    raise SystemExit(128 + signum)
+
+
 def main(argv: Sequence[str]) -> int:
+    for stopping in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(stopping, _stopped)
     cwd = Path.cwd()
     parser = _parser()
     split = command_index(argv)

@@ -3,10 +3,12 @@ import os
 import random
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1508,7 +1510,7 @@ class ReviewCommandTest(unittest.TestCase):
         engineer = asdlc.owner_of(worker)
         team.ok("claim", task_id, "--as", worker, engineer=engineer)
         number = task_id.rpartition("-")[2]
-        team.ok("finish", task_id, "--as", worker, "--branch", f"task-{number}-branch", "--pr", f"https://github.com/acme/api/pull/{number}",
+        team.ok("finish", task_id, "--as", worker, "--pr", f"https://github.com/acme/api/pull/{number}",
                 "--notes", "Built.", engineer=engineer)
 
     def later(self, **delta: float) -> str:
@@ -1525,7 +1527,7 @@ class ReviewCommandTest(unittest.TestCase):
         self.assertEqual(
             {k: first[k] for k in ("task", "reviewer", "kind", "authors", "repo", "default_branch", "branch", "pull_request", "model", "effort")},
             {"task": "TASK-1", "reviewer": "kyle.r1", "kind": "cross-machine", "authors": ["ann"], "repo": str(self.team.api), "default_branch": "main",
-             "branch": "task-1-branch", "pull_request": "https://github.com/acme/api/pull/1", "model": "sonnet", "effort": "medium"},
+             "branch": "task-1-rate-limit", "pull_request": "https://github.com/acme/api/pull/1", "model": "sonnet", "effort": "medium"},
         )
         on_board = self.team.task("TASK-1")
         self.assertEqual((on_board.status, on_board.assignees, on_board.reviewer, on_board.review_kind), ("In Review", ("@ann.w1",), "kyle.r1", "cross-machine"))
@@ -1706,3 +1708,140 @@ class ReapedWorkerTest(unittest.TestCase):
         self.assertEqual(task.references, ("task-1-add-login", "https://github.com/acme/api/pull/1"))
         self.assertIn("built it", self.team.text("TASK-1"))
         self.assertEqual(_git(self.team.boards.origin, "log", "-1", "--format=%s", "main"), "Finish TASK-1: @ann.w1, In Review")
+
+
+@needs_backlog
+class ResumedBranchTest(unittest.TestCase):
+    """B2: a reaped changes-requested task is resumed from its pushed branch, never rebuilt from main."""
+
+    def test_the_branch_is_recorded_at_claim_and_a_reclaim_resumes_it_from_origin(self) -> None:
+        team = Team(self, [_sized("Add login", "size-1", "--project", "acme-api")])
+        report = json.loads(team.ok("claim", "1", "--as", "kyle.w1", "--json").stdout)
+        worktree, branch = Path(report["worktree"]), report["branch"]
+        self.assertEqual(team.task("TASK-1").branch, branch)
+        (worktree / "login.py").write_text("kyle's work\n")
+        _git(worktree, "add", ".")
+        _git(worktree, "commit", "-qm", "kyle's work")
+        _git(worktree, "push", "-q", "-u", "origin", "HEAD")
+        work = _git(worktree, "rev-parse", "HEAD")
+        team.ok("finish", "1", "--as", "kyle.w1", "--notes", "built")
+        team.ok("review-next", "--as", "ann.r1", engineer="ann")
+        team.ok("review-done", "1", "--as", "ann.r1", "--verdict", "changes", "--notes", "[Bugs, Important] fix x", engineer="ann")
+        team.ok("reap", "--now", _later(hours=3), engineer="ann")
+        reaped = team.task("TASK-1")
+        self.assertEqual((reaped.status, reaped.assignees, reaped.branch), ("To Do", ("@kyle",), branch))
+        self.assertIn("changes-requested", reaped.labels)
+        self.assertIn("It stays reserved for @kyle", team.text("TASK-1"))
+        refused = team.run("claim", "1", "--as", "ann.w1", engineer="ann")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("reserved for @kyle", refused.stderr)
+        # Another of kyle's workers picks it up on a machine without the old worktree or branch.
+        _git(team.api, "worktree", "remove", "--force", str(worktree))
+        _git(team.api, "branch", "-D", branch)
+        again = json.loads(team.ok("claim", "1", "--as", "kyle.w2", "--json").stdout)
+        self.assertEqual((again["worktree"], again["branch"], again["resumed_from"]), (str(worktree), branch, f"origin/{branch}"))
+        self.assertEqual(_git(worktree, "rev-parse", "HEAD"), work)
+        self.assertEqual((worktree / "login.py").read_text(), "kyle's work\n")
+        (worktree / "fix.py").write_text("fixed\n")
+        _git(worktree, "add", ".")
+        _git(worktree, "commit", "-qm", "fix")
+        _git(worktree, "push", "-q", "-u", "origin", "HEAD")
+        self.assertEqual(_git(team.api, "rev-list", "--count", f"origin/main..origin/{branch}"), "2")
+
+    def test_a_local_branch_behind_origin_is_brought_up_to_it(self) -> None:
+        team = Team(self, [_sized("Add login", "size-1", "--project", "acme-api")])
+        report = json.loads(team.ok("claim", "1", "--as", "kyle.w1", "--json").stdout)
+        worktree, branch = Path(report["worktree"]), report["branch"]
+        _git(worktree, "commit", "-q", "--allow-empty", "-m", "first")
+        _git(worktree, "push", "-q", "-u", "origin", "HEAD")
+        elsewhere = team.boards.root / "elsewhere"
+        _git(team.boards.root, "clone", "-q", "-b", branch, str(team.boards.root / "origins" / "acme" / "api.git"), str(elsewhere))
+        _git(elsewhere, "commit", "-q", "--allow-empty", "-m", "second, pushed from another machine")
+        _git(elsewhere, "push", "-q", "origin", branch)
+        team.ok("release", "1", "--as", "kyle.w1")
+        _git(team.api, "worktree", "remove", "--force", str(worktree))
+        team.ok("claim", "1", "--as", "kyle.w2")
+        self.assertEqual(_git(worktree, "log", "-1", "--format=%s"), "second, pushed from another machine")
+
+
+@needs_backlog
+class InterruptedCommandTest(unittest.TestCase):
+    """I1: an interrupted asdlc command never wedges the board clone, and never pushes a phantom claim later."""
+
+    def setUp(self) -> None:
+        self.team = Team(self, [_sized("T1", "size-2", "--project", "acme-api"), _sized("T2", "size-2", "--project", "acme-api")])
+        self.theirs = self.team.boards.clone("theirs")
+
+    def interrupted_claim(self, signal_number: int) -> None:
+        """kyle.w1's claim, stopped after backlog committed it and before the push."""
+        root = self.team.boards.root
+        flag, wrapper = root / "committed", root / "slow-backlog"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "--version" ]; then exec "$REAL_BACKLOG" "$@"; fi\n'
+            '"$REAL_BACKLOG" "$@"; status=$?\n'
+            'case "$*" in *"task edit"*"In Progress"*) : > "$FLAG"; sleep 60;; esac\n'
+            "exit $status\n"
+        )
+        wrapper.chmod(0o755)
+        env = {**os.environ, **ISOLATED, **NO_MACHINE_CONFIG, **self.team.machine, **as_engineer("kyle"),
+               "ASDLC_BACKLOG": str(wrapper), "REAL_BACKLOG": BACKLOG, "FLAG": str(flag)}
+        claim = subprocess.Popen([sys.executable, str(ROOT / "scripts" / "asdlc"), "--board", str(self.team.board), "claim", "1", "--as", "kyle.w1"],
+                                 cwd=root, env=env, start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for _ in range(600):
+            if flag.exists() or claim.poll() is not None:
+                break
+            time.sleep(0.05)
+        if not flag.exists():
+            self.fail(f"the claim never reached its push: {claim.communicate()}")
+        os.killpg(claim.pid, signal_number)
+        claim.communicate(timeout=60)
+
+    def ann_claims_it_on_her_clone(self) -> None:
+        done = _asdlc("--board", str(self.theirs), "claim", "1", "--as", "ann.w1", env=self.team.machine, engineer="ann")
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_a_terminated_claim_is_dropped_at_once(self) -> None:
+        self.interrupted_claim(signal.SIGTERM)
+        self.assertEqual(_git(self.team.board, "rev-list", "--count", "origin/main..HEAD"), "0")
+        self.assertEqual(_git(self.team.board, "status", "--porcelain", "--untracked-files=no"), "")
+        self.ann_claims_it_on_her_clone()
+        done = self.team.ok("next", "--as", "kyle.w2", "--json")
+        self.assertEqual(json.loads(done.stdout)["task"], "TASK-2")
+        self.assertEqual(self.team.task("TASK-1").assignees, ("@ann.w1",))
+
+    def test_a_killed_claim_is_dropped_by_the_next_command_never_pushed(self) -> None:
+        self.interrupted_claim(signal.SIGKILL)
+        self.assertEqual(_git(self.team.board, "rev-list", "--count", "origin/main..HEAD"), "1", "the kill left the claim unpushed")
+        self.ann_claims_it_on_her_clone()
+        done = self.team.ok("next", "--as", "kyle.w2", "--json")
+        self.assertIn("interrupted", done.stderr)
+        self.assertEqual(json.loads(done.stdout)["task"], "TASK-2")
+        self.assertEqual(self.team.task("TASK-1").assignees, ("@ann.w1",))
+        self.assertEqual(_git(self.team.board, "rev-list", "--count", "origin/main..HEAD"), "0")
+
+    def test_a_commit_asdlc_did_not_make_is_never_pushed_or_dropped(self) -> None:
+        (self.team.board / "devs").mkdir(exist_ok=True)
+        (self.team.board / "devs" / "kyle.yaml").write_text("name: kyle\nreview: true\n")
+        _git(self.team.board, "add", "devs")
+        _git(self.team.board, "commit", "-qm", "Add kyle's preferences")
+        done = self.team.run("mine", "--as", "kyle")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("Add kyle's preferences", done.stderr)
+        self.assertIn("asdlc didn't make", done.stderr)
+        self.assertEqual(_git(self.team.board, "rev-list", "--count", "origin/main..HEAD"), "1")
+        self.assertNotIn("devs/kyle.yaml", _git(self.team.boards.origin, "ls-tree", "-r", "--name-only", "main"))
+
+    def test_the_lock_wait_is_well_under_two_minutes_and_says_who_holds_it(self) -> None:
+        self.assertLessEqual(asdlc.LOCK_WAIT_SECONDS, 60, "a Bash call's two-minute timeout must not kill a command waiting for the lock")
+        import fcntl
+        board = asdlc.Board(self.team.board, frozendict(asdlc.hooks_off({**os.environ, **ISOLATED})))
+        with (self.team.board / ".git" / "asdlc.lock").open("a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            waited, asdlc.LOCK_WAIT_SECONDS = asdlc.LOCK_WAIT_SECONDS, 0.2
+            try:
+                with self.assertRaisesRegex(asdlc.AsdlcError, "another asdlc command holds the lock"):
+                    with asdlc._locked(board):
+                        pass
+            finally:
+                asdlc.LOCK_WAIT_SECONDS = waited

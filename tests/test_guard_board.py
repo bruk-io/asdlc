@@ -196,6 +196,17 @@ class PushTest(unittest.TestCase):
             with self.subTest(command=command, cwd=cwd):
                 self.assertIs(verdict(command, cwd), guard.Verdict.DENY)
 
+    def test_denies_force_pushing_a_task_branch(self) -> None:
+        """B2: a task branch's history is under review; a worker rebases onto origin/<branch> and pushes, never forces."""
+        for command in ("git push --force-with-lease origin HEAD", "git push -f origin HEAD", "git push --force", "git push origin +HEAD",
+                        "git push origin +task-1-x:task-1-x", "git push --force-if-includes --force-with-lease origin HEAD"):
+            with self.subTest(command=command):
+                outcome = guard.decide_command(command, CODE / "feature", lookup)
+                self.assertIs(outcome.verdict, guard.Verdict.DENY)
+                self.assertIn("rebase", outcome.reason)
+        self.assertIs(verdict("git push --force origin main", BOARD), guard.Verdict.ALLOW)
+        self.assertIs(verdict("git push --force origin x", PLAIN), guard.Verdict.ALLOW)
+
     def test_allows_other_pushes(self) -> None:
         for command, cwd in (
             ("git push", CODE / "feature"),

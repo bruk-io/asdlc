@@ -414,10 +414,30 @@ def decide_command(command: str, cwd: Path, lookup: Lookup) -> Outcome:
     return ALLOW
 
 
+def forces(arguments: Sequence[str]) -> bool:
+    """Whether a `git push` may overwrite history: --force, -f, --force-with-lease, or a `+refspec`."""
+    for word in arguments:
+        if word == "--":
+            break
+        if word.startswith("--force") or (word.startswith("-") and not word.startswith("--") and "f" in word[1:]):
+            return True
+        if word.startswith("+"):
+            return True
+    return False
+
+
+FORCE_REFUSAL = (
+    "a force push rewrites a task branch whose history a review, and maybe another worker, builds on. Bring in what is on "
+    "origin instead: git fetch origin, then git rebase origin/<branch> (your new commits go on top), and push without force."
+)
+
+
 def _decide_push(arguments: Sequence[str], directory: Path, lookup: Lookup) -> Outcome:
     repo = lookup(directory)
     if repo is None or repo.is_board or not repo.takes_board_work:
         return ALLOW
+    if forces(arguments):
+        return Outcome(Verdict.DENY, FORCE_REFUSAL)
     hits = push_destinations(arguments, repo.branch)
     protected = sorted(repo.protected if _ALL in hits else hits & repo.protected)
     if not protected:
