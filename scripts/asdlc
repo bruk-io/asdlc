@@ -71,7 +71,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import assert_never
 
-from repo_slug import slug_of
+from repo_slug import github_repo, origin_url, slug_of
 
 MIN_BACKLOG = (1, 55, 1)  # 1.54 drops frontmatter keys it doesn't know on every edit
 BOARD_BRANCH = "main"
@@ -2373,8 +2373,8 @@ def _where(cwd: Path, task_id: str) -> Where:
     root = Path(top.stdout.strip()) if top.returncode == 0 else None
     marker = root / MARKER if root else None
     if marker is None or not marker.is_file():
-        raise AsdlcError(f"run asdlc record-check from {task_id}'s worktree, the one whose {MARKER} names it (asdlc claim printed it); "
-                         f"{root or cwd} is not a task's worktree, so the check was not run")
+        raise AsdlcError(f"give asdlc record-check {task_id}'s worktree with --in <worktree>, the one whose {MARKER} names it "
+                         f"(asdlc claim printed it); {root or cwd} is not a task's worktree, so the check was not run")
     try:
         recorded = str(json.loads(marker.read_text()).get("task", ""))
     except (ValueError, AttributeError):
@@ -2509,7 +2509,7 @@ def _claim_report(board: Board, task: Task, worker: str, cwd: Path, registry: Ma
     report: dict[str, object] = {
         "claimed": True, "task": task.id, "title": task.title, "worker": worker, "project": task.project or None,
         "parent": task.parent or None, "model": None, "effort": None, "repo": None, "worktree": None, "branch": None, "resumed_from": None,
-        "changes_requested": CHANGES_REQUESTED in task.labels, "note": None,
+        "changes_requested": CHANGES_REQUESTED in task.labels, "github": None, "note": None,
     }
     if isinstance(chosen, Route):
         report |= {"model": chosen.model, "effort": chosen.effort}
@@ -2521,10 +2521,24 @@ def _claim_report(board: Board, task: Task, worker: str, cwd: Path, registry: Ma
     match repo:
         case Path():
             path, resumed = make_worktree(repo, task, worker, board.path)
-            report |= {"repo": str(repo), "worktree": str(path), "branch": task.branch or branch_name(task), "resumed_from": resumed}
+            report |= {"repo": str(repo), "worktree": str(path), "branch": task.branch or branch_name(task), "resumed_from": resumed,
+                       "github": _github(repo)}
         case str() as why:
             report["note"] = f"on the board only: {why}, so no worktree was made"
     return report
+
+
+def _github(repo: Path) -> str | None:
+    """`owner/name` when a pull request can be opened from this machine with gh: gh is installed (or
+    $ASDLC_GH names it; an empty one means none) and the repository's origin is on GitHub. Agents read
+    it from the claim instead of probing for gh, which fails when it is missing."""
+    gh = os.environ.get("ASDLC_GH", shutil.which("gh") or "")
+    return pull_request_repo(gh, origin_url(repo) if gh else None)
+
+
+def pull_request_repo(gh: str, origin: str | None) -> str | None:
+    """`owner/name` for `gh pr create --repo` when there is a gh to run and the origin is on GitHub, else None."""
+    return github_repo(origin) if gh and origin else None
 
 
 def _claim_lines(report: Mapping[str, object]) -> list[str]:
@@ -2709,7 +2723,8 @@ def _review_report(board: Board, claimed: ReviewClaimed, registry: Mapping[str, 
         "claimed": True, "task": task.id, "title": task.title, "reviewer": task.reviewer, "kind": task.review_kind,
         "authors": sorted(authors(task)), "project": task.project, "parent": task.parent or None,
         "repo": str(entry.path) if entry else None, "default_branch": default_branch(entry.path) if entry else None,
-        "branch": branch, "pull_request": pull, "references": list(task.references), "waited": human(claimed.waited),
+        "branch": branch, "pull_request": pull, "github": _github(entry.path) if entry else None,
+        "references": list(task.references), "waited": human(claimed.waited),
         "model": REVIEW.model, "effort": REVIEW.effort, "route": REVIEW.reason, "policies": review_policies(board.path, task.project),
     }
 
@@ -3157,12 +3172,34 @@ BASE_RULES = (
     "Bash(backlog doc list *)", "Bash(backlog doc view *)", "Bash(backlog search *)",
     "Bash(gh pr create *)", "Bash(gh pr view *)", "Bash(gh pr comment *)",
 )
+# The read-only git a worker or reviewer reaches for to find its way around a repository, allowed in
+# task worktrees and the registered clone alike. Agents never `cd` (Claude Code prompts for `cd` with git
+# in one line whatever the rules say), so each is written `git -C <path> <subcommand>`.
+READ_ONLY_GIT = ("ls-files", "grep", "blame", "cat-file", "ls-tree", "merge-base", "rev-list", "describe", "show-ref", "remote get-url")
 # The git subcommands the worker and reviewer agents run in a task's or a review's worktree, as
 # `git -C <worktree> ...`. The board guard refuses pushes to a default branch and force pushes.
 WORKTREE_GIT = ("fetch", "status", "diff", "log", "show", "add", "commit", "push", "rebase", "merge", "switch", "checkout -b",
-                "rev-parse", "branch", "symbolic-ref", "mv", "rm", "restore", "stash", "reset")
-# What the reviewer runs in the registered clone itself.
-CLONE_GIT = ("fetch", "worktree", "show", "rev-parse", "symbolic-ref")
+                "rev-parse", "branch", "symbolic-ref", "mv", "rm", "restore", "stash", "reset", *READ_ONLY_GIT)
+# What the reviewer runs in the registered clone itself: reads, and making and removing its review worktree.
+CLONE_GIT = ("fetch", "worktree", "show", "rev-parse", "symbolic-ref", *READ_ONLY_GIT)
+# Git that runs a program the command doesn't name, or with configuration the command sets. The `*` in the
+# allow rules above would let these through, so they are denied, and deny beats allow. The board guard
+# refuses the same forms with its reasons; these hold even if the hook isn't loaded. A `*` matches any
+# text, spaces included, so a rule can also match a commit message that quotes one of these flags.
+GIT_DENY = (
+    "Bash(git -c*)", "Bash(git -C * -c*)", "Bash(git --config-env*)", "Bash(git -C * --config-env*)",
+    "Bash(git --exec-path=*)", "Bash(git -C * --exec-path=*)",
+    "Bash(git *grep* -O*)", "Bash(git *grep* --open-files-in-pager*)",
+    "Bash(git * --upload-pack*)", "Bash(git * --receive-pack*)", "Bash(git * --exec*)",
+    "Bash(git *clone* -u*)", "Bash(git *ls-remote* -u*)", "Bash(git *clone* -c*)", "Bash(git *clone* --config*)", "Bash(git * --template*)",
+    "Bash(git * --ext-diff*)", "Bash(git * --textconv*)", "Bash(git *rebase* -x*)",
+    "Bash(git difftool*)", "Bash(git -C * difftool*)", "Bash(git mergetool*)", "Bash(git -C * mergetool*)",
+    "Bash(git *submodule* foreach*)", "Bash(git *bisect* run*)", "Bash(git *filter-branch*)", "Bash(git *instaweb*)",
+    "Bash(git config *)", "Bash(git -C * config *)",
+    # GIT_* set in front of git: an allow rule never matches past such an assignment, so it already prompts;
+    # these catch the forms that put the variable after a command word.
+    "Bash(env GIT_*)", "Bash(env * GIT_*)", "Bash(export GIT_*)",
+)
 # A verified command with any of these gets no rule of its own: a rule can't say what it would allow.
 _UNSAFE_IN_RULE = (("*", "a * would be a wildcard in the rule"), ("|", "a pipe"), (";", "a ;"), ("&&", "&&"), ("||", "||"),
                    ("`", "a backtick"), ("$(", "a command substitution"), (">", "a redirect"), ("<", "a redirect"), ("\n", "a line break"))
@@ -3176,9 +3213,10 @@ class Rules:
     allow: tuple[str, ...]
     directories: tuple[str, ...]
     skipped: tuple[tuple[str, str, str, str], ...] = ()  # (slug, command name, run line, why)
+    deny: tuple[str, ...] = GIT_DENY
 
     def as_settings(self) -> dict[str, list[str]]:
-        return {"allow": list(self.allow), "additionalDirectories": list(self.directories)}
+        return {"allow": list(self.allow), "deny": list(self.deny), "additionalDirectories": list(self.directories)}
 
 
 def unsafe_in_rule(run: str) -> str | None:
@@ -3231,7 +3269,7 @@ def merge_permissions(settings: object, rules: Rules) -> tuple[dict[str, object]
     if not isinstance(permissions, dict):
         raise AsdlcError(f"its permissions is {json.dumps(permissions)}, not an object: fix it (or remove it), then run asdlc permissions --write again")
     added = []
-    for key, wanted in (("allow", rules.allow), ("additionalDirectories", rules.directories)):
+    for key, wanted in (("allow", rules.allow), ("deny", rules.deny), ("additionalDirectories", rules.directories)):
         present = permissions.setdefault(key, [])
         if not isinstance(present, list) or not all(isinstance(entry, str) for entry in present):
             raise AsdlcError(f"its permissions.{key} is {json.dumps(present)}, not a list of strings: fix it, then run asdlc permissions --write again")
@@ -3308,6 +3346,7 @@ def _under(path: str, folders: Iterable[str], home: Path) -> bool:
 def missing_permissions(settings: Sequence[tuple[str, str]], rules: Rules, home: Path) -> tuple[list[str], list[str]]:
     """The needed rules and folders the settings files don't cover yet, and the files that aren't valid JSON."""
     allow: list[str] = []
+    deny: list[str] = []
     folders: list[str] = []
     modes: set[str] = set()
     broken = []
@@ -3320,11 +3359,12 @@ def missing_permissions(settings: Sequence[tuple[str, str]], rules: Rules, home:
         permissions = data.get("permissions", {}) if isinstance(data, dict) else {}
         if isinstance(permissions, dict):
             allow += [r for r in permissions.get("allow", []) if isinstance(r, str)]
+            deny += [r for r in permissions.get("deny", []) if isinstance(r, str)]
             folders += [d for d in permissions.get("additionalDirectories", []) if isinstance(d, str)]
             modes.add(str(permissions.get("defaultMode", "")))
+    missing = [rule for rule in rules.deny if rule not in deny]  # deny rules hold in every mode
     if "bypassPermissions" in modes:
-        return [], broken
-    missing = []
+        return missing, broken
     for rule in rules.allow:
         if rule in allow:
             covered = True
@@ -3344,10 +3384,10 @@ def _permission_findings(facts: Facts) -> list[Finding]:
     missing, broken = missing_permissions(facts.claude_settings, rules, facts.home)
     found = [Finding("permissions", Level.WARN, f"{where} is not valid JSON, so Claude Code ignores it: fix it") for where in broken]
     if missing:
-        return found + [Finding("permissions", Level.WARN, f"agents will stop at permission prompts: the settings that apply in the tasks clone don't "
-                                                           f"allow {', '.join(missing)}. Run asdlc permissions --write in your own terminal: it adds them "
+        return found + [Finding("permissions", Level.WARN, f"agents will stop at permission prompts, or run git with options no rule should let through: "
+                                                           f"the settings that apply in the tasks clone don't have {', '.join(missing)}. Run asdlc permissions --write in your own terminal: it adds them "
                                                            "to the tasks clone's .claude/settings.local.json, keeping what is there and backing it up first")]
-    return found + [Finding("permissions", Level.PASS, f"the {len(rules.allow)} allow rules and {len(rules.directories)} folders normal work needs are set")]
+    return found + [Finding("permissions", Level.PASS, f"the {len(rules.allow)} allow rules, {len(rules.deny)} deny rules and {len(rules.directories)} folders normal work needs are set")]
 
 
 def _mcp_findings(facts: Facts) -> list[Finding]:
@@ -3544,7 +3584,8 @@ def _write_atomically(target: Path, text: str) -> None:
 def permissions(explicit_board: str | None, cwd: Path, write: bool, as_json: bool, now: datetime) -> int:
     """Print the Claude Code allow rules normal work needs on this machine; with `write`, merge them into
     the tasks clone's own `.claude/settings.local.json`, where orchestrator sessions and the workers
-    they launch run, keeping everything there, after a backup.
+    they launch run, keeping everything there, after a backup, and make the additional directories that
+    don't exist yet (the first claim makes a repository's worktree folder, after a session has started).
 
     Raises:
         AsdlcError: no board, the registry or the settings file is unreadable, or the settings file has the wrong shape.
@@ -3556,7 +3597,7 @@ def permissions(explicit_board: str | None, cwd: Path, write: bool, as_json: boo
     rules = permission_rules([(e.slug, e.path) for e in repos], board, commands, _plugin_roots(_plugin_facts(claude)))
     target = board / LOCAL_SETTINGS
     skipped = [f"  {slug} {name}: `{run}` ({why}); run it through asdlc record-check, which Bash(asdlc *) allows" for slug, name, run, why in rules.skipped]
-    report = {"settings": str(target), "allow": list(rules.allow), "directories": list(rules.directories),
+    report = {"settings": str(target), "allow": list(rules.allow), "deny": list(rules.deny), "directories": list(rules.directories),
               "skipped": [{"repository": slug, "command": name, "run": run, "why": why} for slug, name, run, why in rules.skipped]}
     if not write:
         _emit(report, as_json, [json.dumps({"permissions": rules.as_settings()}, indent=2), *(["verified commands with no rule of their own:", *skipped] if skipped else []),
@@ -3575,6 +3616,11 @@ def permissions(explicit_board: str | None, cwd: Path, write: bool, as_json: boo
     if (updated := with_exclude(exclude.read_text() if exclude.exists() else "", f"{LOCAL_SETTINGS}*")) is not None:
         exclude.parent.mkdir(parents=True, exist_ok=True)
         exclude.write_text(updated)  # untracked, so Claude Code applies it as the person's own file
+    made = [folder for folder in rules.directories if not Path(folder).is_dir()]
+    for folder in made:  # a session leaves out an additional directory missing when it starts, and claims make them later
+        Path(folder).mkdir(parents=True, exist_ok=True)
+    if made:
+        _say("made " + ", ".join(made) + " now, so sessions started before the first claim can read there")
     if not added:
         _emit(report | {"added": []}, as_json, [f"{target} already allows everything normal work needs: nothing to add", *skipped])
         return 0
@@ -4839,11 +4885,14 @@ def init_board(directory: Path) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="asdlc", description="A shared Backlog.md board: claims, worktrees, routing, leads and orchestration.")
     parser.add_argument("--board", help="the board clone (else $ASDLC_BOARD, else git config asdlc.board, else the board clone you are in)")
+    parser.add_argument("--in", dest="folder", metavar="FOLDER", help=IN_HELP)
+    after = argparse.ArgumentParser(add_help=False)  # --in is accepted after the subcommand too
+    after.add_argument("--in", dest="folder", metavar="FOLDER", default=argparse.SUPPRESS, help=IN_HELP)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("init-board", help="create a board repository").add_argument("dir")
+    commands.add_parser("init-board", help="create a board repository", parents=[after]).add_argument("dir")
 
     def add(name: str, text: str, *, task: str | None = None, who: str | None = None, json_output: bool = False) -> argparse.ArgumentParser:
-        sub = commands.add_parser(name, help=text)
+        sub = commands.add_parser(name, help=text, parents=[after])
         if task:
             sub.add_argument("id", help=task)
         if who:
@@ -4870,12 +4919,13 @@ def _parser() -> argparse.ArgumentParser:
     reaping.add_argument("--older-than", help="the stale timeout, such as 2h (else stale_after in the board's asdlc.toml, else 2h)")
     reaping.add_argument("--now", help="the time to judge staleness at, as ISO 8601 (for tests and demonstrations)")
     add("accept", "a person's command: accept an intent and its draft children", task="the intent", json_output=True)
-    approving = commands.add_parser("approve", help="a person's command: approve the plans of tasks, size 2 and up, so their workers build them")
+    approving = commands.add_parser("approve", help="a person's command: approve the plans of tasks, size 2 and up, so their workers build them", parents=[after])
     approving.add_argument("ids", nargs="+", help="the tasks whose plans you approve")
     approving.add_argument("--plan-hash", action="append", default=[], help="the digest of each plan you were shown, in the order of the ids; "
                            "a plan changed since is refused")
     add("mine", "an engineer's workers' tasks, leads and reservations", who="the engineer, such as kyle", json_output=True)
-    commands.add_parser("record-check", help="run a check in the task's worktree and record it on the task: record-check <id> --as <worker> -- <command...>")
+    commands.add_parser("record-check", help="run a check in the task's worktree and record it on the task: "
+                        "record-check <id> --in <worktree> --as <worker> -- <command...>")
     finishing_work = add("finish", "hand your held task to review: In Review with its branch and pull request", task="the task", who=worker, json_output=True)
     finishing_work.add_argument("--branch", help="the task's branch (default: the one recorded when it was claimed)")
     finishing_work.add_argument("--pr", help="the pull request's URL, when there is one")
@@ -4902,35 +4952,72 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def record_check_arguments(words: Sequence[str]) -> tuple[str, str, list[str]] | None:
-    """`<id> --as <worker> -- <command...>`, in either order before the `--`; None when malformed."""
+@dataclass(frozen=True)
+class CheckRequest:
+    """What `record-check` was asked: the task, the worker, the check, and the worktree named with --in (or None)."""
+
+    task: str
+    worker: str
+    command: tuple[str, ...]
+    folder: str | None = None
+
+
+def record_check_arguments(words: Sequence[str]) -> CheckRequest | None:
+    """`<id> --as <worker> [--in <worktree>] -- <command...>`, in any order before the `--`; None when malformed."""
     if "--" not in words:
         return None
     split = list(words).index("--")
-    head, command = list(words[:split]), list(words[split + 1:])
-    worker = None
-    for index, word in enumerate(head):
-        if word == "--as" and index + 1 < len(head):
-            worker = head[index + 1]
-        elif word.startswith("--as="):
-            worker = word.partition("=")[2]
-    rest = [w for i, w in enumerate(head) if w != "--as" and not w.startswith("--as=") and not (i and head[i - 1] == "--as")]
-    if worker is None or len(rest) != 1 or not command:
+    head, command = list(words[:split]), tuple(words[split + 1:])
+    options: dict[str, str] = {}
+    rest: list[str] = []
+    index = 0
+    while index < len(head):
+        word = head[index]
+        if word in ("--as", "--in"):
+            if index + 1 >= len(head):
+                return None
+            options[word], index = head[index + 1], index + 2
+            continue
+        if word.startswith(("--as=", "--in=")):
+            options[word[:4]] = word.partition("=")[2]
+        else:
+            rest.append(word)
+        index += 1
+    if "--as" not in options or len(rest) != 1 or not command:
         return None
-    return rest[0], worker, command
+    return CheckRequest(rest[0], options["--as"], command, options.get("--in"))
 
 
 def command_index(argv: Sequence[str]) -> int | None:
-    """Where the subcommand is, skipping `--board <path>`."""
+    """Where the subcommand is, skipping `--board <path>` and `--in <folder>`."""
     index = 0
     while index < len(argv):
-        if argv[index] == "--board":
+        if argv[index] in ("--board", "--in"):
             index += 2
         elif argv[index].startswith("-"):
             index += 1
         else:
             return index
     return None
+
+
+IN_HELP = ("run as if from this folder (a task's worktree, a code repository or the tasks clone), "
+           "so no agent has to cd; record-check takes it after the task id too")
+
+
+def working_folder(folder: str | None, cwd: Path) -> Path:
+    """The folder a command runs as if from: --in when given, else the current directory.
+
+    Raises:
+        AsdlcError: --in names something that isn't a folder.
+    """
+    if folder is None:
+        return cwd
+    path = Path(folder).expanduser()
+    path = path if path.is_absolute() else cwd / path
+    if not path.is_dir():
+        raise AsdlcError(f"--in {folder}: {path} is not a folder; give the task's worktree (asdlc claim printed it) or a repository")
+    return path.resolve()
 
 
 def _route_command(board: Board, raw_id: str) -> None:
@@ -4966,7 +5053,6 @@ def _stopped(signum: int, frame: object) -> None:
 def main(argv: Sequence[str]) -> int:
     for stopping in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(stopping, _stopped)
-    cwd = Path.cwd()
     parser = _parser()
     split = command_index(argv)
     if split is not None and argv[split] == "board":  # the rest belongs to backlog, flags included
@@ -4976,7 +5062,9 @@ def main(argv: Sequence[str]) -> int:
     else:
         arguments, passthrough = parser.parse_args(argv), []
     as_json = getattr(arguments, "json", False)
+    request = record_check_arguments(passthrough) if arguments.command == "record-check" else None
     try:
+        cwd = working_folder(request.folder if request and request.folder else arguments.folder, Path.cwd())
         match arguments.command:
             case "init-board":
                 _check_backlog()
@@ -5066,12 +5154,11 @@ def main(argv: Sequence[str]) -> int:
                         f"{result['task']} passed review by @{reviewer} ({result['kind']}); it stays In Review for a person to merge")
                 _emit(result, as_json, [line])
             case "record-check":
-                found = record_check_arguments(passthrough)
-                if found is None:
-                    raise AsdlcError("say which task, which worker and which check: asdlc record-check TASK-1 --as kyle.w1 -- ./scripts/check")
+                if request is None:
+                    raise AsdlcError("say which task, which worktree, which worker and which check: "
+                                     "asdlc record-check TASK-1 --in <worktree> --as kyle.w1 -- ./scripts/check")
                 _check_backlog()
-                raw_id, raw_worker, command = found
-                return record_check(board, raw_id, worker_for(raw_worker, _engineer(cwd)), command, cwd)
+                return record_check(board, request.task, worker_for(request.worker, _engineer(cwd)), request.command, cwd)
             case "finish":
                 _check_backlog()
                 worker = worker_for(arguments.worker, _engineer(cwd))

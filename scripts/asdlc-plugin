@@ -513,6 +513,30 @@ def code_repo(path: Path) -> Repo:
     return Repo(root, slug, display_name(url))
 
 
+def repo_argument(raw: str, registered: Mapping[str, Path], is_folder: bool) -> Path:
+    """The code repository a command's argument names: a path (anything with a `/`, or starting `.` or
+    `~`), else a slug registered on this machine (`asdlc repos`), else a folder of that name here.
+
+    Raises:
+        PluginError: a bare name that is neither registered nor a folder.
+    """
+    if "/" in raw or raw.startswith((".", "~")):
+        return Path(raw).expanduser()
+    if raw in registered:
+        return registered[raw]
+    if is_folder:
+        return Path(raw)
+    known = ", ".join(sorted(registered)) or "none yet (asdlc register, run in a clone, adds one)"
+    raise PluginError(f"{raw} is neither a folder nor a repository registered on this machine; give its path or a registered slug: {known}")
+
+
+def _repo(raw: str) -> Path:
+    """Raises: PluginError: not a path, a registered slug or a folder. AsdlcError: the registry is unreadable."""
+    path = Path(raw).expanduser()
+    registered = {} if "/" in raw or raw.startswith((".", "~")) else {slug: entry.path for slug, entry in asdlc._registry().items()}
+    return repo_argument(raw, registered, path.is_dir()).resolve()
+
+
 def _is_board(path: Path) -> bool:
     return (path / "backlog" / "config.yml").is_file()
 
@@ -875,18 +899,19 @@ def _parser() -> argparse.ArgumentParser:
     def add(name: str, help: str) -> argparse.ArgumentParser:
         return commands.add_parser(name, parents=[after], help=help)
 
+    where = "the code repository: its path, or its slug when it is registered on this machine (asdlc repos)"
     status = add("status", help="the repository's slug and whether its plugin exists")
-    status.add_argument("repo")
+    status.add_argument("repo", help=where)
     status.add_argument("--json", action="store_true")
-    add("scaffold", help="open the plugin for editing, creating its skeleton; never overwrites").add_argument("repo")
+    add("scaffold", help="open the plugin for editing, creating its skeleton; never overwrites").add_argument("repo", help=where)
     verify = add("verify-command", help="run one command from commands.toml and, if it passes, date it")
-    verify.add_argument("repo")
+    verify.add_argument("repo", help=where)
     verify.add_argument("name")
     verify.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"seconds (default {DEFAULT_TIMEOUT})")
     for name, text in (("check", "check a plugin against docs/repo-plugins.md"), ("publish", "check, commit and push the plugin")):
         sub = add(name, help=text)
         sub.add_argument("slug")
-        sub.add_argument("--repo", help="the code repository, to check layers and rules against its files")
+        sub.add_argument("--repo", help=f"{where}, to check layers and rules against its files")
     return parser
 
 
@@ -895,15 +920,15 @@ def main(argv: Sequence[str]) -> int:
     try:
         match arguments.command:
             case "status":
-                return _status(arguments.board, Path(arguments.repo).expanduser().resolve(), arguments.json)
+                return _status(arguments.board, _repo(arguments.repo), arguments.json)
             case "scaffold":
-                return _scaffold(arguments.board, Path(arguments.repo).expanduser().resolve())
+                return _scaffold(arguments.board, _repo(arguments.repo))
             case "verify-command":
-                return _verify_command(arguments.board, Path(arguments.repo).expanduser().resolve(), arguments.name, arguments.timeout)
+                return _verify_command(arguments.board, _repo(arguments.repo), arguments.name, arguments.timeout)
             case "check":
-                return _check(arguments.board, arguments.slug, Path(arguments.repo).expanduser().resolve() if arguments.repo else None)
+                return _check(arguments.board, arguments.slug, _repo(arguments.repo) if arguments.repo else None)
             case "publish":
-                return _publish(arguments.board, arguments.slug, Path(arguments.repo).expanduser().resolve() if arguments.repo else None)
+                return _publish(arguments.board, arguments.slug, _repo(arguments.repo) if arguments.repo else None)
         return 2
     except (PluginError, asdlc.AsdlcError) as error:
         print(f"asdlc-plugin: {error}", file=sys.stderr)
