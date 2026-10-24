@@ -21,7 +21,7 @@ Joining the team pilot? Start with [the guide](docs/guide.md): install, set up, 
 | Capture intent | `/asdlc:intent` and the `capture-intent` skill: an interview, an intent in the requester's words as a draft on the board, accepted by a person with `asdlc accept` |
 | Plan mode | `/asdlc:plan` and the `plan-change` skill: files, order, risks and proof in the task's plan section, numbered steps for `size-1`, approved by the engineer for size 2 and up |
 | Skills | The `write-policy-skill` skill and a template that names each policy's owner, source and enforcement |
-| Feedback loop | One check command per repository, and a hook that stops a bug fix on a `fix/` branch from changing an existing test, through the file tools or plain shell writes |
+| Feedback loop | One check command per repository, and a hook that stops a bug fix (a `bug` task's worktree, or a `fix/` branch) from changing an existing test, through the file tools or plain shell writes |
 | Hooks | Every hook decision logged to `.asdlc/hooks.jsonl` |
 | CLAUDE.md | A check that keeps it to at most 60 lines |
 | Metrics | `asdlc stats`: the playbook's numbers by stage from the board's history, each beside the playbook's name for it, and the ones the board can't measure with what they need |
