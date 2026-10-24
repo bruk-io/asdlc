@@ -542,6 +542,19 @@ class ReviewLogicTest(unittest.TestCase):
         self.assertIn("not In Review", asdlc.review_done_refusal(task("TASK-1", status="Done", reviewer="kyle.r1"), "TASK-1", "kyle.r1"))
         self.assertIn("not a task", asdlc.review_done_refusal(None, "TASK-9", "kyle.r1"))
 
+    def test_earlier_citations_are_other_tasks_whose_last_review_cited_the_policy(self) -> None:
+        tasks = (
+            task("TASK-1", review_policies=("testing", "review")),
+            task("TASK-2", review_policies=("testing",)),
+            task("TASK-3", review_policies=()),
+            task("TASK-10", review_policies=("testing",)),
+            task("TASK-4", review_policies=("security",)),
+        )
+        self.assertEqual(asdlc.earlier_citations(tasks, "TASK-2", ("testing", "review", "naming")),
+                         {"testing": ("TASK-1", "TASK-10"), "review": ("TASK-1",)})
+        self.assertEqual(asdlc.earlier_citations(tasks, "TASK-4", ("security",)), {})
+        self.assertEqual(asdlc.earlier_citations(tasks, "TASK-3", ()), {})
+
     def test_review_comment(self) -> None:
         text = asdlc.review_comment("kyle.r1", "same-machine", asdlc.ReviewVerdict.CHANGES, "  [Bugs, Important] x  ")
         self.assertTrue(text.startswith("Review by @kyle.r1 (same-machine): changes requested."))
@@ -1495,13 +1508,22 @@ class WorktreeTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         path = self.boards.root / "app.worktrees" / "task-1"
         self.assertEqual(done.stdout.strip().splitlines()[-1], str(path))
-        self.assertEqual(json.loads((path / ".asdlc-task").read_text()), {"task": "TASK-1", "worker": "agent.1", "board": str(self.board)})
+        self.assertEqual(json.loads((path / ".asdlc-task").read_text()), {"task": "TASK-1", "worker": "agent.1", "board": str(self.board), "type": "task"})
         self.assertEqual(_git(path, "branch", "--show-current"), "task-1-add-the-login-page")
         self.assertEqual(_git(path, "rev-parse", "HEAD"), _git(self.code, "rev-parse", "origin/main"))
         self.assertIn(".asdlc-task", (self.code / ".git" / "info" / "exclude").read_text().splitlines())
         self.assertEqual(_git(path, "status", "--porcelain"), "")
         no_upstream = subprocess.run(["git", "-C", str(path), "rev-parse", "--abbrev-ref", "@{upstream}"], capture_output=True)
         self.assertNotEqual(no_upstream.returncode, 0, "the task branch must not track main, or a bare git push could reach it")
+
+    def test_a_bug_task_s_marker_says_so_for_the_test_edit_guard(self) -> None:
+        made = _asdlc("board", "task", "create", "Lockout counts successes", "--type", "bug", "-l", "size-1", "--project", "acme-app",
+                      cwd=self.board, env=self.machine)
+        self.assertEqual(made.returncode, 0, made.stderr)
+        done = _asdlc("claim", "TASK-3", "--as", "agent.1", cwd=self.code, env=self.machine)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        marker = json.loads((self.boards.root / "app.worktrees" / "task-3" / ".asdlc-task").read_text())
+        self.assertEqual((marker["task"], marker["type"]), ("TASK-3", "bug"))
 
     def test_next_takes_the_highest_priority_and_skips_claimed_tasks(self) -> None:
         first = _asdlc("next", "--as", "agent.1", cwd=self.code, env=self.machine)
@@ -1927,6 +1949,19 @@ class ReviewCommandTest(unittest.TestCase):
         self.assertEqual((passed.review_findings, passed.review_policies, passed.plan_matched), ("important=0,nit=0", (), "yes"))
         again = self.team.ok("review-next", "--as", "kyle.r1")
         self.assertIn("skipped TASK-1 has passed review and waits for a person to merge it", again.stderr)
+
+    def test_a_second_review_citing_a_policy_names_the_earlier_one(self) -> None:
+        self.submit("TASK-1")
+        self.submit("TASK-2", "ann.w2")
+        self.assertEqual(self.review("kyle.r1")["task"], "TASK-1")
+        first = json.loads(self.team.ok("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "changes", "--json", *CHANGES,
+                                        "--policy", "testing", "--notes", "[Bugs, Important] asserts on a mock").stdout)
+        self.assertEqual(first["repeats"], {})
+        self.assertEqual(self.review("kyle.r2")["task"], "TASK-2")
+        second = self.team.ok("review-done", "TASK-2", "--as", "kyle.r2", "--verdict", "changes", *CHANGES,
+                              "--policy", "testing", "--policy", "review", "--notes", "[Bugs, Important] asserts on a mock again")
+        self.assertIn("Earlier reviews cited the same policy: testing (TASK-1).", second.stdout)
+        self.assertIn("rule-change", second.stdout)
 
     def test_only_the_claiming_reviewer_finishes_the_review(self) -> None:
         self.submit("TASK-1")
