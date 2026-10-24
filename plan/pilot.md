@@ -108,7 +108,7 @@ An independent review of this branch ran its claims as experiments (two machines
 
 - **M1, no escape hatch in a registered clone.** Every session with the plugin is guarded there; the guide says to unset `asdlc.board` for the while. A per-session switch is later work.
 - **M3** is covered by B1.
-- **M5, the test-edit guard on board branches.** Unchanged; it judges `fix/` branches only.
+- **M5, the test-edit guard on board branches.** Fixed by [plan/bug-guard-and-repeat-findings.md](bug-guard-and-repeat-findings.md): a `bug` task's worktree is judged as a fix, and the guard finds the repository from the path written to.
 - **M7, version skew** between the `asdlc` on `PATH` (a clone) and the installed plugin's skills. The guide says to keep them at one release; `doctor` doesn't compare them yet.
 - **M8, effort per launch.** The orchestrator passes `asdlc route`'s effort when it launches an agent; nothing checks the launch used it.
 - **Permission behaviour of background agents** changes between Claude Code versions (stall or auto-deny); `asdlc permissions --write` and doctor's check aim at no prompts either way. A command an agent writes differently from the rules (an extra flag on a verified command, say) can still prompt.
