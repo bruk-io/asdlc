@@ -30,6 +30,13 @@ Setting up takes about twenty minutes. `asdlc doctor` tells you when you're done
 
 ## Set up
 
+### Where the board lives
+
+You choose. The board is a Backlog.md folder under version control, in one of two places, and `asdlc` works the same on both:
+
+- **In the repository where the work is done.** From that repository's root, run `asdlc init-board --local .`. Board changes are committed to the branch you have checked out there, so they travel in the same pull request as the code, and `asdlc` never pushes them. It refuses to start while changes are staged (a board commit would sweep them in), and when it drops a change it takes back `backlog/` only, never your code. Skip steps 2 and 4 below; the board is found from the repository you are in. A board with no `asdlc.toml` is local.
+- **In a repository of its own.** `asdlc init-board <dir>`, then follow the steps below. Every change is pushed to `origin/main` and a lost race is retried, so several people can share it. A board with an `asdlc.toml` and no `mode` is shared; `mode = "shared"` or `mode = "local"` in that file says so outright.
+
 1. Tell asdlc who you are, once per machine. Use your handle without the `@`:
 
    ```sh

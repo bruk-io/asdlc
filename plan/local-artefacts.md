@@ -1,7 +1,7 @@
 # Plan: artefacts where the repository keeps them, one machine
 
 - Spec: [`spec/agentic-sdlc-plugin.md`](../spec/agentic-sdlc-plugin.md), approved 2026-10-20 (#2)
-- Status: approved by the owner in session, 2026-10-27. Implementation in progress.
+- Status: approved by the owner in session, 2026-10-27. Partly delivered; see Delivered and deferred.
 - Delivers: R1 (each artefact a committed file the next stage reads), R2 (accepting stays a person's recorded action), R5 (one person may own every gate), R9 (plans approved before edits), R12 (parallel work in worktrees and subagents on one machine)
 
 A first person to try the plugin had to create a separate tasks repository before anything worked. The spec says the plugin "keeps every artefact as a plain file in git with a pull request as each gate" (R1, R2), but the shipped skills write to a Backlog.md board in a shared tasks repository, and `scripts/asdlc` (about 5,200 lines) coordinates several engineers on several machines through atomic claims, heartbeats, leads and reaping. This plan returns the plugin to the spec's shape: artefacts live where the repository you are in already keeps them, and parallelism is subagents in worktrees on one machine. Backlog.md stays as the task board, and the user decides where it lives: a `backlog/` folder in the working repository, a separate repository, or anywhere else `asdlc` is pointed at (`--board`, `$ASDLC_BOARD` or `git config asdlc.board`, which already exist). Multi-machine coordination is removed, not adapted; it can return later as an optional adapter if someone needs it, with its own intent.
@@ -21,6 +21,12 @@ A first person to try the plugin had to create a separate tasks repository befor
 | `evals/cases/` | no | `reaped-worker-stops`, `grandchild-follows-lead` and `sent-back-resumes-branch` describe behaviour that no longer exists and are retired by a person (R24); the rest keep running | R22, R24 |
 | `tests/` | no | Tests for removed commands and the multi-machine demonstrations go with them; tests for what stays are not weakened | R12 |
 | `README.md`, `docs/guide.md` | no | Setup becomes: install the plugin, run it in your repository | - |
+
+## Delivered and deferred
+
+Delivered in this change: the plan, the split of `lead` into `write-spec` and `break-down-intent`, local boards (`mode`, `init-board --local`, `board_mode`, the local transaction path, doctor and `code_repo` for them) with tests, `capture-intent` finding the board or asking once, and the guide's "Where the board lives".
+
+Deferred, each as its own change: removing `lead`, `lead-of`, `heartbeat`, `reap`, `review-next` and the skills and agent text that use them, and folding the lead's surviving duties into `orchestrate`. Three eval cases (`reaped-worker-stops`, `grandchild-follows-lead`, the review-queue parts of `sent-back-resumes-branch`) and two demonstration tests exercise those commands, and R23 forbids a change to the plugin from also changing the eval suite that judges it. The eval changes need a person's approval and must merge first. Nothing here weakens a check to get around that.
 
 ## Order of work
 
