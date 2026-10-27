@@ -48,7 +48,7 @@ A first person to try the plugin had to create a separate tasks repository befor
 ## Open questions for the owner
 
 - Settled: Backlog.md stays, and the user chooses where it lives.
-- How should a board that is not a dedicated clone on `main` behave? I recommend a local mode: when the board is inside the working repository, or has no `origin`, `asdlc` skips fetch, push and rebase, and commits board changes to whatever branch is checked out, so they travel with the code in the same pull request. A dedicated board repository keeps today's behaviour, push-race handling included, so nothing that works now changes.
+- Settled: the board can be its own repository (today's behaviour, push-race handling included) or live in the repository where the implementation work is done, version controlled either way. `asdlc` has two board modes, set by `mode = "shared"` or `mode = "local"` in the board's `asdlc.toml`; with no `mode`, a board that has an `asdlc.toml` is shared (so existing boards change nothing) and one that has none is local. A local board skips fetch, push and rebase, commits board changes to the branch checked out where the board is, so they travel in the same pull request as the code, never touches changes outside `backlog/`, and refuses to start while the index holds staged changes (a backlog commit would sweep them in).
 - Settled: `approve` stays. A person approves a plan in their own terminal before workers build; it is the R2 gate for plans.
 - Settled: the chosen location is recorded as one line in the repository's `CLAUDE.md`; no config file.
 
