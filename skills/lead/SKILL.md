@@ -1,6 +1,6 @@
 ---
 name: lead
-description: Lead a large piece of work - an intent with children across repositories - on the shared board - the spec and contracts as Backlog documents, the breakdown into draft child tasks per repository with sizes and dependencies, asking the person to accept it, deciding contract change requests, checking each child plan against the contract, and checking consistency across repositories at review. Use when you hold or have just claimed the lead on an intent (asdlc lead), when asdlc lead-of says the lead is yours, or when the engineer asks you to take on an intent.
+description: Hold the lead of a large piece of work - an intent with children across repositories - on the shared board: the claim, the contracts between repositories, deciding contract change requests, checking each child plan against the contract, and checking consistency across repositories at review. Sequences the write-spec and break-down-intent skills. Use when you hold or have just claimed the lead on an intent (asdlc lead), when asdlc lead-of says the lead is yours, or when the engineer asks you to take on an intent.
 ---
 
 # Lead an intent
@@ -15,18 +15,7 @@ You may run your own helper subagents for research or drafting. They follow the 
 
 ## 1. The spec
 
-Read the intent: its problem, constraints, open questions and acceptance criteria (`asdlc board task view <intent> --plain`, or `asdlc board draft view <id> --plain` while it is a draft). Settle each open question with the engineer or carry it forward with a reason.
-
-Write the spec as a Backlog document and link it from the intent:
-
-```sh
-asdlc board doc create "Spec: <intent title>" -t specification
-asdlc board doc update <doc-id> --content "$(cat <<'EOF'
-<numbered requirements, the design, areas of concern, and every open question settled or carried forward>
-EOF
-)"
-asdlc board draft edit <intent> --add-doc <doc-id>     # `task edit` once the intent is accepted
-```
+Write it with the write-spec skill and link it from the intent.
 
 ## 2. The contracts
 
@@ -34,20 +23,7 @@ When children touch more than one repository, or a layer another team owns, writ
 
 ## 3. The breakdown
 
-Split the intent into draft child tasks, one per piece of work in one repository:
-
-```sh
-asdlc board task create "<title>" --draft -p <intent> --project <repo-slug> -l size-<n> \
-  --dep <other child>  --ac "<observable result>"  -d "<what and why, citing the spec's requirement numbers>"
-```
-
-- `--project` is the repository's slug, `owner-repo` (`asdlc repos` lists the ones registered here). A task's project decides where its worktree is made.
-- One size label from the routing table. `size-8` is refused until it is split. `size-1` is for small, mechanical work only: its worker is haiku and follows numbered steps.
-- `--dep` for real ordering only: a child that consumes another's API depends on it.
-- `-a @<engineer>` reserves a child for that engineer's workers, when the engineer asked for it or only they can do it.
-- Drafts under a draft intent are allowed: asdlc records the draft parent itself.
-
-Then ask the person to accept the work: tell your engineer the intent, the spec and contract documents, and the children with their repositories, sizes and dependencies, and ask them to run `asdlc accept <intent>` themselves. It promotes the intent and every draft under it, at any depth, in one board commit, and comments the new ids on the intent (`DRAFT-1 -> TASK-4`, and so on); each promoted task keeps its old draft id as `asdlc_accepted_from`. You can't run it; the board guard refuses agents. From then on use the new ids: `asdlc mine` lists your lead under its new id with the draft id it had.
+Draft the children and ask the person to accept the work with the break-down-intent skill.
 
 ## 4. Contract change requests
 
