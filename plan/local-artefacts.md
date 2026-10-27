@@ -42,7 +42,7 @@ A first person to try the plugin had to create a separate tasks repository befor
 ## Open questions for the owner
 
 - Settled: Backlog.md stays, and the user chooses where it lives.
-- Is `approve` (a person approves a plan in their own terminal before workers build) still wanted with one machine? I recommend yes: it is the R2 gate for plans.
+- Settled: `approve` stays. A person approves a plan in their own terminal before workers build; it is the R2 gate for plans.
 - Is the repository's `CLAUDE.md` the right place to record a chosen location, or would you rather have a small config file the plugin owns?
 
 ## Proof
