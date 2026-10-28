@@ -104,7 +104,7 @@ If you close the session, or start a new one, it picks up from the board: `asdlc
 Agents can't do these; the board guard refuses them, with the reason.
 
 1. **Accept work.** Your orchestrator writes an intent's spec and its child tasks as drafts. When you agree with them, accept them all in your own terminal: `asdlc accept <intent id>`.
-2. **Approve plans of size 2 and up.** Your orchestrator shows you the plans, each with its digest, and gives you the command: `asdlc approve TASK-7 TASK-9 --plan-hash <digest of 7> --plan-hash <digest of 9>`. It shows each plan again as it approves it, refuses one that changed since you were shown it, and records your approval with the plan's digest and the task's size. Until then a worker can't record a check or finish the task, and if the plan or the size changes after you approve, they refuse again until you approve the new one. A claim waiting for your approval is kept for `approval_wait` (a day by default) rather than reaped at `stale_after`. A `size-1` task is small and mechanical, so its plan skips approval; the orchestrator notes why on the task, and the reviewer checks that it really was small.
+2. **Approve plans of size 2 and up.** Your orchestrator shows you the plans, each with its digest, and gives you the command: `asdlc approve TASK-7 TASK-9 --plan-hash <digest of 7> --plan-hash <digest of 9>`. It shows each plan again as it approves it, refuses one that changed since you were shown it, and records your approval with the plan's digest and the task's size. Until then a worker can't record a check or finish the task, and if the plan or the size changes after you approve, they refuse again until you approve the new one. A claim waiting for your approval stays claimed until you answer. A `size-1` task is small and mechanical, so its plan skips approval; the orchestrator notes why on the task, and the reviewer checks that it really was small.
 3. **Merge the pull request.** When a review has passed (the task is labelled `review-passed`), read the review on the pull request and merge it yourself. Agents never approve, request changes on, or merge a pull request.
 4. **Mark it Done.** After the merge, in your own terminal: `asdlc board task edit <id> -s Done`.
 
@@ -113,7 +113,7 @@ Agents can't do these; the board guard refuses them, with the reason.
 The message always says why, and your orchestrator usually moves on by itself:
 
 - "Another agent claimed it first": two machines raced and the other won. It picks the next task.
-- Reserved for someone else, in a repository not registered here, waiting on another task, or too big (`size-8` must be split first): it isn't yours to start yet. If it should be, register the repository (`asdlc register`) or ask the lead to split the task.
+- Reserved for someone else, in a repository not registered here, waiting on another task, or too big (`size-8` must be split first): it isn't yours to start yet. If it should be, register the repository (`asdlc register`) or ask your orchestrator to split the task.
 - At your `workers` cap: it waits for a worker or reviewer to finish.
 - Keeping a slot for a review: with `review: true`, `asdlc next` won't take your last free slot while another engineer's work waits for your review. Your orchestrator reviews it first.
 - "Already claimed by @kyle.w1: another session may be using that name": two of your sessions are using the same worker names. Give each its own.
@@ -132,7 +132,7 @@ With `review: true`, your orchestrator also claims reviews of other engineers' f
 
 ### Seeing how it's going
 
-- `asdlc mine --as <you>`: your workers' tasks, reviews, leads and reserved work.
+- `asdlc mine --as <you>`: your workers' tasks, reviews and reserved work.
 - `asdlc stats [--since 2026-11-01] [--stage plan|design|build|test|deploy|maintain|coordination]`: the playbook's numbers by stage, each beside the playbook's own name for it, and the ones the board can't measure, with what they need. "What the numbers mean", below, defines each one.
 
 ### When an asdlc command is interrupted

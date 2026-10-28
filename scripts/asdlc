@@ -2338,8 +2338,6 @@ def _attempt[R](command: str, worker: str, task_id: str, claiming: Callable[[], 
     match result:
         case Taken(reason=reason, lost=lost):
             _record(command, worker, task_id, Attempt.LOST if lost else Attempt.REFUSED, reason)
-        case Led(mine=mine, reason=reason, lost=lost):
-            _record(command, worker, task_id, Attempt.CLAIMED if mine else Attempt.LOST if lost else Attempt.REFUSED, reason)
         case _:
             _record(command, worker, task_id, Attempt.CLAIMED, "")
     return result
