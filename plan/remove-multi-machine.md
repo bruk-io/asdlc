@@ -38,5 +38,5 @@ The third of three stacked changes in [`eval-suite.md`](eval-suite.md), and the 
 ## Proof
 
 - `./scripts/check` passes, including `scripts/eval validate` against this branch.
-- `grep -rn "asdlc lead\|lead-of\|heartbeat\|asdlc reap\|stale_after" skills agents commands hooks scripts docs README.md templates evals` finds nothing.
+- `grep -rn "asdlc lead\|lead-of\|heartbeat\|asdlc reap\|stale_after" skills agents commands hooks scripts docs README.md templates` finds nothing. The suite is not in that list: the fixture's `asdlc.toml` still writes a `stale_after` line, which the plugin now ignores, and the small-request case checks it is not disturbed; changing them is a suite pull request of its own (R23).
 - The orchestrate skill reads as one orchestrator's loop, and the day's demonstration (`tests/test_demo_orchestration.py`) still runs without the removed steps.
