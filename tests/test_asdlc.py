@@ -364,13 +364,13 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(asdlc.human(timedelta(hours=3, minutes=5)), "3h 5m")
 
     def test_the_boards_asdlc_toml(self) -> None:
-        self.assertEqual(asdlc.parse_settings(""), asdlc.Settings(timedelta(hours=2), timedelta(minutes=30)))
-        self.assertEqual(asdlc.parse_settings('stale_after = "45m"\nother = 1\n').stale_after, timedelta(minutes=45))
+        self.assertEqual(asdlc.parse_settings(""), asdlc.Settings(timedelta(0)))
+        self.assertEqual(asdlc.parse_settings('stale_after = "45m"\nother = 1\n'), asdlc.Settings(timedelta(0)), "keys an older asdlc wrote are ignored")
         self.assertEqual(asdlc.parse_settings('review_fallback_after = "1h"\n').review_fallback_after, timedelta(hours=1))
         with self.assertRaisesRegex(asdlc.AsdlcError, "in quotes"):
-            asdlc.parse_settings("stale_after = 2\n")
+            asdlc.parse_settings("review_fallback_after = 2\n")
         with self.assertRaisesRegex(asdlc.AsdlcError, "not valid TOML"):
-            asdlc.parse_settings("stale_after = \n")
+            asdlc.parse_settings("review_fallback_after = \n")
 
 
 class RegistryTest(unittest.TestCase):
@@ -680,8 +680,8 @@ class DoctorTest(unittest.TestCase):
                 self.assertIn(says, " ".join(f.message for f in self.only("fail", found) if f.area == "board"))
 
     def test_settings(self) -> None:
-        self.assertIn("must be shorter than stale_after", self.only("fail", facts(settings='stale_after = "30m"\nreview_fallback_after = "30m"\n'))[0].message)
-        self.assertIn("not valid TOML", self.only("fail", facts(settings="stale_after = \n"))[0].message)
+        self.assertIn("not valid TOML", self.only("fail", facts(settings="review_fallback_after = \n"))[0].message)
+        self.assertTrue([f for f in asdlc.diagnose(facts(settings='review_fallback_after = "0m"\n')) if f.area == "asdlc.toml" and "review_fallback_after 0m" in f.message])
         self.assertIn("defaults apply", self.only("warn", facts(settings=None))[0].message)
 
     def test_registered_repositories(self) -> None:
@@ -1844,7 +1844,14 @@ class ReviewCommandTest(unittest.TestCase):
         self.assertEqual(([r["id"] for r in mine["reviews"]], mine["reviewing"], mine["tasks"]), (["TASK-1", "TASK-2"], 2, []))
         self.assertIn("review TASK-1\t@kyle.r1\tcross-machine", self.team.ok("mine", "--as", "kyle").stdout)
 
+    def test_by_default_the_author_reviews_at_once_with_the_fallback(self) -> None:
+        self.submit("TASK-1")
+        late = self.review("ann.r1", "--fallback")
+        self.assertEqual((late["task"], late["kind"]), ("TASK-1", "same-machine"))
+
     def test_the_author_reviews_only_with_fallback_after_the_timeout(self) -> None:
+        team = Team(self, [_sized("Rate limit", "size-2", "--project", "acme-api")], files={"asdlc.toml": 'review_fallback_after = "30m"\n'})
+        self.team = team
         self.submit("TASK-1")
         own = self.team.ok("review-next", "--as", "ann.r1", "--json", engineer="ann")
         self.assertFalse(json.loads(own.stdout)["claimed"])
