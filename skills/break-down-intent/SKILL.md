@@ -1,6 +1,6 @@
 ---
 name: break-down-intent
-description: Split an intent and its spec into draft child tasks on the shared board, one per piece of work in one repository, with sizes, dependencies and acceptance criteria, then ask the person to accept the whole of it. Use when you lead an intent whose spec is written and which has no children, when asked to break work down or split a task, and when a size-8 task has to be split.
+description: Split an intent and its spec into draft child tasks on the board, one per piece of work in one repository, with sizes, dependencies and acceptance criteria, then ask the person to accept the whole of it. Use when an intent's spec is written and it has no children, when asked to break work down or split a task, and when a size-8 task has to be split.
 ---
 
 # Break down an intent

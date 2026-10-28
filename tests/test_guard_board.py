@@ -180,10 +180,6 @@ class BoardStatusTest(unittest.TestCase):
 
     def test_allows_the_orchestrators_commands(self) -> None:
         for command in (
-            "asdlc lead DRAFT-1 --as kyle.lead --json",
-            "asdlc lead-of TASK-3.1",
-            "asdlc heartbeat TASK-3.1 --as kyle.w1",
-            "asdlc reap --older-than 2h",
             "asdlc mine --as kyle --json",
             "asdlc register",
             "asdlc record-check TASK-1 --as kyle.w1 -- ./scripts/check",

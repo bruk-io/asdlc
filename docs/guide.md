@@ -89,12 +89,10 @@ asdlc works through the `backlog` CLI only. Don't add Backlog.md's MCP server: i
 
 Open Claude Code in your clone of the tasks repository and ask it to orchestrate: "work the board", "pick up work", or "keep going on the team's tasks". It loads the `orchestrate` skill and, each round:
 
-- releases claims nobody has touched for `stale_after` (two hours by default), on anyone's machine;
 - claims work for its workers: reserved for you first, then your preferred repositories, then priority;
-- takes the lead on a large piece of work if nobody has, and otherwise follows the lead's spec and contracts on the board;
 - onboards a repository the first time work needs it, so its rules reach every worker;
 - launches a worker per task, which writes its plan first;
-- heartbeats what its agents are working on at the top of every round, and sees each task through to In Review with a pull request;
+- reads the spec and contracts on the intent a task belongs to, and sees each task through to In Review with a pull request;
 - reviews other engineers' finished work before it starts new work of its own, so reviews never wait on a full queue.
 
 It brings you every plan that needs approval in one batch, with the one command that approves them. You approve in your own terminal, `asdlc approve TASK-7 TASK-9`; for a plan you reject, tell it what to change and it puts that on the task and has the worker plan again.
@@ -105,7 +103,7 @@ If you close the session, or start a new one, it picks up from the board: `asdlc
 
 Agents can't do these; the board guard refuses them, with the reason.
 
-1. **Accept work.** A lead writes an intent and its child tasks as drafts. When you agree with them, accept them all in your own terminal: `asdlc accept <intent id>`.
+1. **Accept work.** Your orchestrator writes an intent's spec and its child tasks as drafts. When you agree with them, accept them all in your own terminal: `asdlc accept <intent id>`.
 2. **Approve plans of size 2 and up.** Your orchestrator shows you the plans, each with its digest, and gives you the command: `asdlc approve TASK-7 TASK-9 --plan-hash <digest of 7> --plan-hash <digest of 9>`. It shows each plan again as it approves it, refuses one that changed since you were shown it, and records your approval with the plan's digest and the task's size. Until then a worker can't record a check or finish the task, and if the plan or the size changes after you approve, they refuse again until you approve the new one. A claim waiting for your approval is kept for `approval_wait` (a day by default) rather than reaped at `stale_after`. A `size-1` task is small and mechanical, so its plan skips approval; the orchestrator notes why on the task, and the reviewer checks that it really was small.
 3. **Merge the pull request.** When a review has passed (the task is labelled `review-passed`), read the review on the pull request and merge it yourself. Agents never approve, request changes on, or merge a pull request.
 4. **Mark it Done.** After the merge, in your own terminal: `asdlc board task edit <id> -s Done`.
@@ -126,7 +124,7 @@ Each attempt goes in this machine's log, `~/.local/state/asdlc/events.jsonl`, wh
 
 Another engineer's reviewer judged your task and found something Important. The task goes back In Progress, still assigned to the worker that built it, labelled `changes-requested`, with the findings in its comments and on the pull request. Your orchestrator hands it back to that same worker name, which may already be building something else: a worker name can hold a sent-back task alongside new work, and picks its own task up again. You only hear about it when the findings question the plan or the contract rather than the code.
 
-If nobody works on it for `stale_after` and its claim is reaped, it goes back to To Do still reserved for you for one more `stale_after`, then open to anyone, and the next claim resumes its branch from what was pushed, never from the default branch. Workers never force-push; the guard refuses it.
+If its claim is released, it goes back to To Do reserved for you, and the next claim resumes its branch from what was pushed, never from the default branch. Workers never force-push; the guard refuses it.
 
 ### Reviewing others' work
 
@@ -202,7 +200,7 @@ Not measured until play 12, closing the loop on metrics, is built: it needs dete
 
 ### Coordination
 
-Lost races per claim (this machine's event log), holds reaped by `asdlc reap` by kind (claims, leads, reviews and reservations released), tasks released by hand, and each repository's onboarding with the time from the newest claim in that repository to its plugin's first publish.
+Lost races per claim (this machine's event log), tasks released by hand, and each repository's onboarding with the time from the newest claim in that repository to its plugin's first publish.
 
 ### Not measurable from the board
 
@@ -262,11 +260,10 @@ uv run --script scripts/gate_evidence.py verify --base main    # is there passin
 
 ## Stop and remove it
 
-To stop for the day, tell your orchestrator to stop, or close the session. Claims it held go stale and are released after `stale_after`. To hand them back now, list them with `asdlc mine --as <you>` and release each:
+To stop for the day, tell your orchestrator to stop, or close the session. Nothing frees a claim for you, so hand them back: list them with `asdlc mine --as <you>` and release each:
 
 ```sh
 asdlc release TASK-7 --as kyle.w1
-asdlc release TASK-3 --as kyle.lead     # a lead
 ```
 
 To leave the pilot:

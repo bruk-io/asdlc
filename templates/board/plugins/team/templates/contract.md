@@ -1,8 +1,8 @@
 # Contract: <the feature>
 
 - Intent: <TASK-n, the intent this delivers>
-- Lead: <@name, the orchestrator holding the lead claim>
-- Version: 1, <YYYY-MM-DD>. Only the lead changes this document; see "Changes".
+- Owner: <@name, the orchestrator who wrote it>
+- Version: 1, <YYYY-MM-DD>. Only its owner changes this document; see "Changes".
 
 <Two or three sentences: what the feature does for whom, and which repositories take part.>
 
@@ -63,6 +63,6 @@ Edge cases every implementation handles the same way:
 
 ## Changes
 
-<Newest first. A worker who needs a change asks on its task; the lead decides, edits this document, bumps the version, and notes each affected task.>
+<Newest first. A worker who needs a change asks on its task; the owner decides, edits this document, bumps the version, and notes each affected task.>
 
 - v1, <YYYY-MM-DD>: first version.

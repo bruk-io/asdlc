@@ -1,6 +1,6 @@
 ---
 name: write-spec
-description: Write the spec for an intent on the shared board as a Backlog document - numbered requirements, the design, areas of concern, and every open question from the intent settled or carried forward with a reason - and link it from the intent. Use when you lead an intent that has no spec yet, when asked to write or revise a spec, and before breaking an intent into child tasks.
+description: Write the spec for an intent on the board as a Backlog document - numbered requirements, the design, areas of concern, and every open question from the intent settled or carried forward with a reason - and link it from the intent. Use when an intent has no spec yet, when asked to write or revise a spec, and before breaking an intent into child tasks.
 ---
 
 # Write a spec
@@ -22,4 +22,4 @@ asdlc board draft edit <intent> --add-doc <doc-id>     # `task edit` once the in
 - Where policies conflict or a requirement can't be met cleanly, put it under areas of concern for the engineer to decide. Don't resolve it silently.
 - Say what the spec leaves out.
 
-When children touch more than one repository, or a layer another team owns, the contract is a document of its own (the lead skill says when). Next: the breakdown (break-down-intent skill).
+When children touch more than one repository, or a layer another team owns, the contract is a document of its own (the orchestrate skill says how a change to it is decided). Next: the breakdown (break-down-intent skill).

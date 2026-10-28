@@ -4,8 +4,8 @@ Two engineers, kyle and ann, each on their own machine: their own git identity a
 `asdlc.engineer` (a global git config file each), their own registry of code repositories
 (`XDG_CONFIG_HOME` each), their own clone of the board and their own clones of the two
 code repositories. One intent with four children across the two repositories, one child
-reserved for ann. It shows the lead claim, reserved work, preferences, workers spreading
-over the work, and a stale claim reaped after the clock jumps.
+reserved for ann. It shows reserved work, preferences, workers spreading over the work, and
+work handed back and picked up by another worker.
 
 Run it with ASDLC_DEMO=1 to print the story; the pull request quotes that output.
 """
@@ -16,7 +16,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from tests.support import ROOT, run_script
@@ -123,19 +122,12 @@ class TwoMachinesTest(unittest.TestCase):
         kyle, ann = self.kyle, self.ann
         self.say("Two machines: kyle and ann, each with a board clone and clones of acme/api and acme/web, registered.")
 
-        # 1. The intent and its lead.
+        # 1. The intent.
         created = kyle.asdlc("board", "task", "create", "Checkout v2", "--draft", "--type", "intent", "--ac", "A buyer can pay in one step")
         self.assertIn("DRAFT-1", created.stdout)
-        led = kyle.json("lead", "DRAFT-1", "--as", "kyle.lead")
-        self.assertTrue(led["mine"])
-        seen = ann.json("lead-of", "DRAFT-1")
-        self.assertEqual(seen["lead"], "kyle.lead")
-        second = ann.asdlc("lead", "DRAFT-1", "--as", "ann.lead", "--json", ok=False)
-        self.assertEqual((second.returncode, json.loads(second.stdout)["lead"]), (1, "kyle.lead"))
-        self.say("1. kyle's orchestrator claims the lead on DRAFT-1. ann's sees it: "
-                 f"`lead-of` says @{seen['lead']}, and `lead --as ann.lead` exits 1 ({json.loads(second.stdout)['reason'].split('. Work')[0]}).")
+        self.say("1. kyle's orchestrator captures the intent as DRAFT-1.")
 
-        # 2. The lead's breakdown: four child drafts across two repositories, one reserved for ann.
+        # 2. The breakdown: four child drafts across two repositories, one reserved for ann.
         children = (
             ("Payment API", "acme-api", "size-2", ()),
             ("Order API", "acme-api", "size-2", ()),
@@ -146,10 +138,9 @@ class TwoMachinesTest(unittest.TestCase):
             kyle.asdlc("board", "task", "create", title, "--draft", "-p", "DRAFT-1", "--project", project, "-l", size, "--priority", "medium", *extra)
         accepted = kyle.json("accept", "DRAFT-1")
         self.assertEqual(accepted["accepted"], {"DRAFT-1": "TASK-1", "DRAFT-2": "TASK-1.1", "DRAFT-3": "TASK-1.2", "DRAFT-4": "TASK-1.3", "DRAFT-5": "TASK-1.4"})
-        self.say("2. The lead drafts four children under DRAFT-1 (two in acme-api, two in acme-web; 'Saved cards UI' "
+        self.say("2. The orchestrator drafts four children under DRAFT-1 (two in acme-api, two in acme-web; 'Saved cards UI' "
                  "reserved for @ann). kyle, the person, runs `asdlc accept DRAFT-1`: one commit makes "
                  + ", ".join(f"{a}->{b}" for a, b in accepted["accepted"].items()) + ".")
-        self.assertEqual(ann.json("lead-of", "TASK-1.2")["lead"], "kyle.lead")
 
         # 3. Reserved work only goes to its owner.
         refused = kyle.asdlc("claim", "TASK-1.4", "--as", "kyle.w9", ok=False)
@@ -187,24 +178,16 @@ class TwoMachinesTest(unittest.TestCase):
         mine = kyle.json("mine", "--as", "ann")
         self.assertEqual(sorted(t["id"] for t in mine["tasks"]), ["TASK-1.1", "TASK-1.2", "TASK-1.4"])
 
-        # 6. ann's machine goes quiet; kyle's keeps heartbeating; the clock jumps three hours.
-        jump = datetime.now(UTC) + timedelta(hours=3)
-        beating = {"GIT_COMMITTER_DATE": (jump - timedelta(minutes=10)).isoformat()}
-        kyle.asdlc("heartbeat", "TASK-1.3", "--as", "kyle.w1", env=beating)
-        kyle.asdlc("heartbeat", "TASK-1", "--as", "kyle.lead", env=beating)
-        reaped = kyle.json("reap", "--now", jump.isoformat())
-        released = sorted((r["id"], r["holders"][0]) for r in reaped["released"])
-        self.assertEqual(released, [("TASK-1.1", "ann.w3"), ("TASK-1.2", "ann.w2"), ("TASK-1.4", "ann.w1")])
-        after = {t["id"]: t for t in kyle.json("mine", "--as", "ann")["reserved"]}
-        self.assertIn("TASK-1.4", after)
-        self.assertEqual([t["id"] for t in kyle.json("mine", "--as", "kyle")["tasks"]], ["TASK-1.3"])
-        self.say("6. ann's machine goes quiet. kyle's keeps heartbeating TASK-1.3 and the lead on TASK-1. The clock jumps 3h "
-                 "(`reap --now`); kyle's orchestrator releases " + ", ".join(f"{i} (@{h})" for i, h in released)
-                 + ". TASK-1.4 goes back to To Do still reserved for @ann; kyle.w1's task and kyle's lead stay.")
+        # 6. ann hands back what her workers hold; kyle's worker picks the work up.
+        for task, worker in (("TASK-1.1", "ann.w3"), ("TASK-1.2", "ann.w2")):
+            ann.asdlc("release", task, "--as", worker)
+        self.assertEqual(sorted(t["id"] for t in kyle.json("mine", "--as", "ann")["tasks"]), ["TASK-1.4"])
+        self.assertIn("TASK-1.4", [t["id"] for t in kyle.json("mine", "--as", "ann")["tasks"]])
+        self.say("6. ann hands back TASK-1.1 and TASK-1.2 with `release`; TASK-1.4, reserved for @ann, stays with her worker.")
 
         again = kyle.json("next", "--as", "kyle.w2")
         self.assertIn(again["task"], ("TASK-1.1", "TASK-1.2"))
-        self.say(f"7. kyle.w2 then picks up released work in acme-api ({again['task']}); TASK-1.4 stays for ann.")
+        self.say(f"7. kyle.w2 then picks up the released work in acme-api ({again['task']}); TASK-1.4 stays for ann.")
 
 
 if __name__ == "__main__":

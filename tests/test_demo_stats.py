@@ -1,8 +1,8 @@
 """A scripted demonstration of asdlc stats by stage, over a two-machine history, with no model calls.
 
 Two engineers, ann and kyle, each on their own machine (test_demo_orchestration.Machine). Over
-a Monday and a Tuesday: ann captures an intent (recording when the conversation began), leads
-it, writes its spec and two children; she accepts it as the person and archives another
+a Monday and a Tuesday: ann captures an intent (recording when the conversation began), writes
+its spec and two children; she accepts it as the person and archives another
 intent. ann's worker builds the size-2 child after her approval; kyle's worker builds the
 size-1 child without one. Each reviews the other's work, a review asks for changes and the
 worker fixes them with signed commits. Both are merged and marked Done, and on Tuesday a bug
@@ -112,7 +112,6 @@ class StatsByStageTest(unittest.TestCase):
         self.assertIn("DRAFT-1", created.stdout)
         self.on(ann, at(9, 12), "intent-started", "DRAFT-1", "--at", at(9).isoformat())
         self.on(ann, at(9, 20), "board", "task", "create", "Dark mode", "--draft", "--type", "intent")
-        self.on(ann, at(9, 25), "lead", "DRAFT-1", "--as", "ann.lead")
 
         # Design: the spec, linked, then the intent changed once after it.
         self.assertIn("doc-1", self.on(ann, at(9, 40), "board", "doc", "create", "Spec: Rate limit the login endpoint", "-t", "specification").stdout)

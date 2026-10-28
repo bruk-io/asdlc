@@ -63,7 +63,7 @@ summary = "Pure domain types and logic. No I/O, no framework imports."
 ```
 
 - Each `[layers.<name>]` needs `paths`, a non-empty list of globs. Tables are tried in file order and the first match wins, so put narrow layers before broad ones.
-- `summary` and `depends_on` are for people and for the onboarding and lead agents; the rule loader reads only the name and `paths`.
+- `summary` and `depends_on` are for people and for the onboarding agent; the rule loader reads only the name and `paths`.
 - A file no layer matches has no layer, and a rule injected for it says nothing about layers.
 - A `layers.toml` the loader can't read is reported once per context as a system message, and the rules are delivered without a layer.
 

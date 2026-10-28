@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### One orchestrator: no leads, heartbeats or reaping ([plan](plan/remove-multi-machine.md))
+
+- Removed `asdlc lead`, `asdlc lead-of`, `asdlc heartbeat` and `asdlc reap`, with the `lead` skill, the `stale_after` and `approval_wait` settings, the `leads` list in `asdlc mine`, and the metric that counted reaped holds. They kept one orchestrator in charge of an intent across machines, kept a claim alive, and freed one whose machine went away; with one orchestrator launching its own workers none has a job. A task's old `asdlc_lead` and `asdlc_heartbeat` keys are ignored.
+- `asdlc release` also gives up a review claim a reviewer holds, so a reviewer that died doesn't block a review; nothing else frees a claim now, so the orchestrate skill releases a worker's claim by hand when the worker is gone.
+- `review_fallback_after` defaults to 0: the author's own orchestrator reviews at once with a reviewer it launches, which is separate from the worker that built the change.
+- The orchestrate skill is one orchestrator's loop, and it checks each plan against the spec and contract itself. The worker and reviewer agents and the `write-spec`, `break-down-intent` and `capture-intent` skills no longer name a lead.
+
 ### The eval gate, run locally, and hooks that check for its evidence ([plan](plan/eval-suite.md))
 
 - `scripts/eval gate`: when steering paths changed since the base, runs the regression cases (every case with `--all`) against the working copy, judges them, and writes a report keyed by a digest of the steering paths and the suite. Every trial of a regression case must pass; capability cases must be no worse than the last passing gate beyond their own noise.

@@ -394,59 +394,25 @@ class FrontmatterKeyTest(unittest.TestCase):
     TEXT = "---\nid: TASK-1\nlabels:\n  - a\nstatus: To Do\n---\n\n## Description\nlabels: not this\n"
 
     def test_sets_replaces_and_removes_a_key(self) -> None:
-        added = asdlc.with_key(self.TEXT, "asdlc_lead", "kyle.lead")
-        self.assertEqual(asdlc.task_from("x", added).lead, "kyle.lead")
-        replaced = asdlc.with_key(asdlc.with_key(added, "labels", "[b]"), "asdlc_lead", "ann.lead")
+        added = asdlc.with_key(self.TEXT, "asdlc_reserved_for_author", "kyle")
+        self.assertEqual(asdlc.task_from("x", added).reserved_for_author, "kyle")
+        replaced = asdlc.with_key(asdlc.with_key(added, "labels", "[b]"), "asdlc_reserved_for_author", "ann")
         self.assertEqual(asdlc.task_from("x", replaced).labels, ("b",))
-        self.assertEqual(asdlc.task_from("x", replaced).lead, "ann.lead")
+        self.assertEqual(asdlc.task_from("x", replaced).reserved_for_author, "ann")
         self.assertIn("labels: not this", replaced)
-        self.assertEqual(asdlc.with_key(added, "asdlc_lead", None), self.TEXT)
-        stamped = asdlc.with_key(self.TEXT, "asdlc_heartbeat", asdlc.yaml_quoted("2026-10-22T10:00:00+00:00"))
-        self.assertEqual(asdlc.task_from("x", stamped).heartbeat, "2026-10-22T10:00:00+00:00")
+        self.assertEqual(asdlc.with_key(added, "asdlc_reserved_for_author", None), self.TEXT)
         with self.assertRaises(asdlc.AsdlcError):
             asdlc.with_key("no frontmatter", "a", "b")
 
-    def test_reads_project_lead_and_heartbeat(self) -> None:
-        found = asdlc.task_from("backlog/drafts/draft-1 - x.md", "---\nid: DRAFT-1\nproject: Acme-API\nasdlc_lead: '@kyle.lead'\n---\n")
-        self.assertEqual((found.project, found.lead), ("acme-api", "kyle.lead"))
+    def test_reads_project_and_the_reservation(self) -> None:
+        found = asdlc.task_from("backlog/drafts/draft-1 - x.md", "---\nid: DRAFT-1\nproject: Acme-API\nasdlc_reserved_for_author: kyle\n---\n")
+        self.assertEqual((found.project, found.reserved_for_author), ("acme-api", "kyle"))
+        self.assertEqual(asdlc.task_from("x", "---\nid: TASK-1\nasdlc_lead: '@kyle.lead'\nasdlc_heartbeat: now\n---\n").id, "TASK-1", "keys written by an older asdlc are ignored")
         self.assertTrue(asdlc.is_draft(found))
 
 
-class LeadAndStalenessTest(unittest.TestCase):
+class MineReportTest(unittest.TestCase):
     NOW = datetime(2026, 10, 22, 15, 0, tzinfo=UTC)
-
-    def test_lead_of(self) -> None:
-        items = (task("TASK-1", type="intent", lead="kyle.lead"), task("TASK-1.1", parent="TASK-1"), task("TASK-2"), task("TASK-3.1", parent="TASK-3"))
-        self.assertEqual(asdlc.lead_of(items, "TASK-1.1"), asdlc.LeadOf("TASK-1.1", "TASK-1", "kyle.lead"))
-        self.assertEqual(asdlc.lead_of(items, "TASK-1"), asdlc.LeadOf("TASK-1", "TASK-1", "kyle.lead"))
-        self.assertEqual(asdlc.lead_of(items, "TASK-2"), asdlc.LeadOf("TASK-2", None, None))
-        self.assertEqual(asdlc.lead_of(items, "TASK-3.1"), asdlc.LeadOf("TASK-3.1", None, None))
-        with self.assertRaises(asdlc.AsdlcError):
-            asdlc.lead_of(items, "TASK-9")
-
-    def test_lead_of_walks_up_to_the_nearest_intent(self) -> None:
-        """Second review, Important 2: a grandchild's lead is its intent's, not its parent task's."""
-        items = (task("TASK-1", type="intent", lead="kyle.lead"), task("TASK-1.1", parent="TASK-1", labels=("size-8",)),
-                 task("TASK-1.1.1", parent="TASK-1.1"), task("TASK-2"), task("TASK-2.1", parent="TASK-2"))
-        self.assertEqual(asdlc.lead_of(items, "TASK-1.1.1"), asdlc.LeadOf("TASK-1.1.1", "TASK-1", "kyle.lead"))
-        self.assertEqual(asdlc.lead_of(items, "TASK-2.1"), asdlc.LeadOf("TASK-2.1", None, None))
-
-    def test_stale_holds(self) -> None:
-        items = (
-            task("TASK-1", status="In Progress", assignees=("@kyle", "@kyle.w1"), path="a"),
-            task("TASK-2", status="In Progress", assignees=("@kyle.w2",), path="b"),
-            task("TASK-3", status="In Progress", assignees=("@kyle",), path="c"),
-            task("TASK-4", type="intent", lead="ann.lead", path="d"),
-            task("TASK-5", status="In Review", assignees=("@kyle.w3",), path="e"),
-        )
-        old, fresh = self.NOW - timedelta(hours=3), self.NOW - timedelta(minutes=10)
-        touched = {"a": old, "b": fresh, "c": old, "d": old, "e": old}
-        found = asdlc.stale_holds(items, touched, self.NOW, timedelta(hours=2))
-        self.assertEqual([(s.task.id, s.hold, s.holders) for s in found],
-                         [("TASK-1", asdlc.Hold.CLAIM, ("@kyle.w1",)), ("TASK-4", asdlc.Hold.LEAD, ("@ann.lead",))])
-        comment = asdlc.reap_comment(found[0], timedelta(hours=2))
-        self.assertIn("no board update for 3h 0m, longer than stale_after (2h 0m)", comment)
-        self.assertIn("stays reserved for @kyle", comment)
 
     def test_mine_report(self) -> None:
         items = (
@@ -454,13 +420,12 @@ class LeadAndStalenessTest(unittest.TestCase):
             task("TASK-2", status="In Review", assignees=("@kyle.w2",)),
             task("TASK-3", status="Done", assignees=("@kyle.w3",)),
             task("TASK-4", assignees=("@kyle",)),
-            task("TASK-5", type="intent", lead="kyle.lead"),
             task("TASK-6", status="In Progress", assignees=("@ann.w1",)),
         )
         report = asdlc.mine_report(items, "kyle", asdlc.Prefs("kyle", workers=3))
         self.assertEqual((report["active"], report["workers_cap"]), (1, 3))
         self.assertEqual([(r["id"], r["workers"]) for r in report["tasks"]], [("TASK-1", ["kyle.w1"]), ("TASK-2", ["kyle.w2"])])
-        self.assertEqual([r["id"] for r in report["leads"]], ["TASK-5"])
+        self.assertNotIn("leads", report)
         self.assertEqual([r["id"] for r in report["reserved"]], ["TASK-4"])
 
 
@@ -561,17 +526,11 @@ class ReviewLogicTest(unittest.TestCase):
         self.assertTrue(text.endswith("\n\n[Bugs, Important] x"))
         self.assertIn("stays In Review for a person to merge", asdlc.review_comment("kyle.r1", "", asdlc.ReviewVerdict.CLEAN, "No findings."))
 
-    def test_stale_review_claims_and_the_cap(self) -> None:
+    def test_the_cap_counts_workers_and_reviews(self) -> None:
         items = (
             task("TASK-1", status="In Review", assignees=("@ann.w1",), reviewer="kyle.r1", path="a"),
             task("TASK-2", status="In Progress", assignees=("@kyle.w1",), path="b"),
         )
-        old = self.NOW - timedelta(hours=3)
-        found = asdlc.stale_holds(items, {"a": old, "b": self.NOW}, self.NOW, timedelta(hours=2))
-        self.assertEqual([(s.task.id, s.hold, s.holders) for s in found], [("TASK-1", asdlc.Hold.REVIEW, ("@kyle.r1",))])
-        comment = asdlc.reap_comment(found[0], timedelta(hours=2))
-        self.assertIn("the review claim held by @kyle.r1", comment)
-        self.assertIn("Another reviewer may claim it", comment)
         self.assertEqual(asdlc.busy(items, "kyle"), 2)
         report = asdlc.mine_report(items + (task("TASK-3", status="In Progress", assignees=("@kyle.w2",), labels=("size-2", "changes-requested")),),
                                    "kyle", asdlc.Prefs("kyle"))
@@ -1102,15 +1061,14 @@ class StageTest(unittest.TestCase):
         self.assertEqual(report["tasks"], {"claimed": 2, "in_review": 1, "done": 1})
 
     def test_coordination(self) -> None:
-        subjects = ((minute(14), "Add the app plugin"), (minute(40), "Reap the claim on TASK-9: idle 2h 1m"),
-                    (minute(41), "Reap the reservation on TASK-9: idle 2h 1m"), (minute(42), "Release TASK-8 from @ann.w1"))
+        subjects = ((minute(14), "Add the app plugin"), (minute(42), "Release TASK-8 from @ann.w1"))
         event = lambda m, command, outcome: {"time": minute(m).isoformat(), "command": command, "outcome": outcome}  # noqa: E731
         events = (event(1, "next", "claimed"), event(2, "next", "lost"), event(3, "next", "claimed"), event(4, "claim", "refused"),
-                  event(5, "review-next", "claimed"), event(6, "lead", "lost"))
+                  event(5, "review-next", "claimed"), event(6, "review-next", "lost"))
         found = metrics(asdlc.coordination_stage(LEDGER, subjects, events, ALL))
         self.assertEqual((found["lost_races"]["claimed"], found["lost_races"]["lost"], found["lost_races"]["lost_per_claim"]), (2, 1, 0.5))
-        self.assertEqual(found["lost_races"]["by_command"]["lead"], {"lost": 1})
-        self.assertEqual(found["reaped"]["by_hold"], {"claim": 1, "reservation": 1})
+        self.assertEqual(found["lost_races"]["by_command"]["review-next"], {"claimed": 1, "lost": 1})
+        self.assertNotIn("reaped", found)
         self.assertEqual(found["released"]["count"], 1)
         self.assertEqual(found["onboardings"]["onboardings"], [{"plugin": "app", "published": minute(14).isoformat(), "task": "TASK-3", "seconds": 60.0}])
         later = metrics(asdlc.coordination_stage(LEDGER, subjects, events, asdlc.Window(minute(3), minute(100))))
@@ -1783,94 +1741,9 @@ class NextTest(unittest.TestCase):
 
 
 @needs_backlog
-class LeadTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.team = Team(self, [["Big thing", "--draft", "--type", "intent"], _sized("Plain", "size-1", "--project", "acme-api")])
-        self.theirs = self.team.boards.clone("theirs")
-
-    def test_the_first_orchestrator_leads_and_the_second_sees_it(self) -> None:
-        led = json.loads(self.team.ok("lead", "draft-1", "--as", "kyle.lead", "--json").stdout)
-        self.assertEqual((led["intent"], led["lead"], led["mine"]), ("DRAFT-1", "kyle.lead", True))
-        self.assertIn("asdlc_lead: kyle.lead", self.team.text("DRAFT-1"))
-        self.assertIn("@kyle.lead leads DRAFT-1", self.team.text("DRAFT-1"))
-        other = self.team.run("lead", "DRAFT-1", "--as", "ann.lead", "--json", engineer="ann")
-        self.assertEqual(other.returncode, 1)
-        self.assertEqual(json.loads(other.stdout)["lead"], "kyle.lead")
-        self.assertEqual(self.team.ok("lead", "DRAFT-1", "--as", "kyle.lead").stdout.strip(), "@kyle.lead already leads DRAFT-1")
-        child = self.team.ok("board", "task", "create", "Child", "--draft", "-p", "DRAFT-1", "--project", "acme-api", "-l", "size-2")
-        self.assertIn("DRAFT-2", child.stdout)
-        self.assertEqual(json.loads(self.team.ok("lead-of", "DRAFT-2", "--json").stdout), {"task": "DRAFT-2", "intent": "DRAFT-1", "lead": "kyle.lead"})
-        self.assertIn("has no parent intent", self.team.ok("lead-of", "TASK-1").stdout)
-
-    def test_losing_the_lead_at_the_push(self) -> None:
-        other = f'sed -i "s/^type: intent$/type: intent\\nasdlc_lead: ann.lead/" backlog/drafts/draft-1*.md && git commit -qam lead'
-        env = _interfering_backlog(self.team.boards.root, self.theirs, other)
-        done = self.team.run("lead", "DRAFT-1", "--as", "kyle.lead", env=env)
-        self.assertEqual(done.returncode, 1, done.stderr)
-        self.assertIn("Another orchestrator claimed the lead on DRAFT-1 first: @ann.lead", done.stdout)
-        self.assertEqual(asdlc.task_from("x", self.team.text("DRAFT-1")).lead, "ann.lead")
-
-    def test_only_an_intent_has_a_lead_and_a_lead_can_be_given_up(self) -> None:
-        refused = self.team.run("lead", "TASK-1", "--as", "kyle.lead")
-        self.assertIn("not an intent", refused.stderr)
-        self.team.ok("lead", "DRAFT-1", "--as", "kyle.lead")
-        self.assertIn("released the lead on DRAFT-1", self.team.ok("release", "DRAFT-1", "--as", "kyle.lead").stdout)
-        self.assertEqual(asdlc.task_from("x", self.team.text("DRAFT-1")).lead, "")
-
-    def test_the_board_refuses_a_draft_parent_that_isnt_a_draft(self) -> None:
-        done = self.team.run("board", "task", "create", "Child", "--draft", "-p", "DRAFT-7")
-        self.assertEqual(done.returncode, 1)
-        self.assertIn("DRAFT-7 is not a draft on the board", done.stderr)
-
-
-@needs_backlog
-class HeartbeatAndReapTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.team = Team(self, [
-            _sized("Reserved", "size-2", "--project", "acme-api", "-a", "@kyle"),
-            _sized("Open", "size-2", "--project", "acme-web"),
-            ["Big thing", "--type", "intent"],
-        ])
-        self.team.ok("claim", "1", "--as", "kyle.w1")
-        self.team.ok("claim", "2", "--as", "kyle.w2")
-        self.team.ok("lead", "3", "--as", "kyle.lead")
-
-    def later(self, **delta: float) -> str:
-        return (datetime.now(UTC) + timedelta(**delta)).isoformat()
-
-    def test_a_heartbeat_is_a_board_commit_only_the_holder_makes(self) -> None:
-        self.team.ok("heartbeat", "1", "--as", "kyle.w1")
-        self.assertTrue(self.team.task("TASK-1").heartbeat)
-        self.assertEqual(_git(self.team.boards.origin, "log", "-1", "--format=%s", "main"), "Heartbeat TASK-1 from @kyle.w1")
-        self.team.ok("heartbeat", "3", "--as", "kyle.lead")
-        refused = self.team.run("heartbeat", "1", "--as", "kyle.w2")
-        self.assertEqual(refused.returncode, 1)
-        self.assertIn("holds nothing to keep alive", refused.stderr)
-
-    def test_reap_releases_stale_claims_and_leads_and_keeps_the_reservation(self) -> None:
-        self.assertIn("nothing stale", self.team.ok("reap", "--now", self.later(hours=1)).stdout)
-        report = json.loads(self.team.ok("reap", "--now", self.later(hours=3), "--json").stdout)
-        self.assertEqual(sorted((r["id"], r["hold"]) for r in report["released"]), [("TASK-1", "claim"), ("TASK-2", "claim"), ("TASK-3", "lead")])
-        first = self.team.task("TASK-1")
-        self.assertEqual((first.status, first.assignees), ("To Do", ("@kyle",)))
-        self.assertEqual(self.team.task("TASK-2").assignees, ())
-        self.assertEqual(self.team.task("TASK-3").lead, "")
-        self.assertIn("Released by asdlc reap: the claim held by @kyle.w1 had no board update for", self.team.text("TASK-1"))
-        self.assertIn("It stays reserved for @kyle", self.team.text("TASK-1"))
-
-    def test_the_timeout_comes_from_the_flag_or_the_boards_asdlc_toml(self) -> None:
-        report = json.loads(self.team.ok("reap", "--older-than", "30m", "--now", self.later(hours=1), "--json").stdout)
-        self.assertEqual(len(report["released"]), 3)
-        team = Team(self, [_sized("Open", "size-2", "--project", "acme-web")], files={"asdlc.toml": 'stale_after = "4h"\n'})
-        team.ok("claim", "1", "--as", "kyle.w1")
-        self.assertIn("nothing stale (stale_after 4h 0m)", team.ok("reap", "--now", self.later(hours=3)).stdout)
-
-
-@needs_backlog
 class AcceptTest(unittest.TestCase):
     def test_accepts_an_intent_and_its_draft_children_in_one_commit(self) -> None:
         team = Team(self, [_sized("Already here", "size-1", "--project", "acme-api"), ["Big thing", "--draft", "--type", "intent", "--ac", "It works"]])
-        team.ok("lead", "DRAFT-1", "--as", "kyle.lead")
         team.ok("board", "task", "create", "Api part", "--draft", "-p", "DRAFT-1", "--project", "acme-api", "-l", "size-2")
         team.ok("board", "task", "create", "Web part", "--draft", "-p", "DRAFT-1", "--project", "acme-web", "-l", "size-1", "--dep", "DRAFT-2", "-a", "@kyle")
         before = int(_git(team.boards.origin, "rev-list", "--count", "main"))
@@ -1879,11 +1752,10 @@ class AcceptTest(unittest.TestCase):
         self.assertEqual(report["accepted"], {"DRAFT-1": "TASK-2", "DRAFT-2": "TASK-2.1", "DRAFT-3": "TASK-2.2"})
         on_origin = team.boards.on_origin()
         intent, api, web = on_origin["TASK-2"][0], on_origin["TASK-2.1"][0], on_origin["TASK-2.2"][0]
-        self.assertEqual((intent.status, intent.type, intent.lead), ("To Do", "intent", "kyle.lead"))
+        self.assertEqual((intent.status, intent.type), ("To Do", "intent"))
         self.assertEqual((api.parent, api.project, web.parent, web.dependencies, web.assignees), ("TASK-2", "acme-api", "TASK-2", ("TASK-2.1",), ("@kyle",)))
         fresh = team.boards.clone("after")
         self.assertEqual(list((fresh / "backlog" / "drafts").glob("*.md")), [])
-        self.assertEqual(json.loads(team.ok("lead-of", "TASK-2.2", "--json").stdout)["lead"], "kyle.lead")
         later = team.ok("board", "task", "create", "Docs part", "--draft", "-p", "TASK-2", "--project", "acme-api", "-l", "size-1")
         self.assertIn("DRAFT-1", later.stdout)
         self.assertEqual(json.loads(team.ok("accept", "TASK-2", "--json").stdout)["accepted"], {"DRAFT-1": "TASK-2.3"})
@@ -1902,13 +1774,12 @@ class MineAndRecordCheckTest(unittest.TestCase):
             ["Big thing", "--type", "intent"],
         ])
         self.team.ok("claim", "1", "--as", "kyle.w1")
-        self.team.ok("lead", "3", "--as", "kyle.lead")
 
     def test_mine(self) -> None:
         report = json.loads(self.team.ok("mine", "--as", "kyle", "--json").stdout)
         self.assertEqual((report["active"], report["workers_cap"]), (1, 3))
         self.assertEqual([(t["id"], t["workers"]) for t in report["tasks"]], [("TASK-1", ["kyle.w1"])])
-        self.assertEqual([(t["id"], t["lead"]) for t in report["leads"]], [("TASK-3", "kyle.lead")])
+        self.assertNotIn("leads", report)
         self.assertEqual([t["id"] for t in report["reserved"]], ["TASK-2"])
         self.assertIn("1 of 3 workers busy", self.team.ok("mine", "--as", "kyle").stdout)
 
@@ -1928,7 +1799,7 @@ class MineAndRecordCheckTest(unittest.TestCase):
 
 @needs_backlog
 class ReviewCommandTest(unittest.TestCase):
-    """Review claims, the same-machine fallback, verdicts and reaping, against real repositories."""
+    """Review claims, the same-machine fallback and verdicts, against real repositories."""
 
     def setUp(self) -> None:
         self.team = Team(self, [_sized("Rate limit", "size-2", "--project", "acme-api"), _sized("Second", "size-2", "--project", "acme-api")])
@@ -2018,7 +1889,6 @@ class ReviewCommandTest(unittest.TestCase):
         self.assertIn("Findings: 1 Important, 2 nit. Cites: testing, Bugs. The diff does not match the plan.", text)
         mine = json.loads(self.team.ok("mine", "--as", "ann", "--json", engineer="ann").stdout)
         self.assertEqual([r["id"] for r in mine["changes_requested"]], ["TASK-1"])
-        self.team.ok("heartbeat", "TASK-1", "--as", "ann.w1", engineer="ann")
         self.team.ok("finish", "TASK-1", "--as", "ann.w1", "--notes", "Fixed: failures only are counted.", engineer="ann")
         self.assertEqual(self.review("kyle.r1")["task"], "TASK-1")
         clean = self.team.ok("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "clean", "--findings", "important=0,nit=0",
@@ -2058,16 +1928,16 @@ class ReviewCommandTest(unittest.TestCase):
         unclaimed = self.team.run("review-done", "TASK-2", "--as", "kyle.r1", "--verdict", "clean", *CLEAN, "--notes", "ok")
         self.assertIn("nobody holds its review", unclaimed.stderr)
 
-    def test_reap_releases_a_stale_review_claim(self) -> None:
+    def test_a_reviewer_gives_up_its_review_claim_and_nobody_else_can(self) -> None:
         self.submit("TASK-1")
         self.review("kyle.r1")
-        self.team.ok("heartbeat", "TASK-1", "--as", "kyle.r1")
-        self.assertIn("nothing stale", self.team.ok("reap", "--now", self.later(hours=1)).stdout)
-        report = json.loads(self.team.ok("reap", "--now", self.later(hours=3), "--json").stdout)
-        self.assertEqual([(r["id"], r["hold"], r["holders"]) for r in report["released"]], [("TASK-1", "review", ["kyle.r1"])])
+        refused = self.team.run("release", "TASK-1", "--as", "lee.r1", engineer="lee")
+        self.assertEqual(refused.returncode, 1)
+        self.assertEqual(self.team.task("TASK-1").reviewer, "kyle.r1")
+        self.team.ok("release", "TASK-1", "--as", "kyle.r1")
         released = self.team.task("TASK-1")
         self.assertEqual((released.status, released.assignees, released.reviewer, released.review_kind), ("In Review", ("@ann.w1",), "", ""))
-        self.assertIn("Released by asdlc reap: the review claim held by @kyle.r1", self.team.text("TASK-1"))
+        self.assertIn("@kyle.r1 released its review claim", self.team.text("TASK-1"))
         self.assertEqual(self.review("lee.r1")["task"], "TASK-1")
 
     def test_an_engineer_who_does_not_review_takes_none(self) -> None:
@@ -2119,6 +1989,17 @@ class RouteCommandTest(unittest.TestCase):
         self.assertIn("split it before it starts", refused.stderr)
 
 
+@needs_backlog
+class DraftParentCommandTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.team = Team(self, [["Big thing", "--draft", "--type", "intent"]])
+
+    def test_the_board_refuses_a_draft_parent_that_isnt_a_draft(self) -> None:
+        done = self.team.run("board", "task", "create", "Child", "--draft", "-p", "DRAFT-7")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("DRAFT-7 is not a draft on the board", done.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -2128,19 +2009,15 @@ if __name__ == "__main__":
 # "Fixes from the independent review") against real repositories.
 
 
-def _later(**delta: float) -> str:
-    return (datetime.now(UTC) + timedelta(**delta)).isoformat()
-
-
 @needs_backlog
-class ReapedWorkerTest(unittest.TestCase):
-    """B1: a reaped worker can't finish, or record checks on, a task someone else now holds."""
+class ReleasedWorkerTest(unittest.TestCase):
+    """B1: a worker that let go of a task can't finish, or record checks on, a task someone else now holds."""
 
     def setUp(self) -> None:
         self.team = Team(self, [_sized("Add login", "size-1", "--project", "acme-api")])
         self.team.ok("claim", "1", "--as", "kyle.w1")
         self.worktree = self.team.boards.root / "api.worktrees" / "task-1"
-        self.team.ok("reap", "--now", _later(hours=3))
+        self.team.ok("release", "1", "--as", "kyle.w1")
         self.team.ok("claim", "1", "--as", "ann.w1", engineer="ann")
 
     def test_finish_refuses_a_worker_that_no_longer_holds_the_task(self) -> None:
@@ -2170,7 +2047,7 @@ class ReapedWorkerTest(unittest.TestCase):
 
 @needs_backlog
 class ResumedBranchTest(unittest.TestCase):
-    """B2: a reaped changes-requested task is resumed from its pushed branch, never rebuilt from main."""
+    """B2: a released changes-requested task is resumed from its pushed branch, never rebuilt from main."""
 
     def test_the_branch_is_recorded_at_claim_and_a_reclaim_resumes_it_from_origin(self) -> None:
         team = Team(self, [_sized("Add login", "size-1", "--project", "acme-api")])
@@ -2185,11 +2062,10 @@ class ResumedBranchTest(unittest.TestCase):
         team.ok("finish", "1", "--as", "kyle.w1", "--notes", "built")
         team.ok("review-next", "--as", "ann.r1", engineer="ann")
         team.ok("review-done", "1", "--as", "ann.r1", "--verdict", "changes", *CHANGES, "--notes", "[Bugs, Important] fix x", engineer="ann")
-        team.ok("reap", "--now", _later(hours=3), engineer="ann")
-        reaped = team.task("TASK-1")
-        self.assertEqual((reaped.status, reaped.assignees, reaped.branch), ("To Do", ("@kyle",), branch))
-        self.assertIn("changes-requested", reaped.labels)
-        self.assertIn("It stays reserved for @kyle", team.text("TASK-1"))
+        team.ok("release", "1", "--as", "kyle.w1")
+        released = team.task("TASK-1")
+        self.assertEqual((released.status, released.assignees, released.branch), ("To Do", ("@kyle",), branch))
+        self.assertIn("changes-requested", released.labels)
         refused = team.run("claim", "1", "--as", "ann.w1", engineer="ann")
         self.assertEqual(refused.returncode, 1)
         self.assertIn("reserved for @kyle", refused.stderr)
@@ -2328,24 +2204,6 @@ class InterruptedCommandTest(unittest.TestCase):
                         pass
             finally:
                 asdlc.LOCK_WAIT_SECONDS = waited
-
-
-@needs_backlog
-class HeartbeatLivenessTest(unittest.TestCase):
-    """I6: a claim is its first heartbeat, and a heartbeat on a task that has left In Progress is a quiet no-op."""
-
-    def test_heartbeats_follow_the_task(self) -> None:
-        team = Team(self, [_sized("Small", "size-1", "--project", "acme-api")])
-        team.ok("claim", "1", "--as", "kyle.w1")
-        self.assertTrue(team.task("TASK-1").heartbeat, "the claim is the first heartbeat")
-        team.ok("finish", "1", "--as", "kyle.w1", "--notes", "built")
-        done = team.ok("heartbeat", "1", "--as", "kyle.w1")
-        self.assertIn("TASK-1 is In Review", done.stdout)
-        self.assertIn("stop heartbeating it", done.stdout)
-        self.assertEqual(_git(team.boards.origin, "log", "-1", "--format=%s", "main"), "Finish TASK-1: @kyle.w1, In Review")
-        refused = team.run("heartbeat", "1", "--as", "kyle.w2")
-        self.assertEqual(refused.returncode, 1)
-        self.assertIn("holds nothing to keep alive", refused.stderr)
 
 
 @needs_backlog
@@ -2562,53 +2420,22 @@ class AcceptSubtreeTest(unittest.TestCase):
 
 
 @needs_backlog
-class GrandchildLeadTest(unittest.TestCase):
-    """Second review, Important 2: lead-of on a grandchild names the intent's lead, so the orchestrator never tries to lead a task."""
-
-    def test_lead_of_a_grandchild(self) -> None:
-        team = Team(self, [])
-        team.ok("board", "task", "create", "Checkout", "--draft", "--type", "intent")
-        team.ok("lead", "DRAFT-1", "--as", "kyle.lead")
-        team.ok("board", "task", "create", "API part", "--draft", "-p", "DRAFT-1", "--project", "acme-api", "-l", "size-8")
-        team.ok("board", "task", "create", "API sub", "--draft", "-p", "DRAFT-2", "--project", "acme-api", "-l", "size-2")
-        team.ok("accept", "DRAFT-1")
-        self.assertEqual(json.loads(team.ok("lead-of", "TASK-1.1.1", "--json").stdout), {"task": "TASK-1.1.1", "intent": "TASK-1", "lead": "kyle.lead"})
-        other = team.run("lead", "DRAFT-1", "--as", "ann.lead", engineer="ann")
-        self.assertEqual(other.returncode, 1)
-        self.assertIn("DRAFT-1 was accepted as TASK-1", other.stderr)
-        team.ok("board", "task", "create", "Later sub", "--draft", "-p", "TASK-1.1", "--project", "acme-api", "-l", "size-1")
-        again = json.loads(team.ok("accept", "TASK-1", "--json").stdout)
-        self.assertEqual(list(again["accepted"].values()), ["TASK-1.1.2"], "a draft under an accepted child is part of the intent's work too")
-
-
-@needs_backlog
 class AcceptedIdsTest(unittest.TestCase):
     """I4: after accept, a lead's old draft id still finds its task, and never an unrelated draft that reuses the id."""
 
     def test_old_draft_ids_resolve_to_the_accepted_task(self) -> None:
         team = Team(self, [])
         team.ok("board", "task", "create", "Intent A", "--draft", "--type", "intent")
-        team.ok("lead", "DRAFT-1", "--as", "kyle.lead")
         team.ok("board", "task", "create", "A1", "--draft", "-p", "DRAFT-1", "--project", "acme-api", "-l", "size-2")
         team.ok("accept", "DRAFT-1")
         self.assertIn("DRAFT-1 -> TASK-1", team.text("TASK-1"))
         self.assertIn("DRAFT-2 -> TASK-1.1", team.text("TASK-1"))
+        team.ok("claim", "TASK-1.1", "--as", "kyle.w1")
         team.ok("board", "task", "create", "Intent B", "--draft", "--type", "intent")
-        beat = team.ok("heartbeat", "DRAFT-1", "--as", "kyle.lead")
-        self.assertIn("DRAFT-1 was accepted as TASK-1", beat.stdout)
-        self.assertTrue(team.task("TASK-1").heartbeat)
-        self.assertEqual(_git(team.boards.origin, "log", "-1", "--format=%s", "main"), "Heartbeat TASK-1 from @kyle.lead")
-        stale = team.run("lead", "DRAFT-1", "--as", "kyle.lead")
-        self.assertEqual(stale.returncode, 1)
-        self.assertIn("DRAFT-1 was accepted as TASK-1", stale.stderr)
-        self.assertIn("Intent B", stale.stderr)
-        self.assertEqual(asdlc.task_from("x", team.text("DRAFT-1")).lead, "")
-        self.assertEqual(json.loads(team.ok("lead-of", "DRAFT-2", "--json").stdout), {"task": "TASK-1.1", "intent": "TASK-1", "lead": "kyle.lead"})
-        mine = json.loads(team.ok("mine", "--as", "kyle", "--json").stdout)
-        self.assertEqual([(r["id"], r["accepted_from"]) for r in mine["leads"]], [("TASK-1", "DRAFT-1")])
-        new = json.loads(team.ok("lead", "DRAFT-1", "--as", "kyle.lead", "--new", "--json").stdout)
-        self.assertEqual((new["intent"], new["mine"]), ("DRAFT-1", True))
-        self.assertEqual(asdlc.task_from("x", team.text("DRAFT-1")).title, "Intent B")
+        team.ok("board", "task", "create", "B1", "--draft", "-p", "DRAFT-1", "--project", "acme-api", "-l", "size-2")
+        team.ok("release", "DRAFT-2", "--as", "kyle.w1")
+        self.assertEqual(team.task("TASK-1.1").status, "To Do")
+        self.assertEqual(asdlc.task_from("x", team.text("DRAFT-2")).title, "B1")
 
 
 @needs_backlog
@@ -2746,48 +2573,6 @@ class ApprovedPlanTest(unittest.TestCase):
         self.assertIn("changed since it was shown", stale.stderr)
         self.assertEqual(team.task("TASK-2").plan_approved_by, "")
         team.ok("approve", "2", "--plan-hash", asdlc.plan_digest("1. a plan rewritten meanwhile"))
-
-
-@needs_backlog
-class ApprovalWaitTest(unittest.TestCase):
-    """Second review, Minor 2: a claim waiting for its plan's approval isn't reaped at stale_after."""
-
-    def test_waiting_for_approval_has_its_own_timeout(self) -> None:
-        team = Team(self, [_sized("Big", "size-3", "--project", "acme-api")])
-        team.ok("claim", "1", "--as", "ann.w2", engineer="ann")
-        team.ok("board", "task", "edit", "1", "--plan", "1. plan", engineer="ann")
-        self.assertIn("nothing stale", team.ok("reap", "--now", _later(hours=3)).stdout)
-        self.assertEqual(team.task("TASK-1").assignees, ("@ann.w2",))
-        report = json.loads(team.ok("reap", "--now", _later(hours=25), "--json").stdout)
-        self.assertEqual([(r["id"], r["hold"]) for r in report["released"]], [("TASK-1", "claim")])
-        late = team.run("approve", "1", engineer="ann")
-        self.assertEqual(late.returncode, 1)
-        self.assertIn("no longer held by a worker", late.stderr)
-
-    def test_the_setting(self) -> None:
-        self.assertEqual(asdlc.parse_settings('approval_wait = "12h"\n').approval_wait, timedelta(hours=12))
-        self.assertEqual(asdlc.Settings().approval_wait, timedelta(hours=24))
-
-
-@needs_backlog
-class ReservationExpiryTest(unittest.TestCase):
-    """Second review, Minor 4: a sent-back task's reservation for its author lasts one more stale_after, not forever."""
-
-    def test_the_reservation_expires(self) -> None:
-        team = Team(self, [_sized("Small", "size-1", "--project", "acme-api")])
-        team.ok("claim", "1", "--as", "kyle.w1")
-        team.ok("finish", "1", "--as", "kyle.w1", "--notes", "built")
-        team.ok("review-next", "--as", "ann.r1", engineer="ann")
-        team.ok("review-done", "1", "--as", "ann.r1", "--verdict", "changes", *CHANGES, "--notes", "[Bugs, Important] x", engineer="ann")
-        team.ok("reap", "--now", _later(hours=3), engineer="ann")
-        self.assertEqual(team.task("TASK-1").assignees, ("@kyle",))
-        self.assertIn("nothing stale", team.ok("reap", "--now", _later(hours=1), engineer="ann").stdout)
-        report = json.loads(team.ok("reap", "--now", _later(hours=3), "--json", engineer="ann").stdout)
-        self.assertEqual([(r["id"], r["hold"]) for r in report["released"]], [("TASK-1", "reservation")])
-        expired = team.task("TASK-1")
-        self.assertEqual((expired.status, expired.assignees), ("To Do", ()))
-        self.assertIn("reservation for @kyle expired", team.text("TASK-1"))
-        self.assertEqual(json.loads(team.ok("claim", "1", "--as", "ann.w1", "--json", engineer="ann").stdout)["branch"], "task-1-small")
 
 
 class OldBoardPolicyTest(unittest.TestCase):
