@@ -53,6 +53,28 @@ The playbook runs the suite in CI. Here it runs on the owner's machine, through 
 - **The later step is small:** a workflow, `.github/workflows/agent-evals.yml`, that checks out with full history, installs the pinned Claude Code and Backlog.md, runs the same `gate` on pull requests that touch the configuration paths and on a schedule, uploads the report, and is not a required check until it has been green for a while. It needs the secret and a budget, and it is its own pull request.
 - **Running it on a schedule locally** is the owner's cron or scheduled task calling `scripts/eval gate --all`. Nothing ships for that.
 
+## Enforcement: hooks check for evidence, they never run the suite
+
+Local hooks are guardrails, not gates: a person can `git push --no-verify`, and a plugin's hooks can be uninstalled. With one owner-developer the adversary worth designing against is the agent routing around a gate, or the owner forgetting; a required check on a protected branch is what stops a person, and that is a setting on the repository, not code. An independent review of this section (Fable, 2026-10-28) shaped it. A real run costs tokens and minutes, so hooks only ask whether passing evidence exists.
+
+**The evidence.** `eval gate` writes a report at a fixed path with a fixed schema: the tree hash of each steering path (`CLAUDE.md`, `skills/`, `hooks/`, `agents/`, `commands/`, with uncommitted changes counted, as `export_plugin` already does), the tree hash of `evals/`, the model, the Claude Code version, the plugin version, the verdict, and a digest of every trial's transcript. `gate verify` is a pure function over a report and the current tree that answers pass, fail, missing or stale, with the reason. Every enforcement point calls `verify` and nothing reads a report directly, so CI later calls the same function. One module holds the steering-path list, as `scripts/protected_paths.py` holds the suite's.
+
+**What is built, in this order** (all agent-side, all reusing `hooks/guard_board.py`, `hooks/decision_log.py` for R26 and the `hooks.json` wrapper that says when uv is missing):
+
+1. `gate verify` and the report schema.
+2. Deny agent writes under `.eval-results/` and `.asdlc/`, by Edit and Write and by the shell-write patterns `guard_test_edits.py` already reads. Only `scripts/eval` writes evidence. This is the anti-forgery measure that matters; signing the reports would be theatre, since the signer runs as the same user as the agent.
+3. `PreToolUse` on Bash: deny `git push` when steering paths changed since the base and `verify` is not a pass, and deny `--no-verify` on a commit or push. The denial names the reason and the command that makes evidence. The agent does not run the gate itself: it stops and asks, because a real run spends tokens and a person decides. `guard_board.py` already refuses `-c core.hooksPath`, `--config-env`, `GIT_CONFIG_*` and `git config` writes. The test that asserts `git push --no-verify` is allowed on the board changes deliberately, and `asdlc`'s own in-process `--no-verify` board commits are unaffected.
+4. `PreToolUse` on Edit and Write for R23: `protected_paths.violation()` over the branch's changed paths plus the target. A shell rewrite gets past it; `protected-paths.yml` catches that on the pull request.
+5. `SessionStart`: one line from `verify` saying whether the gate evidence is fresh.
+
+**Later, not now:** a `SubagentStop` check that a worker's "passes" claim is backed by a recorded `asdlc record-check`; a `Stop` hook running `artefacts.py` when `intent/`, `spec/` or `plan/` changed; `allowManagedHooksOnly` in the managed-settings template (R17), after checking whether it suppresses plugin-delivered hooks; `.githooks/` with an installer, when a second person arrives.
+
+**Not built:** a `PostToolUse` hook that nags when an edited file is not in the plan's file table (a parser over prose that would be noisy; the review's plan-compliance pass and `reviewer-checks-against-plan` cover it) and any signing of reports.
+
+**For the owner to turn on, free:** a GitHub ruleset on `main` requiring a pull request and the `ci` and `protected paths` checks, with no force pushes and an empty bypass list. Approving reviews are not worth requiring from a sole owner. This closes the gap `plan/v0-bootstrap.md` and `intent/gate-roles.md` left open, and it is the only thing that makes a human's `--no-verify` cost anything.
+
+**CI later is one job.** `agent-evals.yml` runs the same `gate` and uploads the report, and `verify` becomes a second job reading the artifact, with the `pull_request_target` shape `protected-paths.yml` already uses so a pull request cannot weaken the check that judges it. Nothing above is thrown away.
+
 ## Three changes, in this order
 
 R23 forbids one pull request from changing the plugin and the eval suite. `scripts/eval` is the plugin's side and `evals/` and `spec/*-evals.md` are the suite's, so this takes three.
@@ -69,7 +91,10 @@ R23 forbids one pull request from changing the plugin and the eval suite. `scrip
 | `scripts/eval` (gate) | no | Change 1. `eval gate --base <ref>`: lists what changed since `<ref>`, and if any of it is configuration that steers the agent (`CLAUDE.md`, `skills/`, `hooks/`, `agents/`, `commands/`) runs the regression suite and compares it with a stored baseline; `--all` runs every case. Exits non-zero when the rule below fails, and says which case, which check and why. Choosing what to run and judging the result are functions over data; reading git and running sessions stay in the shell around them | R14, R22 |
 | `tests/test_eval.py` | no | Change 1. The judge on recorded verdicts, `unknown` handling, agreement arithmetic, and the two flags on fixed trial data | R28 |
 | `tests/test_eval.py` (gate) | no | Change 1. Which paths select which suites; the pass rule on stored reports (every regression trial passes, capability no worse beyond the standard error); the message a failure gives; a missing baseline refused with the command that makes one | R14, R22 |
-| `scripts/check` | no | Change 1. Prints one reminder line, and never fails, when the diff touches configuration the agent reads and no gate report exists for this commit | R14 |
+| `scripts/gate_evidence.py` | yes | Change 1. The steering-path list, the report schema, `tree_hashes`, and `verify`, as functions over data. Imported by `scripts/eval`, the hooks and `scripts/check` | R14, R22, R23 |
+| `hooks/guard_gate.py`, `hooks/hooks.json` | yes, no | Change 1. The `PreToolUse` guard (writes to evidence paths, push without evidence, `--no-verify`, R23 edits) and the `SessionStart` line, each logged through `decision_log.py` | R16, R22, R23, R26 |
+| `tests/test_gate_evidence.py`, `tests/test_guard_gate.py`, `tests/test_guard_board.py` | yes, yes, no | Change 1. `verify` on every outcome; each denial and the allows beside it; the `--no-verify` assertion flipped | R16, R22 |
+| `scripts/check` | no | Change 1. Prints one reminder line, and never fails, when `verify` says the evidence for the current steering paths is missing or stale | R14 |
 | `docs/guide.md` | no | Change 1. "Running evals" gains judging, calibrating and the flags | - |
 | `evals/cases/reaped-worker-stops/` | removed | Change 2. Guarded a reaped claim, which stops existing | R24 |
 | `evals/cases/grandchild-follows-lead/` | removed | Change 2. Guarded the lead's contract reaching a grandchild | R24 |
@@ -112,7 +137,7 @@ That makes 28 cases with the seven kept: `approval-before-build`, `sent-back-res
 
 ## Order of work
 
-1. Change 1, runner: the judge kind and its tests first, on recorded verdicts with no model call; then `calibrate`; then the two `report` flags; the guide.
+1. Change 1, runner, in slices each with its tests and a passing `./scripts/check`: `gate_evidence.py` and `verify`; the write-deny and push guards; the R23 edit guard and the `SessionStart` line; `eval gate` itself, writing the report; the `scripts/check` reminder; then the judge kind on recorded verdicts with no model call, `calibrate`, the two `report` flags and the guide.
 2. Run the existing nine cases once, three trials each, as a baseline before anything changes, and keep the report: it is the "before" the later changes are measured against.
 3. Change 2, suite: retire the two cases and fix the fixtures, `validate` clean. Then each new case alone: fixture, reference run, null run, checks, `validate`; one real run with three trials; read its transcripts; write what they showed in the pull request; fix the case or the check, never the plugin to pass it.
 4. The owner labels the calibration samples for the judged dimensions (the one step only a person can do); run `calibrate`; the judge stays advisory until its agreement meets the bar the owner writes in the calibration file.
