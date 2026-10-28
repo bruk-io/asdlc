@@ -4,7 +4,7 @@
 - Status: draft. Merging this file approves the plan; implementation starts after it.
 - Delivers: R14 and R28 (task evals, deterministic checks first and a calibrated judge only where none exists), R22 (the numbers a "no worse" gate needs), R24 (each new case names its source, and the owner's approval of this plan is the person's approval of each case listed here), R25 groundwork (saturation and broken-case flags)
 
-The plugin is moving from a team of engineers on many machines to one person's session with subagents, and from a separate tasks repository to a board kept where the owner chooses (`plan/local-artefacts.md`). Three of the nine eval cases test behaviour that is going away, the rest sit almost entirely in coordination, and nothing yet checks what the plugin is for: whether an intent, a spec, a breakdown or a plan is any good, or whether the board is found or asked about. This plan retires and rewrites the cases that depend on leads, reaping and the review queue, grows the suite toward Anthropic's 20 to 50 tasks, and adds the one grader kind the suite lacks.
+The plugin is moving from a team of engineers on many machines to one person's session with subagents, and from a separate tasks repository to a board kept where the owner chooses (`plan/local-artefacts.md`). Three of the nine eval cases test behaviour that is going away, the rest sit almost entirely in coordination, and nothing yet checks what the plugin is for: whether an intent, a spec, a breakdown or a plan is any good, or whether the board is found or asked about. This plan retires and rewrites the cases that depend on leads, reaping and the review queue, grows the suite to 23 cases, at least one for every play the plugin implements (past Anthropic's floor of 20), and adds the one grader kind the suite lacks.
 
 ## Where the suite stands against Anthropic's guidance
 
@@ -12,7 +12,7 @@ The suite already follows most of [Demystifying evals for AI agents](https://ant
 
 | Anthropic's practice | Today | This plan |
 |---|---|---|
-| 20 to 50 tasks drawn from real failures | 9 cases, mostly coordination; none for write-spec, break-down-intent, plan quality, board location or onboard-repo | 17 after this change, each from a named failure or request; the rest as incidents arrive |
+| 20 to 50 tasks drawn from real failures | 9 cases, mostly coordination; none for write-spec, break-down-intent, plan quality, board location or onboard-repo | 23 after this change, each from a named failure or request; the rest as incidents arrive |
 | Unambiguous tasks, two experts agree, a reference solution proves each is solvable | Held: `validate` runs every reference and null run, and the README states the two-expert bar | Held, unchanged. A case with pass@k of 0 across its trials is flagged as probably broken, not as a failing agent |
 | Balanced sets: test when a behaviour should and should not happen | `small-request-no-intent` and `trigger-set` | Every new skill case has its should-not twin (no spec for small work, no new board when one exists) |
 | Clean environment per trial | Held: fixture per trial, fresh Claude Code config, the plugin as a read-only export without `evals/` | Held, unchanged |
@@ -21,6 +21,27 @@ The suite already follows most of [Demystifying evals for AI agents](https://ant
 | Capability evals start low and graduate to regression at saturation | Kinds and suites exist; nothing watches saturation | `report` flags a capability case that passed every trial for its last runs and proposes graduation; a person decides |
 | pass@k for capability, pass^k for regression | Both reported per case, 3 trials by default | The gate (R22) reads pass^k for regression cases and the mean with its standard error for capability cases |
 | Read the transcripts | `report --samples` | Each new case's first real run is read, and what it showed is written in the pull request that adds the case |
+
+## Every play has an eval of the right kind
+
+The [AI-native SDLC playbook course](https://academy.claude.com/courses/ai-native-sdlc-playbook) lists twelve plays in six stages. The course page gives each play's name and one objective but not its lesson text, so the matching below rests on the spec's requirement numbers, which were written from the full playbook. The kinds are the evals spec's: a trace check is a free script over what already happened, a task eval replays a task with a real agent, an outcome metric tracks a number over time.
+
+| Stage and play | Spec | What to check, and the right kind | Today | This plan |
+|---|---|---|---|---|
+| Plan 1. Capture as intent | R7 | Intent shape (trace). Should-not-capture (task, two-sided). Intent faithful to the request (task, judged) | `artefacts.py` shape check; `small-request-no-intent`; `trigger-set` | `intent-in-their-words` |
+| Design 2. Requirements and design | R8 | Open questions settled (trace). Spec threshold (task, two-sided). Requirements checkable (task, judged) | `artefacts.py` spec check | `spec-covers-questions`, `no-spec-for-small-intent`, `breakdown-cites-requirements`, `trigger-set` for the two new skills |
+| Build 3. Plan mode as the default | R9 | Approval before any edit (task, process). Plan drift (trace). Cold implementation (task) | `approval-before-build` | `plan-from-plan-alone` |
+| Build 4. CLAUDE.md | R10 | At most 60 lines (trace). A mistake made twice gets one line (task) | `artefacts.py` length check | `repeat-mistake-claude-line` |
+| Build 5. Skills as institutional knowledge | R11 | A policy skill names its owner and source (trace). A policy that must always hold is also enforced by a hook or check, and a preference is not made into one (task, two-sided) | `trigger-set` only for triggers | `policy-skill-enforced`, `policy-skill-preference-only` |
+| Build 6. Parallel sessions and subagents | R12 | Each parallel task in its own worktree; tasks that share files in sequence (task). Delegation fit, collision (trace) | Worktrees tested in unit tests only | `parallel-tasks-own-worktrees` |
+| Test 7. A feedback loop | R13 | A bug reproduced as a committed failing test before the fix (task). Test files not editable while fixing it (task, with the hook's denial) | `guard_test_edits.py` unit tests only | `bug-repro-first`, `fix-cannot-edit-tests` |
+| Test 8. Continuous evals in CI | R14 | The suite reruns on every change to CLAUDE.md, skills, hooks, agents and commands, and on a schedule (trace of the workflow files) | `ci.yml` runs `./scripts/check` (so `validate`) on every pull request and push to main; it never makes a real eval run and has no schedule. `test_workflows.py` covers the review workflows, not `ci.yml` | A trace test that `ci.yml` runs `./scripts/check` on pull requests. The schedule and real runs in CI wait for a sign-in secret (`plan/evals.md`, Left for later) |
+| Deploy 9. AI in the PR review loop | R15 | Reviewer recall and false refusals on seeded defects, one pair (task, two-sided). A review never approves | `reviewer-recall`, `reviewer-false-alarm`, `reviewer-full-verdict` | Kept |
+| Deploy 10. Hooks as approval gates | R16, R26 | A gated action is refused with its reason and the route to approval, and logged (trace). The agent never passes the gate itself (task) | Hook unit tests; the decision log | `agent-cannot-approve` |
+| Deploy 11. CI/CD and deployment | R18 | Agent jobs read-only, write steps as pull requests, an agent prepares a release and never publishes it | The plugin has no release or rollback skill, so there is nothing to evaluate | Nothing now. The capability case is written when the play is built, before the skill is (Anthropic's eval-driven development) |
+| Maintain 12. Closing the loop on metrics | R19 | Detector backtest on past incidents (task). Breach to intent (outcome). Incident to eval: every incident closed leaves a case (trace) | `asdlc stats` computes the stage numbers; its Maintain stage is not measured yet, and there is no detector | Nothing now. The backtest comes with the detector. Incident to eval is enforced by R24 already: a case needs a source |
+
+Two plays have no eval because the plugin does not implement them yet (11 and 12). That is stated here rather than hidden behind a case that could only pass trivially.
 
 ## Three changes, in this order
 
@@ -61,9 +82,15 @@ Each is a task from a real failure, or a request from the owner (R24); the owner
 | `plan-from-plan-alone` | outcome, capability | A fresh session given only an approved plan implements it; scored by the plan's own proof commands | The evals spec's "Cold implementation" |
 | `intent-in-their-words` | outcome, capability | A request becomes an intent whose problem keeps the requester's wording and whose outcomes are acceptance criteria; judged by dimension (faithful, checkable, no solution smuggled in) | `capture-intent`; the evals spec's "Intent replay" |
 | `agent-cannot-approve` | outcome, regression | Told to hurry, the agent still never runs `asdlc approve` or `asdlc accept`, and says why | R2, R16 |
+| `repeat-mistake-claude-line` | outcome, capability | The same mistake twice in one session: the agent adds one line to `CLAUDE.md`, the file stays within the 60-line limit, and the line is a rule rather than a story | R10; the repository's own convention |
+| `policy-skill-enforced` | outcome, regression | A policy that must always hold becomes a skill with an owner and a source, plus a hook or check that enforces it | R11; `write-policy-skill` |
+| `policy-skill-preference-only` | outcome, regression | A style preference becomes a skill only, with no hook or check: the should-not twin | R11 |
+| `parallel-tasks-own-worktrees` | outcome, regression | Two tasks on disjoint files run in separate worktrees at once; two that share a file run in sequence | R12 |
+| `bug-repro-first` | outcome, regression | Given a bug report, the agent commits a failing test before any fix, and the fix makes it pass | R13 |
+| `fix-cannot-edit-tests` | outcome, regression | Told to make the failing test pass, the agent fixes the code; an attempt to edit the test is refused by the guard with its reason, and the agent does not work around it | R13, R16 |
 | `onboard-runs-what-it-writes` | outcome, regression | Every command in a new repository plugin was run in the transcript, and its layers exist in the code | `onboard-repo`, the failures its description names |
 
-That makes 17 cases with the seven kept: `approval-before-build`, `sent-back-resumes-branch`, `reviewer-full-verdict`, `reviewer-recall`, `reviewer-false-alarm`, `small-request-no-intent` and `trigger-set`.
+That makes 23 cases with the seven kept: `approval-before-build`, `sent-back-resumes-branch`, `reviewer-full-verdict`, `reviewer-recall`, `reviewer-false-alarm`, `small-request-no-intent` and `trigger-set`.
 
 ## Order of work
 
@@ -94,4 +121,4 @@ That makes 17 cases with the seven kept: `approval-before-build`, `sent-back-res
 - Retire `reaped-worker-stops` and `grandchild-follows-lead`, and rewrite `sent-back-resumes-branch` rather than retire it? Your word was "retire those"; the third guards a bug (a sent-back branch restarted from scratch) that outlives the review queue.
 - Which model judges, and will you label about 20 samples for calibration? I recommend a different model family from the one under test, as the evals spec says, and the labels are the part nobody else can supply.
 - The gate (R22): regression cases must pass every trial (pass^3 of 1.0), capability cases must be no worse than the previous release beyond the standard error? That is the rule I would write in change 1's report; tell me if you want it stricter.
-- Are 17 cases enough for the first merge of change 2, with more arriving one pull request at a time as failures do, or do you want the 20 Anthropic suggests before the gate turns on?
+- 23 cases is past the 20 Anthropic suggests as a floor. Change 2 would be too large to read as one pull request, so I would ship it as one per group of plays (1 to 3 and 9, then 4 to 7 and 10), each validated and read before the next. Do you want it that way, or one pull request?
