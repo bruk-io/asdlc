@@ -724,6 +724,8 @@ class DoctorTest(unittest.TestCase):
         self.assertIn("must be shorter than stale_after", self.only("fail", facts(settings='stale_after = "30m"\nreview_fallback_after = "30m"\n'))[0].message)
         self.assertIn("not valid TOML", self.only("fail", facts(settings="stale_after = \n"))[0].message)
         self.assertIn("defaults apply", self.only("warn", facts(settings=None))[0].message)
+        self.assertIn('mode is "shared"', self.only("fail", facts(settings='mode = "team"\n'))[0].message)
+        self.assertEqual([f for f in asdlc.diagnose(facts(settings=None, shared=False)) if f.area == "asdlc.toml"], [], "a local board has no asdlc.toml")
 
     def test_registered_repositories(self) -> None:
         board = Path("/home/kyle/tasks")
@@ -1384,6 +1386,13 @@ class BoardModeTest(unittest.TestCase):
     def test_mode_says_which(self) -> None:
         self.assertTrue(asdlc.board_mode('mode = "shared"\n'))
         self.assertFalse(asdlc.board_mode('mode = "local"\n'))
+
+    def test_an_unreadable_settings_file_leaves_the_board_shared_so_doctor_can_report_it(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "asdlc.toml").write_text("review_fallback_after = \n")
+            self.assertTrue(asdlc.open_board(Path(folder)).shared)
+            (Path(folder) / "asdlc.toml").write_text('mode = "team"\n')
+            self.assertTrue(asdlc.open_board(Path(folder)).shared)
 
     def test_any_other_mode_is_refused_with_the_two_words(self) -> None:
         with self.assertRaisesRegex(asdlc.AsdlcError, 'mode is "shared".*or "local"'):
