@@ -1273,7 +1273,11 @@ def board_mode(settings: str | None) -> bool:
 
 def open_board(path: Path) -> Board:
     config = path / "asdlc.toml"
-    return Board(path, frozendict(hooks_off(os.environ)), board_mode(config.read_text() if config.exists() else None))
+    try:
+        shared = board_mode(config.read_text() if config.exists() else None)
+    except AsdlcError:
+        shared = True  # `asdlc doctor` reports the file; until it is fixed the board is shared, as every board with an asdlc.toml was
+    return Board(path, frozendict(hooks_off(os.environ)), shared)
 
 
 def _board_git(board: Board, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -2830,11 +2834,17 @@ def _board_findings(facts: Facts) -> list[Finding]:
 def _settings_findings(facts: Facts) -> list[Finding]:
     if facts.board is None:
         return []
+    if facts.settings is None and not facts.shared:
+        return []  # a local board has no asdlc.toml, which is what makes it local
     if facts.settings is None:
-        return [] if not facts.shared else [Finding("asdlc.toml", Level.WARN, f"the tasks repository has no asdlc.toml, so the defaults apply "
-                                                                          f"({human(DEFAULT_REVIEW_FALLBACK_AFTER)} review fallback): asdlc init-board {facts.board} adds it")]
+        return [Finding("asdlc.toml", Level.WARN, f"the tasks repository has no asdlc.toml, so the defaults apply "
+                                                  f"({human(DEFAULT_REVIEW_FALLBACK_AFTER)} review fallback): asdlc init-board {facts.board} adds it")]
     try:
         settings = parse_settings(facts.settings)
+    except AsdlcError as error:
+        return [Finding("asdlc.toml", Level.FAIL, str(error))]
+    try:
+        board_mode(facts.settings)
     except AsdlcError as error:
         return [Finding("asdlc.toml", Level.FAIL, str(error))]
     return [Finding("asdlc.toml", Level.PASS, f"review_fallback_after {human(settings.review_fallback_after)}")]
