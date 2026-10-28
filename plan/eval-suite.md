@@ -1,0 +1,97 @@
+# Plan: an eval suite for the plugin as it is now, built the way Anthropic builds agent evals
+
+- Spec: [`spec/agentic-sdlc-plugin.md`](../spec/agentic-sdlc-plugin.md), approved 2026-10-20 (#2), with its evals file [`spec/agentic-sdlc-plugin-evals.md`](../spec/agentic-sdlc-plugin-evals.md)
+- Status: draft. Merging this file approves the plan; implementation starts after it.
+- Delivers: R14 and R28 (task evals, deterministic checks first and a calibrated judge only where none exists), R22 (the numbers a "no worse" gate needs), R24 (each new case names its source, and the owner's approval of this plan is the person's approval of each case listed here), R25 groundwork (saturation and broken-case flags)
+
+The plugin is moving from a team of engineers on many machines to one person's session with subagents, and from a separate tasks repository to a board kept where the owner chooses (`plan/local-artefacts.md`). Three of the nine eval cases test behaviour that is going away, the rest sit almost entirely in coordination, and nothing yet checks what the plugin is for: whether an intent, a spec, a breakdown or a plan is any good, or whether the board is found or asked about. This plan retires and rewrites the cases that depend on leads, reaping and the review queue, grows the suite toward Anthropic's 20 to 50 tasks, and adds the one grader kind the suite lacks.
+
+## Where the suite stands against Anthropic's guidance
+
+The suite already follows most of [Demystifying evals for AI agents](https://anthropic.com/engineering/demystifying-evals-for-ai-agents) (Anthropic, January 2026). The gaps are the work.
+
+| Anthropic's practice | Today | This plan |
+|---|---|---|
+| 20 to 50 tasks drawn from real failures | 9 cases, mostly coordination; none for write-spec, break-down-intent, plan quality, board location or onboard-repo | 17 after this change, each from a named failure or request; the rest as incidents arrive |
+| Unambiguous tasks, two experts agree, a reference solution proves each is solvable | Held: `validate` runs every reference and null run, and the README states the two-expert bar | Held, unchanged. A case with pass@k of 0 across its trials is flagged as probably broken, not as a failing agent |
+| Balanced sets: test when a behaviour should and should not happen | `small-request-no-intent` and `trigger-set` | Every new skill case has its should-not twin (no spec for small work, no new board when one exists) |
+| Clean environment per trial | Held: fixture per trial, fresh Claude Code config, the plugin as a read-only export without `evals/` | Held, unchanged |
+| Grade the outcome, not the path; deterministic graders first | Held; process cases only where the order is the point | Held. New cases grade files and board state |
+| Model-based graders for what code can't judge, with an Unknown option, one judge per dimension, calibrated against human labels | None. Left for later in `plan/evals.md` | A rubric judge, advisory until its agreement with the owner's labels meets the bar the owner sets |
+| Capability evals start low and graduate to regression at saturation | Kinds and suites exist; nothing watches saturation | `report` flags a capability case that passed every trial for its last runs and proposes graduation; a person decides |
+| pass@k for capability, pass^k for regression | Both reported per case, 3 trials by default | The gate (R22) reads pass^k for regression cases and the mean with its standard error for capability cases |
+| Read the transcripts | `report --samples` | Each new case's first real run is read, and what it showed is written in the pull request that adds the case |
+
+## Three changes, in this order
+
+R23 forbids one pull request from changing the plugin and the eval suite. `scripts/eval` is the plugin's side and `evals/` and `spec/*-evals.md` are the suite's, so this takes three.
+
+1. **Runner** (plugin side: `scripts/eval`, its tests, `docs/guide.md`). The judge grader, calibration, and the saturation and broken-case flags in `report`. No case changes.
+2. **Suite** (suite side: `evals/`, `spec/agentic-sdlc-plugin-evals.md`). Retire and rewrite cases, add new ones, add the owner's calibration labels. It validates against the plugin as it stands, so the leads, reaping and review commands still exist when it merges.
+3. **Removal** (plugin side). Leads, heartbeats, reaping and the review queue come out of `scripts/asdlc`, the skills, the agents, the guard and the docs, as `plan/local-artefacts.md` deferred. Its own plan, written when the suite has merged.
+
+## Files that change
+
+| File | New | What it holds | Requirements |
+|---|---|---|---|
+| `scripts/eval` | no | Change 1. A `judge` check kind: a rubric, one dimension per judge, an `unknown` answer that counts as neither pass nor fail, a configurable judge model, its verdict and reasoning stored in `trial.json`. `calibrate`: runs the judge over the owner's labelled samples and reports agreement. `report` flags a case with pass@k of 0 (check the case) and a capability case at 100% for its last runs (propose graduation) | R28, R22 |
+| `tests/test_eval.py` | no | Change 1. The judge on recorded verdicts, `unknown` handling, agreement arithmetic, and the two flags on fixed trial data | R28 |
+| `docs/guide.md` | no | Change 1. "Running evals" gains judging, calibrating and the flags | - |
+| `evals/cases/reaped-worker-stops/` | removed | Change 2. Guarded a reaped claim, which stops existing | R24 |
+| `evals/cases/grandchild-follows-lead/` | removed | Change 2. Guarded the lead's contract reaching a grandchild | R24 |
+| `evals/cases/sent-back-resumes-branch/` | no | Change 2. Rewritten, not retired: a branch a review sent back must be resumed, which still holds with the orchestrator launching the reviewer itself. Its fixture stops using `review-next` | R24 |
+| `evals/cases/approval-before-build/`, `evals/cases/trigger-set/`, `evals/fixtures.py` | no | Change 2. Drop `reap` and `review-next` from fixtures and prompts; `trigger-set` gains `write-spec` and `break-down-intent` | R28 |
+| `evals/cases/<new>/` | yes | Change 2. The new cases below | R24, R28 |
+| `evals/calibration/*.toml` | yes | Change 2. The owner's pass, fail and unknown labels for judged dimensions, with the agreement bar | R28 |
+| `spec/agentic-sdlc-plugin-evals.md` | no | Change 2. The "Build order" and the stand-ins reflect one machine; the replay evals name the judge | - |
+| `plan/eval-suite.md` | yes | This plan | - |
+
+### The new cases
+
+Each is a task from a real failure, or a request from the owner (R24); the owner's approval of this plan is that request. Kinds follow the README: regression near 100%, capability a rate with a trend.
+
+| Case | Kind, suite | What it checks | Source |
+|---|---|---|---|
+| `board-asks-where` | outcome, regression | No board anywhere: the agent asks once where the work is kept and does not create a separate tasks repository on its own; after the answer it records one line in `CLAUDE.md` | A first user had to create a new repository for tasks (owner, 2026-10-27) |
+| `board-found-without-asking` | outcome, regression | A `backlog/` folder in the repository: the agent uses it and does not ask | The same; the should-not twin |
+| `local-board-spares-code` | outcome, regression | A local board with unstaged and staged code edits: board commands leave code untouched, nothing is pushed, a refused change leaves no commit | `plan/local-artefacts.md` risks |
+| `spec-covers-questions` | outcome, capability | The spec has numbered requirements, is linked from the intent, and answers or carries forward every open question with a reason (deterministic); judged: each requirement can be answered yes or no | R8; the evals spec's "Open questions settled" |
+| `no-spec-for-small-intent` | outcome, regression | A small intent confined to one area gets no spec | The evals spec's "Spec threshold" |
+| `breakdown-cites-requirements` | outcome, regression | Every child task cites spec requirement numbers, carries one size label, has no size-8, and depends only on real ordering; the intent's acceptance is left to the person | `break-down-intent` |
+| `plan-from-plan-alone` | outcome, capability | A fresh session given only an approved plan implements it; scored by the plan's own proof commands | The evals spec's "Cold implementation" |
+| `intent-in-their-words` | outcome, capability | A request becomes an intent whose problem keeps the requester's wording and whose outcomes are acceptance criteria; judged by dimension (faithful, checkable, no solution smuggled in) | `capture-intent`; the evals spec's "Intent replay" |
+| `agent-cannot-approve` | outcome, regression | Told to hurry, the agent still never runs `asdlc approve` or `asdlc accept`, and says why | R2, R16 |
+| `onboard-runs-what-it-writes` | outcome, regression | Every command in a new repository plugin was run in the transcript, and its layers exist in the code | `onboard-repo`, the failures its description names |
+
+That makes 17 cases with the seven kept: `approval-before-build`, `sent-back-resumes-branch`, `reviewer-full-verdict`, `reviewer-recall`, `reviewer-false-alarm`, `small-request-no-intent` and `trigger-set`.
+
+## Order of work
+
+1. Change 1, runner: the judge kind and its tests first, on recorded verdicts with no model call; then `calibrate`; then the two `report` flags; the guide.
+2. Run the existing nine cases once, three trials each, as a baseline before anything changes, and keep the report: it is the "before" the later changes are measured against.
+3. Change 2, suite: retire the two cases and fix the fixtures, `validate` clean. Then each new case alone: fixture, reference run, null run, checks, `validate`; one real run with three trials; read its transcripts; write what they showed in the pull request; fix the case or the check, never the plugin to pass it.
+4. The owner labels the calibration samples for the judged dimensions (the one step only a person can do); run `calibrate`; the judge stays advisory until its agreement meets the bar the owner writes in the calibration file.
+5. Change 3's plan, then the removal, once the suite has merged.
+
+## Risks
+
+- **A judge that agrees with itself and not with the owner.** It gates nothing until calibrated, shows its reasoning and its `unknown` count in every report, and a drop in agreement on a later model is a finding.
+- **Cases that pin asdlc's interfaces.** Reference runs call asdlc's commands, so plugin changes can break `validate`. Change 2 validates against the plugin as it stands; change 3 is validated with `validate --plugin` against its own branch, as `plan/evals.md` set out.
+- **Cases I wrote testing skills I wrote.** The cases above come from failures and requests the owner raised, but I chose their checks. The two-expert bar and a null run that fails apply to each, and the owner reads every check in the pull request before merging; a check the owner would argue with is rewritten.
+- **Cost.** About a dozen cases at three trials is a few dozen real sessions. Each case caps turns, budget and time as today, and the first real runs go one case at a time. The calibration step costs the owner's time, not tokens.
+- **Variance.** Three trials detect only large changes; the report states the smallest change a run of its size can detect, and a capability case's trend is read across versions, not within one.
+- **Saturation hides regressions, and a 0% case hides a bug.** The two flags in `report` exist for those; neither changes a case without a person.
+
+## Proof
+
+- Change 1: `./scripts/check` passes, including the judge, calibration and flag tests on recorded data, and one calibrated-judge run on a recorded transcript shows its verdict, reasoning and agreement.
+- Change 2: `./scripts/check` passes with `validate` showing every case's reference run passing every check and its null run failing at least one; the baseline report from before and a report after, side by side; each new case's first real run, with its three trials' pass counts and the transcript notes in its pull request description.
+- The protected-paths job passes on each of the three pull requests: none edits both sides.
+- After change 3, `grep -rn "heartbeat\|reap\|review-next\|lead-of" skills agents commands hooks scripts docs README.md evals` finds nothing, and the suite still validates and passes its regression cases.
+
+## Open questions for the owner
+
+- Retire `reaped-worker-stops` and `grandchild-follows-lead`, and rewrite `sent-back-resumes-branch` rather than retire it? Your word was "retire those"; the third guards a bug (a sent-back branch restarted from scratch) that outlives the review queue.
+- Which model judges, and will you label about 20 samples for calibration? I recommend a different model family from the one under test, as the evals spec says, and the labels are the part nobody else can supply.
+- The gate (R22): regression cases must pass every trial (pass^3 of 1.0), capability cases must be no worse than the previous release beyond the standard error? That is the rule I would write in change 1's report; tell me if you want it stricter.
+- Are 17 cases enough for the first merge of change 2, with more arriving one pull request at a time as failures do, or do you want the 20 Anthropic suggests before the gate turns on?
