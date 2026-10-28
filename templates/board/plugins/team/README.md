@@ -15,9 +15,9 @@ Changes are pull requests to this folder, like any other change; whoever merges 
 | Path | What it is |
 |---|---|
 | `skills/testing/` | How the team chooses, writes and runs tests, verifies work with each repository's own checks, and records the evidence on the task |
-| `skills/writing-a-contract/` | How a lead writes and keeps the cross-repository contract for a large feature |
+| `skills/writing-a-contract/` | How the orchestrator writes and keeps the cross-repository contract for a large feature |
 | `review.md` | How a reviewer judges a finished task: the passes, the severities, the nit cap and the size-1 check. A repository plugin's own `review.md` adds to it |
-| `templates/contract.md` | The contract a lead copies |
+| `templates/contract.md` | The contract the orchestrator copies |
 | `rules/testing.md` | The testing rule for any language |
 | `rules/testing-python.md` | Python testing techniques |
 
@@ -60,5 +60,5 @@ The team writes its own conventions; nothing here is a default to accept. For ex
 
 - The naming rules, required properties or span attributes that must be in front of an agent while it writes the code go in a rule, such as `rules/analytics.md`, scoped with `paths` to where events are sent (or with no `paths`, if they're sent from everywhere).
 - How to add an event or a span end to end (the registry to update, the dashboard to check, who signs off) goes in a skill, such as `skills/analytics/SKILL.md`, with a description that says when to load it. Use the shape of `skills/testing/SKILL.md`: its owner, its source, and what enforces it.
-- The contract template's "Analytics events" and "Traces and logs" sections defer to these conventions once they exist, so a lead's contract follows them.
+- The contract template's "Analytics events" and "Traces and logs" sections defer to these conventions once they exist, so a contract follows them.
 - Conventions that differ per platform go in each repository's plugin instead.

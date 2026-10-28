@@ -50,7 +50,7 @@ EOF
 ```
 
 - Leave solutions out unless the requester stated one as a constraint.
-- The intent names no repository (`--project`) and has no size: its lead splits it into child tasks that do.
+- The intent names no repository (`--project`) and has no size: the breakdown (the break-down-intent skill) splits it into child tasks that do.
 - Don't assign it. An assignee on accepted work reserves it for that person's workers.
 - `asdlc` prints the draft's id, `DRAFT-<n>`. Draft ids are reused once a draft is promoted, so refer to it by title as well as id.
 - Right after creating it, record when the conversation started, with the time you noted: `asdlc intent-started <DRAFT-n> --at <the time you noted>`. Never edit the draft's file for it: every board change goes through `asdlc`. If you didn't note a time, leave it out rather than guess; stats counts the intent as having no start recorded.

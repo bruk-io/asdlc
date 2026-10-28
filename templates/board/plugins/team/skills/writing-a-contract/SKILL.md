@@ -1,19 +1,19 @@
 ---
 name: writing-a-contract
-description: Write and keep the contract for a large feature that spans repositories - the behaviour and states every client implements, the API between repositories, the analytics events table, the traces and logs, and which child task builds which part - as a document on the board that only the lead changes. Load it when you hold the lead on an intent, before splitting it into child tasks, before checking a child's plan against the contract, and when a worker asks for a contract change. Without it, platforms name the same event differently, two tasks build the same endpoint, and plans are approved against a contract nobody wrote down.
+description: Write and keep the contract for a large feature that spans repositories - the behaviour and states every client implements, the API between repositories, the analytics events table, the traces and logs, and which child task builds which part - as a document on the board that only the orchestrator changes. Load it when you write the spec for an intent, before splitting it into child tasks, before checking a child's plan against the contract, and when a worker asks for a contract change. Without it, platforms name the same event differently, two tasks build the same endpoint, and plans are approved against a contract nobody wrote down.
 ---
 
 # Writing a contract
 
 - Owner: the team. Changes arrive as pull requests to `plugins/team/` in the tasks repository.
 - Source: this skill and `templates/contract.md` beside it.
-- Enforced by: the lead, who checks each child plan against the contract before its engineer approves it, and checks across repositories when the children reach review. Advisory otherwise.
+- Enforced by: the orchestrator, who checks each child plan against the contract before its engineer approves it, and checks across repositories when the children reach review. Advisory otherwise.
 
 A large feature is built by several workers in several repositories at once, and none of them can see the others' work. The contract is the one place they agree: what the feature does, what crosses each boundary, what is measured and observed, and who builds which piece. If it isn't in the contract, two workers will each decide it differently.
 
 ## When to write one
 
-Write a contract when you hold the lead on an intent whose children touch more than one repository, or more than one layer that another team owns. A feature inside one repository and one layer needs a plan, not a contract.
+Write a contract when an intent's children touch more than one repository, or more than one layer that another team owns. A feature inside one repository and one layer needs a plan, not a contract.
 
 Write it before the child tasks are split, since the split comes from "Who builds what".
 
@@ -36,8 +36,8 @@ Write it before the child tasks are split, since the split comes from "Who build
 
 ## Keeping it
 
-- Only the lead edits the contract. A worker who needs a change asks in its task's notes, saying what and why; the lead decides.
+- Only the orchestrator edits the contract, with the engineer for anything that changes the spec. A worker who needs a change asks in its task's notes, saying what and why; the orchestrator decides.
 - Every change bumps the version, adds a line under "Changes", and puts a note on each affected child task, so its worker re-reads the contract before continuing.
 - Before an engineer approves a child's plan, check it against the contract: the states, the API shapes, the event names and properties, the spans. A difference is fixed in the plan or, if the contract was wrong, in the contract first.
 - When the children reach review, check across repositories: the same event sent with the same properties everywhere, both sides of each API agreeing.
-- Keep the contract, its changes and your checks on the board. Another orchestrator may take over the lead if your claim goes stale, and the board is all it will have.
+- Keep the contract, its changes and your checks on the board. A restarted session picks up from the board, and the board is all it will have.

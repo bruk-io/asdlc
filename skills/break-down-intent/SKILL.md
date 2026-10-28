@@ -1,6 +1,6 @@
 ---
 name: break-down-intent
-description: Split an intent and its spec into draft child tasks on the shared board, one per piece of work in one repository, with sizes, dependencies and acceptance criteria, then ask the person to accept the whole of it. Use when you lead an intent whose spec is written and which has no children, when asked to break work down or split a task, and when a size-8 task has to be split.
+description: Split an intent and its spec into draft child tasks on the board, one per piece of work in one repository, with sizes, dependencies and acceptance criteria, then ask the person to accept the whole of it. Use when an intent's spec is written and it has no children, when asked to break work down or split a task, and when a size-8 task has to be split.
 ---
 
 # Break down an intent
@@ -18,4 +18,4 @@ asdlc board task create "<title>" --draft -p <intent> --project <repo-slug> -l s
 - `-a @<engineer>` reserves a child for that engineer's workers, when the engineer asked for it or only they can do it.
 - Drafts under a draft intent are allowed: asdlc records the draft parent itself.
 
-Then ask the person to accept the work: tell your engineer the intent, the spec and contract documents, and the children with their repositories, sizes and dependencies, and ask them to run `asdlc accept <intent>` themselves. It promotes the intent and every draft under it, at any depth, in one board commit, and comments the new ids on the intent (`DRAFT-1 -> TASK-4`, and so on); each promoted task keeps its old draft id as `asdlc_accepted_from`. You can't run it; the board guard refuses agents. From then on use the new ids: `asdlc mine` lists your lead under its new id with the draft id it had.
+Then ask the person to accept the work: tell your engineer the intent, the spec and contract documents, and the children with their repositories, sizes and dependencies, and ask them to run `asdlc accept <intent>` themselves. It promotes the intent and every draft under it, at any depth, in one board commit, and comments the new ids on the intent (`DRAFT-1 -> TASK-4`, and so on); each promoted task keeps its old draft id as `asdlc_accepted_from`. You can't run it; the board guard refuses agents. From then on use the new ids.

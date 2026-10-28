@@ -7,7 +7,7 @@ The review records its findings and a verdict on the task with `asdlc review-don
 ## What the work is judged against
 
 - The task: its description, acceptance criteria, plan, and the notes and checks its worker recorded.
-- The contract and the spec, when the task has a parent intent: the documents linked on the intent. Only the intent's lead changes them.
+- The contract and the spec, when the task has a parent intent: the documents linked on the intent. Only the orchestrator, with the engineer, changes them.
 - This policy, and the repository's own when its plugin has one.
 
 ## Passes

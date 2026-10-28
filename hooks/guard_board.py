@@ -11,12 +11,12 @@ Denied, each with the reason and the way that works instead:
   creating a task without `--draft` (it would start as accepted To Do work), with `backlog`
   or `asdlc board`, and running `asdlc accept`, `asdlc approve` or `asdlc permissions
   --write`. Accepting work, approving plans, closing work and changing a person's Claude
-  Code settings are a person's decisions. `asdlc release` and `asdlc reap`, the
-  tool's own ways of handing a claimed task back, are allowed.
+  Code settings are a person's decisions. `asdlc release`, the
+  tool's own way of handing a claimed task back, is allowed.
 - Setting a task In Progress or In Review, changing a task's assignees, or adding or
   removing the review-passed or changes-requested labels, with `backlog` or `asdlc board`.
   Claims, `asdlc finish`, `asdlc release` and `asdlc review-done` do those, checking who
-  holds the task, so a worker whose claim was reaped can't change someone else's task.
+  holds the task, so a worker whose claim was released can't change someone else's task.
 - Editing a file in a code repository that takes its work from a board (`git config
   asdlc.board` is set) outside a claimed task's worktree, the one with a `.asdlc-task`
   marker. Work starts with a claim, so no two agents change the same thing.
@@ -368,10 +368,10 @@ IN_PROGRESS_REFUSAL = (
 )
 IN_REVIEW_REFUSAL = (
     "a task goes to review only through asdlc finish <id> --as <worker> --pr <url> --notes ..., which checks that the "
-    "worker still holds it (its claim may have been reaped and taken by someone else) and records its branch."
+    "worker still holds it (its claim may have been released and taken by someone else) and records its branch."
 )
 ASSIGNEE_REFUSAL = (
-    "who holds a task changes only through asdlc claim, asdlc release, asdlc reap and asdlc review-done, which check the "
+    "who holds a task changes only through asdlc claim, asdlc release and asdlc review-done, which check the "
     "holder; reserving accepted work for a person is that person's decision."
 )
 REVIEW_LABEL_REFUSAL = (

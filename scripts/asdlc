@@ -21,10 +21,6 @@ Usage:
   asdlc [--board <path>] next --as <worker> [--json]
   asdlc [--board <path>] release <id> --as <worker>
   asdlc [--board <path>] route <id>
-  asdlc [--board <path>] lead <intent-id> --as <worker> [--new] [--json]
-  asdlc [--board <path>] lead-of <id> [--json]
-  asdlc [--board <path>] heartbeat <id> --as <worker>
-  asdlc [--board <path>] reap [--older-than 2h] [--json]
   asdlc [--board <path>] accept <intent-id> [--json]         (a person's command)
   asdlc [--board <path>] approve <id>...                     (a person's command)
   asdlc [--board <path>] mine --as <engineer> [--json]
@@ -43,7 +39,7 @@ clone the current directory is in. The engineer is `git config asdlc.engineer`; 
 is the engineer's name, a dot and a label, such as kyle.w1; a reviewer's label is r and a
 number, such as kyle.r1. The backlog CLI is
 $ASDLC_BACKLOG, else `backlog` on PATH; `stats` asks $ASDLC_GH, else `gh` on PATH, for merge times
-(an empty ASDLC_GH asks nothing). `claim`, `next`, `review-next` and `lead` append
+(an empty ASDLC_GH asks nothing). `claim`, `next` and `review-next` append
 each attempt to ${XDG_STATE_HOME:-~/.local/state}/asdlc/events.jsonl, which `stats` reads.
 """
 
@@ -97,15 +93,13 @@ MARKER = ".asdlc-task"
 PRIORITY_ORDER = frozendict({"high": 0, "medium": 1, "low": 2})
 _WORKER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _ENGINEER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
-LEAD_KEY = "asdlc_lead"  # frontmatter keys asdlc writes itself; Backlog 1.55 keeps keys it doesn't know
-HEARTBEAT_KEY = "asdlc_heartbeat"
 REVIEWER_KEY = "asdlc_reviewer"  # the reviewer holding a review claim; cleared when it finishes
 REVIEW_KIND_KEY = "asdlc_review_kind"  # cross-machine or same-machine, kept after the review for the person who merges
 BRANCH_KEY = "asdlc_branch"  # the task's branch, written by its first claim; every later claim resumes it
 APPROVED_KEY = "asdlc_plan_approved_by"  # the person who approved the plan, written only by asdlc approve
 APPROVED_HASH_KEY = "asdlc_plan_approved_hash"  # the digest of the plan text approved
 APPROVED_SIZE_KEY = "asdlc_plan_approved_size"  # the size label the task had when its plan was approved
-RESERVED_KEY = "asdlc_reserved_for_author"  # the engineer a released, sent-back task stays reserved for, for one more stale_after
+RESERVED_KEY = "asdlc_reserved_for_author"  # the engineer a released, sent-back task stays reserved for
 ACCEPTED_FROM_KEY = "asdlc_accepted_from"  # the draft id an accepted item had, written by asdlc accept
 TRAILER = "Asdlc-Transaction"  # on every board commit asdlc makes, so an unpushed one is known as its own
 WORKER_TRAILER = "Asdlc-Worker"  # on every code commit a worker agent makes, so stats can tell a fix made by workers alone
@@ -117,10 +111,7 @@ PENDING = "asdlc-transaction.json"  # in the board clone's git folder while a ch
 _REVIEWER_LABEL = re.compile(r"^r\d+$")
 DRAFTS = "backlog/drafts/"
 DEFAULT_WORKERS = 3
-DEFAULT_STALE_AFTER = timedelta(hours=2)
-DEFAULT_REVIEW_FALLBACK_AFTER = timedelta(minutes=30)
-DEFAULT_APPROVAL_WAIT = timedelta(hours=24)
-REAPER = "@asdlc"
+DEFAULT_REVIEW_FALLBACK_AFTER = timedelta(0)  # the one orchestrator reviews its own engineer's work at once, with a reviewer it launches
 CHECK_TAIL_LINES = 40
 
 
@@ -175,8 +166,6 @@ class Task:
     dependencies: tuple[str, ...]
     path: str
     project: str = ""
-    lead: str = ""  # the worker leading an intent, from LEAD_KEY
-    heartbeat: str = ""
     reviewer: str = ""  # the reviewer holding the review claim, from REVIEWER_KEY
     review_kind: str = ""
     references: tuple[str, ...] = ()
@@ -318,8 +307,6 @@ def task_from(path: str, text: str) -> Task | None:
         dependencies=tuple(d.upper() for d in _as_tuple(fields.get("dependencies"))),
         path=path,
         project=text_field("project").lower(),
-        lead=text_field(LEAD_KEY).removeprefix("@"),
-        heartbeat=text_field(HEARTBEAT_KEY),
         reviewer=text_field(REVIEWER_KEY).removeprefix("@"),
         review_kind=text_field(REVIEW_KIND_KEY),
         references=_as_tuple(fields.get("references")),
@@ -499,13 +486,13 @@ def claim_refusal(task: Task | None, task_id: str, tasks: Iterable[Task], worker
 
 def holder_refusal(task: Task | None, task_id: str, worker: str, doing: str) -> str | None:
     """Why the worker can't change the task's work now, or None when it can: it must hold the
-    task In Progress. A claim that was reaped or released may be someone else's now."""
+    task In Progress. A claim that was released may be someone else's now."""
     if task is None:
         return f"{task_id} is not a task on the board"
     if f"@{worker}" not in task.assignees:
         held = ", ".join(workers(task.assignees)) or "nobody"
-        return (f"{task_id} is held by {held}, not @{worker}, so @{worker} can't {doing}: its claim was released (by asdlc reap or "
-                f"asdlc release) and the task may be someone else's now. Stop and tell your orchestrator; asdlc mine --as {owner_of(worker)} "
+        return (f"{task_id} is held by {held}, not @{worker}, so @{worker} can't {doing}: its claim was released (by asdlc "
+                f"release) and the task may be someone else's now. Stop and tell your orchestrator; asdlc mine --as {owner_of(worker)} "
                 "shows what your workers hold")
     if not is_status(task, IN_PROGRESS):
         return f"{task_id} is {task.status}, not {IN_PROGRESS}, so @{worker} can't {doing}"
@@ -529,12 +516,6 @@ def approval_refusal(task: Task) -> str | None:
         return None
     return (f"{task.id}'s plan isn't approved yet: {size or 'a task without a size-1 label'} work is built only after a person approves its plan. "
             f"Write the plan on the task and stop; your engineer runs asdlc approve {task.id} in their own terminal")
-
-
-def waiting_for_approval(task: Task) -> bool:
-    """A held task whose plan is written and waits for a person's approval."""
-    return (is_status(task, IN_PROGRESS) and bool(workers(task.assignees)) and bool(task.plan_hash)
-            and size_of(task) != "size-1" and approval_refusal(task) is not None)
 
 
 def finish_edit(task: Task, branch: str, pull: str | None, notes: str) -> list[str]:
@@ -938,9 +919,7 @@ def human(span: timedelta) -> str:
 class Settings:
     """The board's `asdlc.toml`: settings shared by everyone on the board."""
 
-    stale_after: timedelta = DEFAULT_STALE_AFTER
     review_fallback_after: timedelta = DEFAULT_REVIEW_FALLBACK_AFTER
-    approval_wait: timedelta = DEFAULT_APPROVAL_WAIT
 
 
 def parse_settings(text: str) -> Settings:
@@ -950,7 +929,7 @@ def parse_settings(text: str) -> Settings:
     except tomllib.TOMLDecodeError as error:
         raise AsdlcError(f"asdlc.toml on the board is not valid TOML: {error}") from None
     durations = {}
-    for key in ("stale_after", "review_fallback_after", "approval_wait"):
+    for key in ("review_fallback_after",):
         if key in data:
             if not isinstance(data[key], str):
                 raise AsdlcError(f"asdlc.toml: {key} is a duration in quotes, such as \"2h\"")
@@ -1007,19 +986,12 @@ def with_project(config: str, project: str) -> str | None:
     return "\n".join([*lines, *([] if written else [line])]) + "\n"
 
 
-# --- leads, staleness and reports ---------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class LeadOf:
-    task: str
-    intent: str | None
-    lead: str | None
+# --- reports ---------------------------------------------------------
 
 
 def holds(task: Task, worker: str) -> bool:
-    """Whether the worker holds the task's claim, the intent's lead, or the task's review."""
-    return f"@{worker}" in task.assignees or task.lead == worker or task.reviewer == worker
+    """Whether the worker holds the task's claim or the task's review."""
+    return f"@{worker}" in task.assignees or task.reviewer == worker
 
 
 def accepted_as(items: Iterable[Task], draft_id: str, worker: str | None = None) -> tuple[Task, ...]:
@@ -1040,80 +1012,6 @@ def held_item(items: Sequence[Task], task_id: str, worker: str) -> tuple[Task | 
     return task, ""
 
 
-def lead_of(items: Sequence[Task], task_id: str) -> LeadOf:
-    """The lead of a task's parent intent, or of the intent itself. A draft id that no longer
-    exists finds the task asdlc accept promoted it to.
-
-    Raises:
-        AsdlcError: no task or draft has that id, or an old draft id became several tasks.
-    """
-    task = _find(items, task_id)
-    if task is None and len(found := accepted_as(items, task_id)) > 1:
-        raise AsdlcError(f"{task_id} was accepted more than once, as {', '.join(t.id for t in found)}: use the task's own id")
-    if task is None and found:
-        task = found[0]
-    if task is None:
-        raise AsdlcError(f"{task_id} is not a task or a draft on the board")
-    intent = intent_above(items, task)
-    if intent is None:
-        return LeadOf(task.id, None, None)
-    return LeadOf(task.id, intent.id, intent.lead or None)
-
-
-def intent_above(items: Sequence[Task], task: Task) -> Task | None:
-    """The task itself when it is an intent, else the nearest intent up its parents, or None."""
-    seen: set[str] = set()
-    current: Task | None = task
-    while current is not None and current.id not in seen:
-        if current.type == "intent":
-            return current
-        seen.add(current.id)
-        current = _find(items, current.parent) if current.parent else None
-    return None
-
-
-class Hold(StrEnum):
-    CLAIM = "claim"
-    LEAD = "lead"
-    REVIEW = "review"
-    RESERVATION = "reservation"  # a sent-back task kept for its author after its claim was released
-
-
-@dataclass(frozen=True)
-class Stale:
-    task: Task
-    hold: Hold
-    holders: tuple[str, ...]
-    idle: timedelta
-
-
-def stale_holds(items: Iterable[Task], touched: Mapping[str, datetime], now: datetime, after: timedelta,
-                approval_wait: timedelta = DEFAULT_APPROVAL_WAIT) -> tuple[Stale, ...]:
-    """Claims, leads, review claims and authors' reservations whose task file has had no commit for
-    longer than `after`; a claim whose plan waits for a person's approval gets `approval_wait`."""
-    found = []
-    for task in items:
-        last = touched.get(task.path)
-        if last is None:
-            continue
-        idle = now - last
-        if is_status(task, IN_PROGRESS) and (held := workers(task.assignees)):
-            if idle > (approval_wait if waiting_for_approval(task) else after):
-                found.append(Stale(task, Hold.CLAIM, held, idle))
-        if idle <= after:
-            continue
-        if task.lead:
-            found.append(Stale(task, Hold.LEAD, (f"@{task.lead}",), idle))
-        if task.reviewer:
-            found.append(Stale(task, Hold.REVIEW, (f"@{task.reviewer}",), idle))
-        if task.reserved_for_author and is_status(task, TO_DO) and not workers(task.assignees):
-            found.append(Stale(task, Hold.RESERVATION, (f"@{task.reserved_for_author}",), idle))
-    return tuple(found)
-
-
-_HOLD_WORDS = frozendict({Hold.CLAIM: "claim", Hold.LEAD: "lead", Hold.REVIEW: "review claim", Hold.RESERVATION: "reservation"})
-
-
 def reserved_author(task: Task) -> str:
     """The engineer a released, sent-back task is kept for, when releasing it adds one; else ""."""
     if CHANGES_REQUESTED not in task.labels:
@@ -1131,27 +1029,8 @@ def kept_on_release(task: Task) -> tuple[str, ...]:
     return (*kept, *(f"@{o}" for o in sorted({owner_of(w) for w in workers(task.assignees)}) if f"@{o}" not in kept))
 
 
-def reap_comment(stale: Stale, after: timedelta) -> str:
-    what = _HOLD_WORDS[stale.hold]
-    if stale.hold is Hold.RESERVATION:
-        return (f"Released by asdlc reap: the reservation for {stale.holders[0]} expired. A review sent this task back and its claim was "
-                f"released; it stayed reserved for its author's engineer for {human(stale.idle)} with no claim, longer than stale_after "
-                f"({human(after)}), so anyone may pick it up now. Its branch holds the work so far, and the newest 'Review by' comment the findings.")
-    kept = kept_on_release(stale.task)
-    keeping = f" It stays reserved for {', '.join(kept)}." if stale.hold is Hold.CLAIM and kept else ""
-    if stale.hold is Hold.CLAIM and CHANGES_REQUESTED in stale.task.labels:
-        keeping += (f" A review asked for changes, so it goes back to its author first; its branch{' ' + stale.task.branch if stale.task.branch else ''} "
-                    "holds the work so far, and the next claim resumes it.")
-    keeping += " Another reviewer may claim it with asdlc review-next." if stale.hold is Hold.REVIEW else ""
-    return (
-        f"Released by asdlc reap: the {what} held by {', '.join(stale.holders)} had no board update for "
-        f"{human(stale.idle)}, longer than stale_after ({human(after)}).{keeping} Anyone may pick it up; "
-        "the notes and comments above say how far it got."
-    )
-
-
 def mine_report(items: Sequence[Task], engineer: str, prefs: Prefs, waiting: Sequence[str] = ()) -> dict[str, object]:
-    """The engineer's workers' tasks, leads and reservations, and the reviews waiting for them, for the orchestrator."""
+    """The engineer's workers' tasks and reservations, and the reviews waiting for them, for the orchestrator."""
     def row(task: Task, **extra: object) -> dict[str, object]:
         return {"id": task.id, "title": task.title, "status": task.status, "project": task.project, "parent": task.parent, **extra}
 
@@ -1172,7 +1051,6 @@ def mine_report(items: Sequence[Task], engineer: str, prefs: Prefs, waiting: Seq
         "tasks": sorted(held, key=lambda r: id_key(str(r["id"]))),
         "changes_requested": [r for r in sorted(held, key=lambda r: id_key(str(r["id"]))) if r["changes_requested"]],
         "reviews": [row(t, reviewer=t.reviewer, kind=t.review_kind) for t in sorted(reviews, key=lambda t: id_key(t.id))],
-        "leads": [row(t, lead=t.lead, accepted_from=t.accepted_from or None) for t in items if t.lead and owner_of(t.lead) == engineer],
         "reserved": [row(t) for t in items if is_status(t, TO_DO) and reserved_for(t, engineer) and not workers(t.assignees)],
         "reviews_waiting": list(waiting) if prefs.review else [],
         "slot_left_for_review": bool(prefs.review and waiting and not reviews),
@@ -1882,7 +1760,7 @@ def _ancestor(repo: Path, older: str, newer: str) -> bool:
 def make_worktree(repo: Path, task: Task, worker: str, board: Path) -> tuple[Path, str | None]:
     """The task's worktree, with its marker, on the task's recorded branch, and where it resumed from.
 
-    A branch someone already pushed (an earlier round, or a worker whose claim was reaped) is
+    A branch someone already pushed (an earlier round, or a worker whose claim was released) is
     resumed from `origin/<branch>`, and a local copy behind it is brought up to it; only a branch
     nobody pushed starts from origin's default branch. A pushed branch is never started again from
     the default branch, so nothing has to be force-pushed over it.
@@ -1970,19 +1848,6 @@ def _registry() -> frozendict[str, Registered]:
     return parse_registry(path.read_text()) if path.is_file() else frozendict()
 
 
-def _touched(board: Board, ref: str) -> dict[str, datetime]:
-    """When each task and draft file was last committed on `ref`."""
-    log = _board_git(board, "-c", "core.quotePath=false", "log", "--format=%x00%ct", "--name-only", ref, "--", "backlog/tasks", "backlog/drafts").stdout
-    touched: dict[str, datetime] = {}
-    when = None
-    for line in log.splitlines():
-        if line.startswith("\x00"):
-            when = datetime.fromtimestamp(int(line[1:]), UTC)
-        elif line.strip() and when is not None:
-            touched.setdefault(line.strip(), when)
-    return touched
-
-
 def _refresh(board: Board) -> str:
     """Bring the clone level with origin/main; the ref to read the board from."""
     with _locked(board):
@@ -2009,136 +1874,6 @@ def _emit(report: Mapping[str, object], as_json: bool, lines: Iterable[str]) -> 
     else:
         for line in lines:
             print(line)
-
-
-# --- leads, heartbeats and reaping --------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Led:
-    intent: str
-    lead: str
-    mine: bool
-    reason: str
-    lost: bool = False  # another orchestrator's lead landed first, just now
-
-
-def lead(board: Board, raw_id: str, worker: str, new: bool = False) -> Led:
-    """Claim the lead on an intent, accepted or still a draft: the first orchestrator to ask gets it.
-
-    A draft id this worker's lead was accepted from is refused unless `new` says the draft that
-    now has the id is the one meant: Backlog reuses draft ids once they are promoted.
-
-    Raises:
-        AsdlcError: no such intent, it is Done, an old draft id, or the claim could not be pushed.
-    """
-    intent_id = normalise_id(raw_id, _prefix(board))
-
-    def step(attempt: int) -> tuple[str | None, Led]:
-        items = _items(board)
-        intent = _find(items, intent_id)
-        if not new and (intent is None or intent.lead != worker) and (was := accepted_as(items, intent_id, worker)):
-            now = f"; the {intent_id} on the board now is another intent, '{intent.title}'" if intent else ""
-            raise AsdlcError(f"{intent_id} was accepted as {was[0].id}, which @{worker} leads: use {was[0].id}{now}. "
-                             f"To lead that one, run asdlc lead {intent_id} --as {worker} --new")
-        if intent is None and (was := accepted_as(items, intent_id)):
-            led = f", led by @{was[0].lead}" if was[0].lead else ""
-            raise AsdlcError(f"{intent_id} was accepted as {was[0].id}{led}: use {was[0].id}")
-        if intent is None:
-            raise AsdlcError(f"{intent_id} is not a task or a draft on the board")
-        if intent.type != "intent":
-            raise AsdlcError(f"{intent_id} is a {intent.type or 'task'}, not an intent: only an intent has a lead")
-        if is_status(intent, DONE):
-            raise AsdlcError(f"{intent_id} is Done, so it needs no lead")
-        if intent.lead == worker:
-            return None, Led(intent_id, worker, True, f"@{worker} already leads {intent_id}")
-        if intent.lead:
-            first = f"Another orchestrator claimed the lead on {intent_id} first: @{intent.lead}" if attempt > 1 else f"{intent_id} is led by @{intent.lead}"
-            return None, Led(intent_id, intent.lead, False, f"{first}. Work under its direction: read its spec, contracts and decisions on the board, and report through the board.",
-                             lost=attempt > 1)
-        _write_key(board, intent, LEAD_KEY, worker)
-        _comment(board, intent, f"@{worker} leads {intent_id}: the spec, the breakdown and the contracts are theirs. Ask for a change in a comment on the task concerned, labelled contract-change.", f"@{worker}")
-        return f"Lead {intent_id}: @{worker}", Led(intent_id, worker, True, f"@{worker} now leads {intent_id}")
-
-    return _transact(board, step)
-
-
-def heartbeat(board: Board, raw_id: str, worker: str, now: datetime) -> str:
-    """A board commit touching a task the worker claimed, or an intent it leads, so reap leaves it.
-
-    Raises:
-        AsdlcError: the worker holds neither, or the heartbeat could not be pushed.
-    """
-    asked = normalise_id(raw_id, _prefix(board))
-
-    def step(attempt: int) -> tuple[str | None, str]:
-        task, note = held_item(_items(board), asked, worker)
-        task_id = task.id if task is not None else asked
-        note = f"{note}. " if note else ""
-        if task is not None and f"@{worker}" in task.assignees and not is_status(task, IN_PROGRESS) and worker not in (task.lead, task.reviewer):
-            return None, f"{note}{task_id} is {task.status}: @{worker} has nothing to keep alive on it any more, so stop heartbeating it"
-        if task is None or not (task.lead == worker or task.reviewer == worker or (f"@{worker}" in task.assignees and is_status(task, IN_PROGRESS))):
-            held = "is not on the board" if task is None else f"is {task.status}, assigned to {', '.join(task.assignees) or 'nobody'}, led by {'@' + task.lead if task.lead else 'nobody'}, reviewed by {'@' + task.reviewer if task.reviewer else 'nobody'}"
-            raise AsdlcError(f"{task_id} {held}, so @{worker} holds nothing to keep alive; it may have been reaped. asdlc mine --as {owner_of(worker)} shows what your workers hold")
-        stamp = now.astimezone(UTC).isoformat(timespec="seconds")
-        _write_key(board, task, HEARTBEAT_KEY, yaml_quoted(stamp))
-        return f"Heartbeat {task_id} from @{worker}", f"{note}{task_id} kept alive for @{worker} at {stamp}"
-
-    return _transact(board, step)
-
-
-def _reap_one(board: Board, found: Stale, now: datetime, after: timedelta, approval_wait: timedelta = DEFAULT_APPROVAL_WAIT) -> Stale | None:
-    """Release one stale hold, judged again on the current board: a heartbeat that landed first wins.
-
-    Raises:
-        AsdlcError: backlog failed, or the release could not be pushed.
-    """
-    def step(attempt: int) -> tuple[str | None, Stale | None]:
-        current = next((s for s in stale_holds(_items(board), _touched(board, "HEAD"), now, after, approval_wait)
-                        if s.task.id == found.task.id and s.hold is found.hold), None)
-        if current is None:
-            return None, None
-        text = reap_comment(current, after)
-        match current.hold:
-            case Hold.CLAIM:
-                kept = kept_on_release(current.task)
-                done = _board_backlog(board, ["task", "edit", current.task.id, "-s", TO_DO, "-a", ",".join(kept),
-                                              "--comment", text, "--comment-author", REAPER])
-                if done.returncode != 0:
-                    raise AsdlcError(f"backlog could not release {current.task.id}: {(done.stderr or done.stdout).strip()}")
-                if author := reserved_author(current.task):
-                    _write_key(board, current.task, RESERVED_KEY, author)
-            case Hold.RESERVATION:
-                author = f"@{current.task.reserved_for_author}"
-                kept = [a for a in people(current.task.assignees) if a != author]
-                done = _board_backlog(board, ["task", "edit", current.task.id, "-a", ",".join(kept), "--comment", text, "--comment-author", REAPER])
-                if done.returncode != 0:
-                    raise AsdlcError(f"backlog could not release the reservation on {current.task.id}: {(done.stderr or done.stdout).strip()}")
-                _write_key(board, current.task, RESERVED_KEY, None)
-            case Hold.LEAD:
-                _write_key(board, current.task, LEAD_KEY, None)
-                _comment(board, current.task, text, REAPER)
-            case Hold.REVIEW:
-                _write_key(board, current.task, REVIEWER_KEY, None)
-                _write_key(board, current.task, REVIEW_KIND_KEY, None)
-                _comment(board, current.task, text, REAPER)
-            case _ as unreachable:
-                assert_never(unreachable)
-        return f"Reap the {current.hold} on {current.task.id}: idle {human(current.idle)}", current
-
-    return _transact(board, step)
-
-
-def reap(board: Board, now: datetime, older_than: timedelta | None, as_json: bool) -> int:
-    origin = _refresh(board)
-    after = older_than or _settings(board).stale_after
-    wait = _settings(board).approval_wait
-    released = [r for found in stale_holds(_items(board, origin), _touched(board, origin), now, after, wait) if (r := _reap_one(board, found, now, after, wait))]
-    rows = [{"id": s.task.id, "hold": str(s.hold), "holders": [h.removeprefix("@") for h in s.holders], "idle": human(s.idle),
-             "kept": [p.removeprefix("@") for p in kept_on_release(s.task)] if s.hold is Hold.CLAIM else []} for s in released]
-    lines = [f"released the {r['hold']} on {r['id']} held by {', '.join('@' + h for h in r['holders'])}: idle {r['idle']}" for r in rows]
-    _emit({"stale_after": human(after), "released": rows}, as_json, lines or [f"nothing stale (stale_after {human(after)})"])
-    return 0
 
 
 # --- accepting work: a person's command ---------------------------------------------------
@@ -2252,7 +1987,7 @@ def approve(board: Board, raw_id: str, engineer: str, shown: str | None = None) 
         if is_status(task, DONE):
             raise AsdlcError(f"{task_id} is Done; there is nothing left to approve")
         if not (is_status(task, IN_PROGRESS) and workers(task.assignees)):
-            raise AsdlcError(f"{task_id} is {task.status} and no longer held by a worker (its claim was released or reaped), so there is no "
+            raise AsdlcError(f"{task_id} is {task.status} and no longer held by a worker (its claim was released), so there is no "
                              "plan waiting to be built: the next worker to claim it plans it again, and you approve that plan")
         plan = plan_of((board.path / task.path).read_text())
         if not plan:
@@ -2398,22 +2133,11 @@ def mine(board: Board, engineer: str, as_json: bool) -> int:
               f"{(' (plan approved by @' + r['plan_approved_by'] + ')' if r['approval_holds'] else ' (plan changed since approval)') if r['plan_approved_by'] else ''}\t@{', @'.join(r['workers'])}\t{r['project'] or '-'}\t{r['title']}"
               for r in report["tasks"]]
     lines += [f"  review {r['id']}\t@{r['reviewer']}\t{r['kind']}\t{r['project'] or '-'}\t{r['title']}" for r in report["reviews"]]
-    lines += [f"  lead {r['id']}{' (was ' + r['accepted_from'] + ')' if r['accepted_from'] else ''}\t{r['status']}\t@{r['lead']}\t{r['title']}" for r in report["leads"]]
     lines += [f"  reserved {r['id']}\t{r['project'] or '-'}\t{r['title']}" for r in report["reserved"]]
     if report["reviews_waiting"]:
         lines.append(f"  reviews waiting for you: {', '.join(report['reviews_waiting'])}"
                      + ("; asdlc next leaves a slot for one" if report["slot_left_for_review"] else ""))
     _emit(report, as_json, lines)
-    return 0
-
-
-def lead_of_command(board: Board, raw_id: str, as_json: bool) -> int:
-    found = lead_of(_items(board, _refresh(board)), normalise_id(raw_id, _prefix(board)))
-    if found.intent is None:
-        line = f"{found.task} has no parent intent, so no lead"
-    else:
-        line = f"{found.intent} is led by @{found.lead}" if found.lead else f"{found.intent} has no lead: claim it with asdlc lead {found.intent} --as <worker>"
-    _emit({"task": found.task, "intent": found.intent, "lead": found.lead}, as_json, [line])
     return 0
 
 
@@ -2548,7 +2272,6 @@ def _claim_on_board(board: Board, task_id: str, worker: str, registry: Mapping[s
         branch = task.branch or branch_name(task)
         if not task.branch:
             _write_key(board, task, BRANCH_KEY, branch)
-        _write_key(board, task, HEARTBEAT_KEY, yaml_quoted(datetime.now(UTC).isoformat(timespec="seconds")))  # the claim is the first heartbeat
         if task.reserved_for_author:
             _write_key(board, task, RESERVED_KEY, None)
         return f"Claim {task_id} for @{worker}", Claimed(replace(task, status=IN_PROGRESS, assignees=assignees, branch=branch))
@@ -2606,7 +2329,7 @@ def _claim_lines(report: Mapping[str, object]) -> list[str]:
 
 
 def _attempt[R](command: str, worker: str, task_id: str, claiming: Callable[[], R]) -> R:
-    """Run one claim of a task, a review or a lead, and record how it went in the event log.
+    """Run one claim of a task or a review, and record how it went in the event log.
 
     Raises:
         AsdlcError: the claim was refused; it is recorded first.
@@ -2619,8 +2342,6 @@ def _attempt[R](command: str, worker: str, task_id: str, claiming: Callable[[], 
     match result:
         case Taken(reason=reason, lost=lost):
             _record(command, worker, task_id, Attempt.LOST if lost else Attempt.REFUSED, reason)
-        case Led(mine=mine, reason=reason, lost=lost):
-            _record(command, worker, task_id, Attempt.CLAIMED if mine else Attempt.LOST if lost else Attempt.REFUSED, reason)
         case _:
             _record(command, worker, task_id, Attempt.CLAIMED, "")
     return result
@@ -2676,7 +2397,7 @@ def next_task(board: Board, worker: str, engineer: str, cwd: Path, as_json: bool
 
 def release(board: Board, raw_id: str, worker: str, cwd: Path) -> None:
     """Hand back the worker's own In Progress task (To Do, still reserved for any person it was
-    reserved for), or give up its lead on an intent.
+    reserved for), or the review claim a reviewer holds.
 
     Raises:
         AsdlcError: the worker holds neither, or the change can't be pushed.
@@ -2688,10 +2409,11 @@ def release(board: Board, raw_id: str, worker: str, cwd: Path) -> None:
         nonlocal task_id
         task, _ = held_item(_items(board), asked, worker)
         task_id = task.id if task is not None else asked
-        if task is not None and task.lead == worker:
-            _write_key(board, task, LEAD_KEY, None)
-            _comment(board, task, f"@{worker} gave up the lead on {task_id}; another orchestrator may claim it with asdlc lead.", f"@{worker}")
-            return f"Release the lead on {task_id} from @{worker}", f"released the lead on {task_id}"
+        if task is not None and task.reviewer == worker:
+            _write_key(board, task, REVIEWER_KEY, None)
+            _write_key(board, task, REVIEW_KIND_KEY, None)
+            _comment(board, task, f"@{worker} released its review claim on {task_id}; another reviewer may claim it with asdlc review-next.", f"@{worker}")
+            return f"Release the review of {task_id} from @{worker}", f"released the review claim on {task_id}; it is still {task.status}, and another reviewer may take it"
         if task is None or f"@{worker}" not in task.assignees or not is_status(task, IN_PROGRESS):
             held = "is not on the board" if task is None else f"is {task.status}, assigned to {', '.join(task.assignees) or 'nobody'}"
             raise AsdlcError(f"{task_id} {held}; only @{worker}'s own In Progress task can be released by @{worker}")
@@ -2897,7 +2619,7 @@ class Attempt(StrEnum):
 
 
 def event_line(now: datetime, command: str, worker: str, task: str | None, outcome: Attempt, reason: str) -> str:
-    """One attempt to claim a task, a review or a lead, as a JSON line for the machine's event log."""
+    """One attempt to claim a task or a review, as a JSON line for the machine's event log."""
     return json.dumps({"time": now.astimezone(UTC).isoformat(timespec="seconds"), "command": command, "engineer": owner_of(worker),
                        "worker": worker, "task": task, "outcome": str(outcome), "reason": reason})
 
@@ -3115,8 +2837,8 @@ def _settings_findings(facts: Facts) -> list[Finding]:
     if facts.settings is None and not facts.shared:
         return []  # a local board has no asdlc.toml, which is what makes it local
     if facts.settings is None:
-        return [Finding("asdlc.toml", Level.WARN, f"the tasks repository has no asdlc.toml, so the defaults apply ({human(DEFAULT_STALE_AFTER)} stale, "
-                                                  f"{human(DEFAULT_REVIEW_FALLBACK_AFTER)} review fallback): asdlc init-board {facts.board} adds it")]
+        return [Finding("asdlc.toml", Level.WARN, f"the tasks repository has no asdlc.toml, so the defaults apply "
+                                                  f"({human(DEFAULT_REVIEW_FALLBACK_AFTER)} review fallback): asdlc init-board {facts.board} adds it")]
     try:
         settings = parse_settings(facts.settings)
     except AsdlcError as error:
@@ -3125,15 +2847,7 @@ def _settings_findings(facts: Facts) -> list[Finding]:
         board_mode(facts.settings)
     except AsdlcError as error:
         return [Finding("asdlc.toml", Level.FAIL, str(error))]
-    if settings.review_fallback_after >= settings.stale_after:
-        return [Finding("asdlc.toml", Level.FAIL, f"review_fallback_after ({human(settings.review_fallback_after)}) must be shorter than stale_after "
-                                                  f"({human(settings.stale_after)}), so the author's machine can review a waiting task before "
-                                                  "claims around it count as abandoned")]
-    if settings.approval_wait < settings.stale_after:
-        return [Finding("asdlc.toml", Level.WARN, f"approval_wait ({human(settings.approval_wait)}) is shorter than stale_after ({human(settings.stale_after)}), "
-                                                  "so a claim waiting for a person's approval is released sooner than an idle one: make it longer")]
-    return [Finding("asdlc.toml", Level.PASS, f"stale_after {human(settings.stale_after)}, review_fallback_after {human(settings.review_fallback_after)}, "
-                                              f"approval_wait {human(settings.approval_wait)}")]
+    return [Finding("asdlc.toml", Level.PASS, f"review_fallback_after {human(settings.review_fallback_after)}")]
 
 
 def _policy_findings(facts: Facts) -> list[Finding]:
@@ -4626,21 +4340,18 @@ def published_plugins(log: Iterable[tuple[datetime, str]]) -> tuple[tuple[dateti
 
 
 def coordination_stage(ledger: Ledger, subjects: Sequence[tuple[datetime, str]], events: Sequence[Mapping[str, object]], window: Window) -> dict[str, object]:
-    """The shared board itself: races lost, claims reaped and released, onboardings."""
+    """The shared board itself: races lost, claims released, onboardings."""
     attempts: dict[str, Counter[str]] = {}
     for event in events:
         if window.has(_iso(str(event.get("time", "")))):
             attempts.setdefault(str(event.get("command", "")), Counter())[str(event.get("outcome", ""))] += 1
     claims_made = sum(attempts.get(c, Counter())[Attempt.CLAIMED] for c in ("claim", "next"))
     lost = sum(attempts.get(c, Counter())[Attempt.LOST] for c in ("claim", "next"))
-    reaped: Counter[str] = Counter()
     released = 0
     for when, subject in subjects:
         if not window.has(when):
             continue
-        if found := re.match(r"Reap the (claim|lead|review|reservation) on ", subject):
-            reaped[found[1]] += 1
-        elif re.match(r"Release (?:the lead on )?\S+ from @", subject):
+        if re.match(r"Release \S+ from @", subject):
             released += 1
     onboardings = []
     for when, plugin in published_plugins(subjects):
@@ -4654,11 +4365,8 @@ def coordination_stage(ledger: Ledger, subjects: Sequence[tuple[datetime, str]],
              "by_command": {command: dict(sorted(counts.items())) for command, counts in sorted(attempts.items())}}
     per = f"{races['lost_per_claim']:.2f}" if races["lost_per_claim"] is not None else "-"
     return _stage("coordination", {
-        "lost_races": _metric("", "", "lost races per claim", "this machine's event log (claim, next, review-next, lead)",
+        "lost_races": _metric("", "", "lost races per claim", "this machine's event log (claim, next, review-next)",
                               f"{per} ({lost} lost, {claims_made} claimed)", **races),
-        "reaped": _metric("", "", "holds reaped", "the board's 'Reap the <hold> on <id>' commits",
-                          ", ".join(f"{n} {hold}(s)" for hold, n in sorted(reaped.items())) or "none", by_hold=dict(sorted(reaped.items())),
-                          released_reservations=reaped["reservation"]),
         "released": _metric("", "", "released by hand", "the board's 'Release <id> from @<worker>' commits", str(released), count=released),
         "onboardings": _metric(
             "", "", "onboardings", "the tasks repository's 'Add the <slug> plugin' commits, from the newest claim in that repository before each",
@@ -4988,7 +4696,7 @@ def init_board(directory: Path) -> None:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="asdlc", description="A shared Backlog.md board: claims, worktrees, routing, leads and orchestration.")
+    parser = argparse.ArgumentParser(prog="asdlc", description="A Backlog.md board: claims, worktrees, routing and orchestration.")
     parser.add_argument("--board", help="the board clone (else $ASDLC_BOARD, else git config asdlc.board, else the board clone you are in)")
     parser.add_argument("--in", dest="folder", metavar="FOLDER", help=IN_HELP)
     after = argparse.ArgumentParser(add_help=False)  # --in is accepted after the subcommand too
@@ -5010,7 +4718,7 @@ def _parser() -> argparse.ArgumentParser:
 
     worker = "the worker: your engineer name, a dot and a label, such as kyle.w1"
     add("claim", "claim a task and make its worktree", task="the task", who=worker, json_output=True)
-    add("release", "put your claimed task back to To Do, or give up a lead", task="the task or intent", who=worker)
+    add("release", "put your claimed task back to To Do, or give up the review claim a reviewer holds", task="the task", who=worker)
     add("next", "claim the best task this worker may start", who=worker, json_output=True)
     add("route", "the model and effort for a task, as JSON", task="the task")
     commands.add_parser("board", help="run a backlog command on the board and push it")
@@ -5018,19 +4726,12 @@ def _parser() -> argparse.ArgumentParser:
     add("register", "register the code repository you are in on this machine and on the board", json_output=True).add_argument(
         "--board", dest="register_board", help="the board clone to use for this repository (sets git config asdlc.board)")
     add("repos", "the code repositories registered on this machine", json_output=True)
-    add("lead", "claim the lead on an intent", task="the intent", who="the orchestrator's name, such as kyle.lead", json_output=True).add_argument(
-        "--new", action="store_true", help="the draft that has this id now is the one meant, even though a lead of yours was accepted from it")
-    add("lead-of", "the lead of a task's parent intent", task="the task or intent", json_output=True)
-    add("heartbeat", "keep a claim or a lead alive", task="the task or intent", who=worker)
-    reaping = add("reap", "release claims and leads with no board update for the stale timeout", json_output=True)
-    reaping.add_argument("--older-than", help="the stale timeout, such as 2h (else stale_after in the board's asdlc.toml, else 2h)")
-    reaping.add_argument("--now", help="the time to judge staleness at, as ISO 8601 (for tests and demonstrations)")
     add("accept", "a person's command: accept an intent and its draft children", task="the intent", json_output=True)
     approving = commands.add_parser("approve", help="a person's command: approve the plans of tasks, size 2 and up, so their workers build them", parents=[after])
     approving.add_argument("ids", nargs="+", help="the tasks whose plans you approve")
     approving.add_argument("--plan-hash", action="append", default=[], help="the digest of each plan you were shown, in the order of the ids; "
                            "a plan changed since is refused")
-    add("mine", "an engineer's workers' tasks, leads and reservations", who="the engineer, such as kyle", json_output=True)
+    add("mine", "an engineer's workers' tasks and reservations", who="the engineer, such as kyle", json_output=True)
     commands.add_parser("record-check", help="run a check in the task's worktree and record it on the task: "
                         "record-check <id> --in <worktree> --as <worker> -- <command...>")
     finishing_work = add("finish", "hand your held task to review: In Review with its branch and pull request", task="the task", who=worker, json_output=True)
@@ -5200,7 +4901,7 @@ def main(argv: Sequence[str]) -> int:
                 print(done.stdout, end="")
                 print(done.stderr, end="", file=sys.stderr)
                 return done.returncode
-            case "claim" | "next" | "release" | "lead" | "heartbeat":
+            case "claim" | "next" | "release":
                 _check_backlog()
                 worker = worker_for(arguments.worker, _engineer(cwd))
                 match arguments.command:
@@ -5210,22 +4911,11 @@ def main(argv: Sequence[str]) -> int:
                         return next_task(board, worker, owner_of(worker), cwd, as_json)
                     case "release":
                         release(board, arguments.id, worker, cwd)
-                    case "lead":
-                        led = _attempt("lead", worker, normalise_id(arguments.id, _prefix(board)), lambda: lead(board, arguments.id, worker, arguments.new))
-                        _emit({"intent": led.intent, "lead": led.lead, "mine": led.mine, "reason": led.reason}, as_json, [led.reason])
-                        return 0 if led.mine else 1
-                    case "heartbeat":
-                        print(heartbeat(board, arguments.id, worker, _when(None)))
-            case "lead-of":
-                return lead_of_command(board, arguments.id, as_json)
             case "stats":
                 return stats(board, _since(arguments.since), arguments.stage, as_json)
             case "intent-started":
                 _check_backlog()
                 print(intent_started(board, arguments.id, _when(arguments.at), datetime.now(UTC)))
-            case "reap":
-                _check_backlog()
-                return reap(board, _when(arguments.now), parse_duration(arguments.older_than) if arguments.older_than else None, as_json)
             case "accept":
                 _check_backlog()
                 result = accept(board, arguments.id, _engineer(cwd))

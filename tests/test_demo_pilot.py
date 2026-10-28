@@ -155,7 +155,7 @@ class PilotReadinessTest(review.CrossMachineReviewTest):
         self.say(f"\n$ asdlc doctor            # on kyle's machine (exit {code})\n{text.rstrip()}")
 
         # ann's machine has problems.
-        (self.ann.board / "asdlc.toml").write_text('stale_after = "2h"\nreview_fallback_after = "3h"\n')
+        (self.ann.board / "asdlc.toml").write_text('review_fallback_after = \n')  # not valid TOML
         self.ann.git(self.api["ann"], "config", "--unset", "asdlc.board")
         self.ann.git(self.api["ann"], "worktree", "add", "--quiet", "--detach", str(self.ann.home / "api.worktrees" / "review-task-2-ann.r1"), "origin/main")
         self.ann.env["DEMO_GH_SIGNED_IN"] = "0"

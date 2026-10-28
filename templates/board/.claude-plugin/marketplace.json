@@ -8,7 +8,7 @@
     {
       "name": "team",
       "source": "./plugins/team",
-      "description": "The team's own skills and rules: how we test and verify work, and the contract a lead writes for a large feature."
+      "description": "The team's own skills and rules: how we test and verify work, and the contract written for a large feature."
     }
   ]
 }
