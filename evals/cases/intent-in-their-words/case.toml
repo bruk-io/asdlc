@@ -1,0 +1,17 @@
+source = "The playbook's capture-as-intent play (the intent is a proto-spec in the originator's own terms) and spec/agentic-sdlc-plugin-evals.md, Intent replay: does the draft keep what the requester said, and can each outcome be judged. A judge reads what no deterministic check can."
+kind = "outcome"
+suite = "capability"
+description = "A product owner describes a problem in their own words. The agent writes a draft intent whose problem keeps their wording and facts and names no solution, with each outcome as an acceptance criterion, and shows it to them. Deterministic checks cover the parts; two rubric judges (advisory until calibrated) read how faithful and how checkable it is."
+checks = ["intent_has_its_parts", "outcomes_are_acceptance_criteria", "shown_to_the_person"]
+judges = ["intent_faithful", "intent_checkable"]
+arms = ["with-plugin"]
+
+[run]
+model = "sonnet"
+effort = "medium"
+max_turns = 30
+max_budget_usd = 2.0
+timeout_minutes = 15
+
+[[sessions]]
+prompt = """Our support team keeps telling me the same thing: when a customer fails to log in they just see "Login failed" and phone us. About a third of their calls are that. They want customers to be told when it's because the account is locked, but legal says we can never reveal whether an account exists. I don't know how we'd do both. Can you write this up so engineering can pick it up?"""
