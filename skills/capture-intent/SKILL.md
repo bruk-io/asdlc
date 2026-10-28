@@ -1,6 +1,6 @@
 ---
 name: capture-intent
-description: Write new work down as an intent on the shared board - a draft of type intent with the problem, constraints and open questions in the requester's own words, and the outcomes they want as acceptance criteria - for a person to accept. Use when someone describes a problem or a piece of work bigger than one small change, asks to write an intent or put work on the board, or when an alert or incident needs to become work. Not for questions, bug reports with an obvious fix, or work that fits in a handful of tool calls.
+description: Write new work down as an intent on the board - a draft of type intent with the problem, constraints and open questions in the requester's own words, and the outcomes they want as acceptance criteria - for a person to accept. Use when someone describes a problem or a piece of work bigger than one small change, asks to write an intent or put work on the board, or when an alert or incident needs to become work. Not for questions, bug reports with an obvious fix, or work that fits in a handful of tool calls.
 ---
 
 # Capture intent
@@ -18,6 +18,10 @@ When someone describes a problem rather than a finished intent, ask what an anal
 If they are not there to ask, write the draft from what you have and turn every gap into an open question.
 
 An intent that comes from an alert or an incident is written the same way: the anomaly and its evidence are the problem, and whatever the evidence can't settle is an open question.
+
+## Find the board
+
+`asdlc board ...` finds the board itself: `--board`, `$ASDLC_BOARD`, `git config asdlc.board`, or a `backlog/` folder in the repository you are in. Run `asdlc whoami`; if it names a board, use it. If there is none, ask the person once where the work should be kept, in this repository (`asdlc init-board --local .`, a board committed to the branch checked out here, never pushed by asdlc) or in a repository of its own that others share (`asdlc init-board <dir>`), and write the answer as one line in this repository's `CLAUDE.md` so nobody is asked again. Don't choose for them.
 
 ## Write it on the board
 
@@ -55,7 +59,7 @@ EOF
 
 If the person is there, show them the draft (`asdlc board draft view <id> --plain`) and correct it with them; it is their problem, in their words. Point out anything you guessed.
 
-Stop there. The intent's lead (the lead skill) writes the spec and drafts the child tasks under it, and then the person accepts the whole of it with `asdlc accept <id>`, in their own terminal. Agents can't accept work; the board guard refuses it.
+Stop there. The orchestrator writes the spec (the write-spec skill) and drafts the child tasks under it (the break-down-intent skill), and then the person accepts the whole of it with `asdlc accept <id>`, in their own terminal. Agents can't accept work; the board guard refuses it.
 
 ## In a repository that keeps intents as files
 

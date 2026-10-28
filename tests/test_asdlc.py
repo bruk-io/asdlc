@@ -1374,6 +1374,86 @@ class BoardCommandTest(unittest.TestCase):
         self.assertIn("uncommitted changes", done.stderr)
 
 
+class BoardModeTest(unittest.TestCase):
+    def test_a_board_with_no_settings_file_is_local(self) -> None:
+        self.assertFalse(asdlc.board_mode(None))
+
+    def test_a_board_with_settings_and_no_mode_is_shared_as_every_board_was(self) -> None:
+        self.assertTrue(asdlc.board_mode('stale_after = "2h"\n'))
+
+    def test_mode_says_which(self) -> None:
+        self.assertTrue(asdlc.board_mode('mode = "shared"\n'))
+        self.assertFalse(asdlc.board_mode('mode = "local"\n'))
+
+    def test_any_other_mode_is_refused_with_the_two_words(self) -> None:
+        with self.assertRaisesRegex(asdlc.AsdlcError, 'mode is "shared".*or "local"'):
+            asdlc.board_mode('mode = "team"\n')
+
+
+@needs_backlog
+class LocalBoardTest(unittest.TestCase):
+    """A board kept in the repository where the work is done: committed to the checked-out branch, never pushed."""
+
+    def setUp(self) -> None:
+        handle = tempfile.TemporaryDirectory()
+        self.addCleanup(handle.cleanup)
+        self.code = Path(handle.name).resolve() / "code"
+        _git(self.code.parent, "init", "--quiet", "-b", "main", str(self.code))
+        _git(self.code, "config", "user.email", "test@example.com")
+        _git(self.code, "config", "user.name", "Test")
+        (self.code / "app.py").write_text("print('hi')\n")
+        _git(self.code, "add", ".")
+        _git(self.code, "commit", "--quiet", "-m", "start")
+        _git(self.code, "switch", "--quiet", "-c", "feature")
+        done = _asdlc("init-board", "--local", str(self.code))
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_init_commits_backlog_on_the_checked_out_branch_and_writes_no_settings_file(self) -> None:
+        self.assertEqual(_git(self.code, "log", "-1", "--format=%s"), "Initialise the asdlc board")
+        self.assertEqual(_git(self.code, "branch", "--show-current"), "feature")
+        self.assertFalse((self.code / "asdlc.toml").exists())
+        self.assertFalse(asdlc.open_board(self.code).shared)
+
+    def test_a_change_is_committed_to_the_branch_with_no_remote_and_code_edits_are_left_alone(self) -> None:
+        (self.code / "app.py").write_text("print('edited')\n")
+        (self.code / "notes.txt").write_text("untracked\n")
+        done = _asdlc("board", "task", "create", *_sized("First"), cwd=self.code)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("TASK-1", done.stdout)
+        self.assertEqual(_git(self.code, "branch", "--show-current"), "feature")
+        self.assertEqual(_git(self.code, "show", "--stat", "--format=", "HEAD").count("app.py"), 0)
+        self.assertEqual((self.code / "app.py").read_text(), "print('edited')\n")
+        self.assertEqual((self.code / "notes.txt").read_text(), "untracked\n")
+        self.assertEqual(_git(self.code, "status", "--porcelain"), "M app.py\n?? notes.txt")
+
+    def test_a_refused_change_leaves_no_commit_and_code_edits_alone(self) -> None:
+        (self.code / "app.py").write_text("print('edited')\n")
+        head = _git(self.code, "rev-parse", "HEAD")
+        done = _asdlc("board", "task", "edit", "TASK-9", "--notes", "x", cwd=self.code)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual(_git(self.code, "rev-parse", "HEAD"), head)
+        self.assertEqual(_git(self.code, "status", "--porcelain"), "M app.py")
+
+    def test_a_dropped_change_takes_back_only_backlog(self) -> None:
+        (self.code / "app.py").write_text("print('edited')\n")
+        board = asdlc.open_board(self.code)
+        with self.assertRaises(RuntimeError), asdlc._change(board):
+            _git(self.code, "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "--allow-empty", "-m", "board change")
+            (self.code / "backlog" / "stray.md").write_text("x\n")
+            raise RuntimeError
+        self.assertFalse((self.code / "backlog" / "stray.md").exists())
+        self.assertEqual(_git(self.code, "log", "-1", "--format=%s"), "Initialise the asdlc board")
+        self.assertEqual(_git(self.code, "status", "--porcelain"), "M app.py")
+
+    def test_refuses_while_changes_are_staged_since_a_board_commit_would_sweep_them_in(self) -> None:
+        (self.code / "app.py").write_text("print('staged')\n")
+        _git(self.code, "add", "app.py")
+        done = _asdlc("board", "task", "list", "--plain", cwd=self.code)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("staged changes", done.stderr)
+        self.assertIn("app.py", done.stderr)
+
+
 @needs_backlog
 class ClaimTest(unittest.TestCase):
     def setUp(self) -> None:

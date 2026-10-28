@@ -238,6 +238,7 @@ class World:
         self.board = self.root / "tasks"
         _git(self.root, "init", "--quiet", "-b", "main", str(self.board))
         _write(self.board / "backlog" / "config.yml", "project_name: tasks\n")
+        _write(self.board / "asdlc.toml", 'mode = "shared"\n')  # a board with no asdlc.toml is local, which never fetches or pushes
         market = json.loads((ROOT / "templates" / "board" / ".claude-plugin" / "marketplace.json").read_text()) | {"name": "tasks"}
         _write(self.board / ".claude-plugin" / "marketplace.json", json.dumps(market, indent=2) + "\n")
         _git(self.board, "add", ".")

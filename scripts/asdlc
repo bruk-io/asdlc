@@ -1371,10 +1371,31 @@ class Board:
 
     path: Path
     env: frozendict[str, str]
+    shared: bool = True  # False: a local board, kept in a repository whose branch it shares and never pushed by asdlc
+
+
+def board_mode(settings: str | None) -> bool:
+    """Whether a board is shared, from the text of its `asdlc.toml` (None when it has none).
+
+    `mode = "shared"` or `mode = "local"` says so. Without it, a board with an `asdlc.toml` is
+    shared, as every board was before there were two modes, and one without is local.
+
+    Raises: AsdlcError: the file isn't TOML, or `mode` is neither word.
+    """
+    if settings is None:
+        return False
+    try:
+        mode = tomllib.loads(settings).get("mode", "shared")
+    except tomllib.TOMLDecodeError as error:
+        raise AsdlcError(f"asdlc.toml on the board is not valid TOML: {error}") from None
+    if mode not in ("shared", "local"):
+        raise AsdlcError(f'asdlc.toml: mode is "shared" (a board in its own repository, pushed to origin) or "local" (a board in the repository where the work is done), not {mode!r}')
+    return mode == "shared"
 
 
 def open_board(path: Path) -> Board:
-    return Board(path, frozendict(hooks_off(os.environ)))
+    config = path / "asdlc.toml"
+    return Board(path, frozendict(hooks_off(os.environ)), board_mode(config.read_text() if config.exists() else None))
 
 
 def _board_git(board: Board, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -1421,11 +1442,20 @@ def _prefix(board: Board) -> str:
 
 
 def _fetch(board: Board) -> None:
-    _board_git(board, "fetch", "--quiet", "origin", BOARD_BRANCH)
+    if board.shared:
+        _board_git(board, "fetch", "--quiet", "origin", BOARD_BRANCH)
+
+
+def _base(board: Board) -> str:
+    """What a change is made on and measured from: origin/main for a shared board; for a local one,
+    the commit the change started at (HEAD when none is in flight)."""
+    if board.shared:
+        return f"origin/{BOARD_BRANCH}"
+    return (_pending(board) or {}).get("base", "HEAD")
 
 
 def _ahead(board: Board) -> int:
-    return int(_board_git(board, "rev-list", "--count", f"origin/{BOARD_BRANCH}..HEAD").stdout.strip() or "0")
+    return int(_board_git(board, "rev-list", "--count", f"{_base(board)}..HEAD").stdout.strip() or "0")
 
 
 def _batch_bodies(output: bytes) -> list[str]:
@@ -1494,7 +1524,7 @@ def _begin(board: Board) -> str:
 
 def _end(board: Board) -> None:
     """Remove the marker, unless the change's own commits are still unpushed (then the next command drops them)."""
-    if _ahead(board) == 0:
+    if not board.shared or _ahead(board) == 0:
         (_git_dir(board) / PENDING).unlink(missing_ok=True)
 
 
@@ -1504,6 +1534,12 @@ def _require_ready(board: Board) -> None:
         _say("an earlier asdlc command was interrupted; undoing its unfinished change to backlog/, and nothing else")
         _board_git(board, "checkout", "--quiet", "HEAD", "--", "backlog", check=False)
         _board_git(board, "clean", "-fdq", "--", "backlog")
+    if not board.shared:
+        staged = _board_git(board, "diff", "--cached", "--name-only").stdout.strip()
+        if staged:
+            raise AsdlcError(f"the board at {board.path} is a local board and has staged changes, which a board commit would sweep in:\n{staged}\n"
+                             "Commit or unstage them first (git restore --staged .).")
+        return
     branch = _board_git(board, "branch", "--show-current").stdout.strip()
     if branch != BOARD_BRANCH:
         raise AsdlcError(f"the board at {board.path} is on '{branch or 'a detached HEAD'}'; asdlc works on {BOARD_BRANCH} only")
@@ -1525,12 +1561,22 @@ def _drop_own(board: Board, clean: bool = False) -> None:
     """Drop this command's unpushed commits. Every asdlc change starts level with origin/main,
     so they are the only commits not on it; nobody else's change is lost. `clean` also removes
     files a failed or interrupted backlog command left in backlog/."""
+    if not board.shared:
+        # Only backlog/ goes back; the rest of the working tree is a person's code and stays as it is.
+        base = _base(board)
+        _board_git(board, "reset", "--quiet", "--soft", base)
+        _board_git(board, "reset", "--quiet", base, "--", "backlog")
+        _board_git(board, "checkout", "--quiet", "--", "backlog")
+        _board_git(board, "clean", "-fdq", "--", "backlog")
+        return
     _board_git(board, "reset", "--quiet", "--hard", f"origin/{BOARD_BRANCH}")
     if clean:
         _board_git(board, "clean", "-fdq", "--", "backlog")
 
 
 def _push(board: Board) -> tuple[Push, str]:
+    if not board.shared:
+        return Push.PUSHED, ""
     done = _board_git(board, "push", "--no-verify", "--quiet", "origin", f"HEAD:{BOARD_BRANCH}", check=False)
     return push_outcome(done.returncode, done.stderr), done.stderr.strip()
 
@@ -1617,6 +1663,9 @@ def _catch_up(board: Board) -> None:
     Raises:
         AsdlcError: the fetch failed, or local main has unpushed commits asdlc didn't make.
     """
+    if not board.shared:
+        (_git_dir(board) / PENDING).unlink(missing_ok=True)
+        return
     _fetch(board)
     marker = _pending(board)
     base = (marker or {}).get("base", "")
@@ -1650,8 +1699,8 @@ def _mark(board: Board, transaction: str) -> None:
     """Make this command's commits one commit with its trailer, keeping backlog's messages."""
     if not _ahead(board):
         return
-    messages = _board_git(board, "log", "--reverse", "--format=%B", f"origin/{BOARD_BRANCH}..HEAD").stdout.strip()
-    _board_git(board, "reset", "--quiet", "--soft", f"origin/{BOARD_BRANCH}")
+    messages = _board_git(board, "log", "--reverse", "--format=%B", f"{_base(board)}..HEAD").stdout.strip()
+    _board_git(board, "reset", "--quiet", "--soft", _base(board))
     _board_git(board, "commit", "--quiet", "--no-verify", "-m", f"{messages}\n\n{TRAILER}: {transaction}")
 
 
@@ -1716,7 +1765,7 @@ def _set_draft_parent(board: Board, parent: str) -> None:
 def _squash(board: Board, message: str, transaction: str, paths: Sequence[str] = ("backlog",)) -> bool:
     """Everything this command changed in `paths` as one commit on origin/main, with its trailer; False when nothing changed."""
     _board_git(board, "add", "-A", "--", *paths)
-    _board_git(board, "reset", "--quiet", "--soft", f"origin/{BOARD_BRANCH}")
+    _board_git(board, "reset", "--quiet", "--soft", _base(board))
     if _board_git(board, "diff", "--cached", "--quiet", check=False).returncode == 0:
         return False
     _board_git(board, "commit", "--quiet", "--no-verify", "-m", f"{message}\n\n{TRAILER}: {transaction}")
@@ -1798,15 +1847,16 @@ def resolve_board(explicit: str | None, cwd: Path) -> Path:
     return path
 
 
-def code_repo(cwd: Path, board: Path) -> Path | str:
-    """The root of the code repository the current directory is in, or why there is none."""
+def code_repo(cwd: Path, board: Path, shared: bool = True) -> Path | str:
+    """The root of the code repository the current directory is in, or why there is none.
+    A local board lives in the code repository, so there the board's own folder is the answer."""
     common = _git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
     if common.returncode != 0:
         return "the current directory is not in a git repository"
     git_dir = Path(common.stdout.strip())
     root = git_dir.parent if git_dir.name == ".git" else git_dir
     if root.resolve() == board.resolve():
-        return "the current directory is the board itself"
+        return "the current directory is the board itself" if shared else root
     if _git(cwd, "config", "--get", "asdlc.board").returncode != 0:
         return f"{root} has no asdlc.board configured"
     return root
@@ -1934,7 +1984,7 @@ def _refresh(board: Board) -> str:
     with _locked(board):
         _require_ready(board)
         _catch_up(board)
-    return f"origin/{BOARD_BRANCH}"
+    return _base(board) if board.shared else "HEAD"
 
 
 def _write_key(board: Board, task: Task, key: str, value: str | None) -> None:
@@ -2517,7 +2567,7 @@ def _claim_report(board: Board, task: Task, worker: str, cwd: Path, registry: Ma
         entry = registry.get(task.project)
         repo: Path | str = entry.path if entry else f"{task.project} is not registered on this machine"
     else:
-        repo = code_repo(cwd, board.path)
+        repo = code_repo(cwd, board.path, board.shared)
     match repo:
         case Path():
             path, resumed = make_worktree(repo, task, worker, board.path)
@@ -2653,7 +2703,7 @@ def release(board: Board, raw_id: str, worker: str, cwd: Path) -> None:
     print(_transact(board, step))
     task = _find(_items(board), task_id)
     entry = _registry().get(task.project) if task is not None and task.project else None
-    repo = entry.path if entry else code_repo(cwd, board.path)
+    repo = entry.path if entry else code_repo(cwd, board.path, board.shared)
     if isinstance(repo, Path) and (path := worktree_path(repo, task_id)).exists():
         print(f"its worktree is left as it was: {path}")
 
@@ -2949,6 +2999,7 @@ class Facts:
     board_error: str = ""
     devs: str | None = None  # devs/<engineer>.yaml's text
     dirty: str = ""
+    shared: bool = True
     branch: str = ""
     origin: str = ""  # origin's URL, "" when there is none
     origin_error: str | None = None  # why origin can't be reached without a prompt; None when it can
@@ -3036,6 +3087,8 @@ def _identity_findings(facts: Facts) -> list[Finding]:
 def _board_findings(facts: Facts) -> list[Finding]:
     if facts.board is None:
         return [Finding("board", Level.FAIL, facts.board_error)]
+    if not facts.shared:
+        return [Finding("board", Level.PASS, f"the board is local, in the repository at {facts.board}: board changes are committed to the branch checked out there and never pushed by asdlc")]
     found = [Finding("board", Level.PASS, f"the tasks repository's clone is {facts.board}")]
     if facts.dirty:
         changed = "; ".join(line.strip() for line in facts.dirty.splitlines())
@@ -3567,6 +3620,7 @@ def gather(explicit_board: str | None, cwd: Path) -> Facts:
         facts, board=board, claude_settings=claude_settings, mcp_configs=mcp_configs, plugin_commands=commands, plugin_roots=_plugin_roots(plugins),
         devs=read(board / "devs" / f"{engineer.removeprefix('@')}.yaml") if engineer else None,
         dirty=_git(board, "status", "--porcelain", "--untracked-files=no").stdout.strip(),
+        shared=open_board(board).shared,
         branch=_git(board, "branch", "--show-current").stdout.strip(),
         origin=origin.stdout.strip() if origin.returncode == 0 else "",
         origin_error=_reachable(board) if origin.returncode == 0 else None,
@@ -4850,6 +4904,33 @@ def _scaffold_files(directory: Path, config: Path) -> tuple[list[str], bool]:
     return added, False
 
 
+def init_local_board(directory: Path) -> None:
+    """A local board in the repository at `directory`: `backlog init` and one commit of `backlog/` on the
+    checked-out branch. No `asdlc.toml` (its absence is what makes the board local), no marketplace and no
+    team plugin, which belong to a board other engineers share.
+
+    Raises:
+        AsdlcError: `directory` isn't the root of a git repository, or backlog init failed.
+    """
+    top = _git(directory, "rev-parse", "--show-toplevel")
+    if top.returncode != 0 or Path(top.stdout.strip()).resolve() != directory.resolve():
+        raise AsdlcError(f"{directory} is not the root of a git repository; a local board lives in the repository where the work is done")
+    if (directory / "asdlc.toml").exists() and board_mode((directory / "asdlc.toml").read_text()):
+        raise AsdlcError(f"{directory} has an asdlc.toml without mode = \"local\", so it is a shared board")
+    board = open_board(directory)
+    config = directory / "backlog" / "config.yml"
+    if not config.exists():
+        done = _board_backlog(board, ["init", directory.name, "--defaults", "--integration-mode", "none",
+                                      "--check-branches", "false", "--include-remote", "false", "--bypass-git-hooks", "true"])
+        if done.returncode != 0 or not config.exists():
+            raise AsdlcError(f"backlog init failed in {directory}: {(done.stderr or done.stdout).strip()}")
+    config.write_text(board_config(config.read_text(), directory.name))
+    _board_git(board, "add", "--", "backlog")
+    if _board_git(board, "diff", "--cached", "--quiet", "--", "backlog", check=False).returncode != 0:
+        _board_git(board, "commit", "--quiet", "--no-verify", "-m", "Initialise the asdlc board", "--", "backlog")
+    print(f"local board ready at {directory}; board changes are committed to the branch checked out here and never pushed by asdlc")
+
+
 def init_board(directory: Path) -> None:
     """A board repository at `directory`: git, `backlog init`, this board's config, the
     marketplace and team plugin scaffolding, one commit. Run again on an existing board, it
@@ -4903,7 +4984,9 @@ def _parser() -> argparse.ArgumentParser:
     after = argparse.ArgumentParser(add_help=False)  # --in is accepted after the subcommand too
     after.add_argument("--in", dest="folder", metavar="FOLDER", default=argparse.SUPPRESS, help=IN_HELP)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("init-board", help="create a board repository", parents=[after]).add_argument("dir")
+    initialising = commands.add_parser("init-board", help="create a board repository, or with --local a board in the repository where the work is done", parents=[after])
+    initialising.add_argument("dir")
+    initialising.add_argument("--local", action="store_true", help="a local board: committed to the branch checked out in this repository, never pushed by asdlc")
 
     def add(name: str, text: str, *, task: str | None = None, who: str | None = None, json_output: bool = False) -> argparse.ArgumentParser:
         sub = commands.add_parser(name, help=text, parents=[after])
@@ -5082,7 +5165,7 @@ def main(argv: Sequence[str]) -> int:
         match arguments.command:
             case "init-board":
                 _check_backlog()
-                init_board(Path(arguments.dir).expanduser().resolve())
+                (init_local_board if arguments.local else init_board)(Path(arguments.dir).expanduser().resolve())
                 return 0
             case "repos":
                 return repos(as_json)
