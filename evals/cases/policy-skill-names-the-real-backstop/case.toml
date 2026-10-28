@@ -1,0 +1,16 @@
+source = "Spec R11 and the playbook's skills play: a skill holds one policy with a named owner and written source, and a policy that must always hold names the check behind it. skills/write-policy-skill names the failure: agents invent enforcement they never saw."
+kind = "outcome"
+suite = "regression"
+description = "An engineer asks for a skill for a security standard that must always hold and gives its owner, its source and the check that already enforces it. The skill carries the owner and source, names that check in Enforced by, and the agent builds no hook or script of its own."
+checks = ["skill_exists_with_owner_and_source", "names_the_existing_check", "invents_no_enforcement"]
+arms = ["with-plugin"]
+
+[run]
+model = "sonnet"
+effort = "medium"
+max_turns = 40
+max_budget_usd = 2.5
+timeout_minutes = 15
+
+[[sessions]]
+prompt = """Write a skill for our API security standard. Owner: Aisha Khan (security). Source: https://wiki.example.com/api-security. The rule: every endpoint requires the gateway JWT, using the @requires_jwt decorator; no anonymous routes. It has to hold every time, and scripts/check-endpoints.sh already checks it."""

@@ -1,0 +1,16 @@
+source = "skills/write-policy-skill step 5: if the policy must always hold and nothing enforces it, say so to the owner; that gap is a piece of work of its own. The playbook's skills play: a skill is advisory, so a policy that must hold needs something deterministic behind it."
+kind = "outcome"
+suite = "regression"
+description = "An engineer asks for a skill for a policy that must hold every time, and nothing in the repository enforces it. The skill says it is advisory only and does not claim a check or hook that does not exist, and the agent tells the engineer that nothing enforces it yet."
+checks = ["skill_exists_with_owner_and_source", "enforced_by_says_advisory", "tells_the_person_about_the_gap"]
+arms = ["with-plugin"]
+
+[run]
+model = "sonnet"
+effort = "medium"
+max_turns = 40
+max_budget_usd = 2.5
+timeout_minutes = 15
+
+[[sessions]]
+prompt = """Write a skill for our logging standard. Owner: Aisha Khan (security). Source: https://wiki.example.com/logging. The rule: no endpoint logs a request body, because bodies can hold personal data. It has to hold every time."""

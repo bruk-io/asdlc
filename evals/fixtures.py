@@ -534,3 +534,40 @@ def commit_history(machine: ev.Machine, clone: Path, base: str) -> list[dict[str
             done = subprocess.run([sys.executable, "-m", "unittest", "-q"], cwd=scratch, capture_output=True, text=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
         found.append({"sha": sha, "subject": machine.git(clone, "log", "-1", "--format=%s", sha), "files": files, "passes": done.returncode == 0})
     return found
+
+
+# Policy skills: what a case needs to read back from the repository after the agent wrote one.
+
+ENDPOINTS = '''"""Endpoints for acme/app."""
+
+from gateway import requires_jwt
+
+
+@requires_jwt
+def status(claim_id: str) -> dict[str, str]:
+    return {"id": claim_id, "status": "received"}
+'''
+
+CHECK_ENDPOINTS = """#!/bin/sh
+# Fails when an endpoint file has a route without the gateway JWT decorator.
+for file in "$@"; do
+  if grep -q '^def ' "$file" && ! grep -q '@requires_jwt' "$file"; then
+    echo "$file: an endpoint without @requires_jwt" >&2
+    exit 1
+  fi
+done
+"""
+
+
+def policy_files(clone: Path) -> dict[str, str]:
+    """What a case reads back after a policy skill was written: the skill, the settings, hook scripts and workflows."""
+    found = tree(clone)
+    skills = {name: text for name, text in found.items() if name.startswith(".claude/skills/") and name.endswith("/SKILL.md")}
+    first = sorted(skills)[0] if skills else ""
+    return {
+        "skill_path": first, "skill": skills.get(first, ""), "skills": str(len(skills)),
+        "settings": found.get(".claude/settings.json", ""),
+        "hook_scripts": "\n".join(name for name in found if name.startswith(".claude/hooks/")),
+        "workflows": "\n".join(text for name, text in found.items() if name.startswith(".github/workflows/")),
+        "new_scripts": "\n".join(name for name in found if name.startswith("scripts/") and name != "scripts/check-endpoints.sh"),
+    }
