@@ -6,6 +6,7 @@ checks = ["skill_exists_with_owner_and_source", "enforced_by_says_advisory", "te
 arms = ["with-plugin"]
 
 [run]
+permission_mode = "auto"
 model = "sonnet"
 effort = "medium"
 max_turns = 40

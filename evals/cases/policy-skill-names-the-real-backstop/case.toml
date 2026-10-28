@@ -6,6 +6,7 @@ checks = ["skill_exists_with_owner_and_source", "names_the_existing_check", "inv
 arms = ["with-plugin"]
 
 [run]
+permission_mode = "auto"
 model = "sonnet"
 effort = "medium"
 max_turns = 40

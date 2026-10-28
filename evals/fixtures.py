@@ -440,7 +440,7 @@ def solo(fixture: ev.Fixture, *, agent: str = "kyle", board: bool = False, files
     machine.clones["app"] = clone
     if branch:
         machine.git(clone, "switch", "--quiet", "-c", branch)
-    allow_solo_work(clone)
+    allow_solo_work(clone, fixture.plugin)
     return Solo(fixture, origin, machine)
 
 
@@ -450,16 +450,20 @@ def solo(fixture: ev.Fixture, *, agent: str = "kyle", board: bool = False, files
 SOLO_ALLOW = ("Bash(asdlc *)", "Bash(asdlc-plugin *)", "Bash(backlog task list *)", "Bash(backlog task view *)", "Bash(backlog draft list *)",
               "Bash(backlog draft view *)", "Bash(git status*)", "Bash(git diff*)", "Bash(git log*)", "Bash(git show*)", "Bash(git add*)", "Bash(git commit*)",
               "Bash(git switch*)", "Bash(git branch*)", "Bash(git checkout -b*)", "Bash(git stash*)", "Bash(git restore*)",
-              "Bash(git rev-parse*)", "Bash(python3 -m unittest*)", "Bash(python3 test_*.py*)", "Bash(python -m unittest*)")
+              "Bash(git rev-parse*)", "Bash(git ls-files*)", "Bash(git grep*)", "Bash(git check-ignore*)", "Bash(cat *)", "Bash(ls*)",
+              "Bash(python3 -m unittest*)", "Bash(python3 test_*.py*)", "Bash(python -m unittest*)")
 
 
-def allow_solo_work(clone: Path) -> None:
+def allow_solo_work(clone: Path, plugin: Path) -> None:
     """Add SOLO_ALLOW to the clone's .claude/settings.local.json, keeping what is there, and keep
     that file out of the repository's status so no case sees it as the agent's change."""
     path = clone / ".claude" / "settings.local.json"
     data = json.loads(path.read_text()) if path.is_file() else {}
     allow = data.setdefault("permissions", {}).setdefault("allow", [])
     allow += [rule for rule in SOLO_ALLOW if rule not in allow]
+    folders = data["permissions"].setdefault("additionalDirectories", [])
+    if str(plugin) not in folders:
+        folders.append(str(plugin))  # the skills copy their templates from the plugin
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2))
     exclude = clone / ".git" / "info" / "exclude"
