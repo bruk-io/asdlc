@@ -236,6 +236,16 @@ class OnDiskTest(unittest.TestCase):
         path.write_text("not json")
         self.assertEqual(gate.check_change(self.repo, "main").state, gate.State.MISSING)
 
+    def test_the_suite_digest_covers_evals_and_the_evals_definitions_and_nothing_else_in_spec(self) -> None:
+        _, before = gate.current(self.repo)
+        commit_file(self.repo, "spec/plugin.md", "a requirement\n")
+        self.assertEqual(gate.current(self.repo)[1], before)
+        commit_file(self.repo, "spec/plugin-evals.md", "an eval\n")
+        changed = gate.current(self.repo)[1]
+        self.assertNotEqual(changed, before)
+        commit_file(self.repo, "evals/cases/c/case.toml", "x = 2\n")
+        self.assertNotEqual(gate.current(self.repo)[1], changed)
+
     def test_an_untracked_new_skill_counts_as_a_steering_change(self) -> None:
         (self.repo / "skills" / "b").mkdir()
         (self.repo / "skills" / "b" / "SKILL.md").write_text("new\n")

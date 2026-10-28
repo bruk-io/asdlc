@@ -222,7 +222,7 @@ def _file_digests(root: Path, pathspecs: Iterable[str]) -> list[tuple[str, str]]
 def current(root: Path) -> tuple[dict[str, str], str]:
     """The steering digests (one per steering path) and the suite's digest, as the files are on disk now."""
     steering = {name: digest(_file_digests(root, [name])) for name in STEERING}
-    suite = digest(_file_digests(root, ["evals", ":(glob)spec/*-evals.md"]))
+    suite = digest([(name, content) for name, content in _file_digests(root, ["evals", "spec"]) if is_suite(name)])
     return steering, suite
 
 
