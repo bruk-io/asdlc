@@ -135,6 +135,21 @@ Each is a task from a real failure, or a request from the owner (R24); the owner
 
 That makes 28 cases with the seven kept: `approval-before-build`, `sent-back-resumes-branch`, `reviewer-full-verdict`, `reviewer-recall`, `reviewer-false-alarm`, `small-request-no-intent` and `trigger-set`.
 
+## Change 1: what was built, and where it departs from this plan
+
+Built in this change (the runner, plugin side): `scripts/gate_evidence.py` (steering paths, digests, `verify`, `select_cases`, `judge`, `build_report`), `scripts/eval gate`, `hooks/guard_gate.py`, `hooks/gate_status.py`, `scripts/check`'s reminder, `scripts/rubric_judge.py` and `scripts/eval calibrate`, the judged-dimension support in cases and reports, the "Look at" flags, and their tests and docs. No case under `evals/` is touched.
+
+Departures, each because building it showed the plan was wrong or too loose:
+
+- **The guards apply only in a repository that has a gate** (`scripts/eval` and `evals/cases/`). The plugin is installed in other people's repositories, where denying `--no-verify` or evidence paths would be a guest-mode imposition. Because of that scope, the existing board-guard test that allows `git push --no-verify` on a board did not have to change.
+- **A sixth state, `unknown`.** A change whose base can't be found is not a pass and not "missing evidence": it is `unknown`, and the push guard allows it, logs an error and says so, as the other guards do.
+- **`hooks/gate_status.py` is its own hook** and not part of `guard_gate.py`, so a `SessionStart` does not load the shell parser.
+- **Evidence and the hook log are never a change.** `changed_since` leaves out `.eval-results/` and `.asdlc/`, so a repository that does not ignore them does not count them as plugin edits (which would have tripped R23).
+- **`gate` skips a run that would repeat one.** If passing evidence already exists for the content on disk, it says so and spends nothing; it refuses when there is no regression case to run, since a gate that tests nothing would pass; and it records nothing if a steering path or the suite changes while it runs.
+- **The agent is told to stop and ask, and is not blocked from running `scripts/eval gate`.** A person may ask the agent to run it. The `SessionStart` line and the push denial say it spends tokens and a person decides.
+- **Not built:** the `PostToolUse` plan-sync hook, signing of reports, and git hooks, as decided above.
+- **Not yet done:** the rubric files and labels (`evals/calibration/`) are the owner's and belong to change 2; until they exist no case has a judge.
+
 ## Order of work
 
 1. Change 1, runner, in slices each with its tests and a passing `./scripts/check`: `gate_evidence.py` and `verify`; the write-deny and push guards; the R23 edit guard and the `SessionStart` line; `eval gate` itself, writing the report; the `scripts/check` reminder; then the judge kind on recorded verdicts with no model call, `calibrate`, the two `report` flags and the guide.

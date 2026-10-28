@@ -15,6 +15,7 @@ model calls, and `./scripts/check` runs `validate`.
     eval run [--case <name>]... [--trials N] [--model M] [--arm with-plugin|without-skills]
              [--plugin <path or git ref>] [--container] [--image <tag>] [--results <dir>]
     eval gate [--base <ref>] [--all] [--trials N] [--model M]
+    eval calibrate [--dimension <name>]... [--judge-model M]
     eval report [<results dir>] [--samples N]
     eval regrade <results dir>
 
@@ -49,6 +50,13 @@ from enum import StrEnum
 from pathlib import Path
 from types import ModuleType
 
+from rubric_judge import DEFAULT_MODEL as JUDGE_MODEL
+from rubric_judge import Dimension, Judged, RubricError, parse_dimension
+from rubric_judge import ask as ask_model
+from rubric_judge import calibrate as calibrate_judge
+from rubric_judge import calibration_record
+from rubric_judge import judge as ask_judge
+from rubric_judge import Verdict as JudgeVerdict
 from gate_evidence import (
     build_report,
     changed_since,
@@ -64,6 +72,7 @@ from gate_evidence import (
 
 ROOT = Path(__file__).resolve().parent.parent
 EVALS = ROOT / "evals"
+CALIBRATION = EVALS / "calibration"
 CASES = EVALS / "cases"
 PRICES = EVALS / "prices.toml"
 RESULTS = ROOT / ".eval-results"
@@ -120,6 +129,7 @@ class Case:
     suite: Suite
     description: str
     checks: tuple[str, ...]
+    judges: tuple[str, ...] = ()  # rubric dimensions a judge grades from the case's `artefacts`; advisory until calibrated
     sessions: tuple[Session, ...] = ()
     items: tuple[Item, ...] = ()
     agent: str = ""  # a plugin agent to run as the session's main agent, such as asdlc:worker
@@ -137,7 +147,7 @@ class Case:
         return self.sessions or tuple(Session(item.prompt, fresh=True) for item in self.items)
 
 
-_CASE_KEYS = {"source", "kind", "suite", "description", "checks", "sessions", "items", "agent", "arms"}
+_CASE_KEYS = {"source", "kind", "suite", "description", "checks", "judges", "sessions", "items", "agent", "arms"}
 _AGENT_KEYS = {"model", "effort", "max_turns", "max_budget_usd", "timeout_minutes", "permission_mode", "agent"}
 _PERMISSION_MODES = {"default", "acceptEdits", "dontAsk", "plan", "auto"}
 
@@ -166,6 +176,9 @@ def parse_case(text: str, name: str) -> Case:
     checks = data.get("checks", [])
     if not checks or not all(isinstance(c, str) and c for c in checks):
         problems.append("checks must name at least one check")
+    judges = data.get("judges", [])
+    if not isinstance(judges, list) or not all(isinstance(j, str) and re.fullmatch(r"[a-z][a-z0-9_-]*", j) for j in judges):
+        problems.append("judges must name rubric dimensions, each a lower-case word that is a file in evals/calibration/")
     sessions = []
     for number, raw in enumerate(data.get("sessions", []), start=1):
         if not isinstance(raw, dict) or not str(raw.get("prompt", "")).strip():
@@ -196,7 +209,7 @@ def parse_case(text: str, name: str) -> Case:
     run = settings if isinstance(settings, dict) else {}
     return Case(
         name=name, source=data["source"].strip(), kind=Kind(kind), suite=Suite(suite), description=data["description"].strip(),
-        checks=tuple(checks), sessions=tuple(sessions), items=tuple(items), agent=str(run.get("agent", data.get("agent", ""))),
+        checks=tuple(checks), judges=tuple(judges), sessions=tuple(sessions), items=tuple(items), agent=str(run.get("agent", data.get("agent", ""))),
         model=str(run.get("model", "sonnet")), effort=str(run.get("effort", "medium")), max_turns=int(run.get("max_turns", 60)),
         max_budget_usd=float(run.get("max_budget_usd", 5.0)), timeout_minutes=int(run.get("timeout_minutes", 30)),
         permission_mode=mode, arms=tuple(Arm(a) for a in arms),
@@ -698,6 +711,7 @@ class TrialResult:
     model: str
     plugin: str
     folder: str = ""
+    judged: tuple[Judged, ...] = ()
 
 
 def pass_at_k(n: int, c: int, k: int) -> float:
@@ -769,6 +783,17 @@ def cost(tokens: Mapping[str, Usage], prices: Sequence[Price]) -> tuple[float, t
     return total, tuple(sorted(unknown))
 
 
+def judged_counts(runs: Sequence[TrialResult]) -> dict[str, dict[str, object]]:
+    """Per judged dimension over a case's trials: how many passes, fails and unknowns, and whether any verdict was allowed to gate."""
+    found: dict[str, dict[str, object]] = {}
+    for trial in runs:
+        for item in trial.judged:
+            row = found.setdefault(item.dimension, {"pass": 0, "fail": 0, "unknown": 0, "gating": False, "model": item.model})
+            row[str(item.verdict)] = int(row[str(item.verdict)]) + 1  # type: ignore[call-overload]
+            row["gating"] = bool(row["gating"]) or item.gating
+    return found
+
+
 def summarise(trials: Sequence[TrialResult], prices: Sequence[Price]) -> dict[str, object]:
     """Per case and overall: pass@k, pass^k, mean pass rate with standard error, what it can detect, counts and cost."""
     by_case: dict[str, list[TrialResult]] = defaultdict(list)
@@ -793,6 +818,7 @@ def summarise(trials: Sequence[TrialResult], prices: Sequence[Price]) -> dict[st
             "tool_errors": sum(t.counts.tool_errors for t in runs), "duration_ms": sum(t.counts.duration_ms for t in runs),
             "cli_cost_usd": sum(t.counts.cli_cost_usd for t in runs),
             "tokens": {m: asdict(u) for m, u in sorted(tokens.items())},
+            "judged": judged_counts(runs),
         }
     overall: dict[str, object] = {}
     for label, wanted in (("all", None), *((str(s), str(s)) for s in Suite)):
@@ -844,8 +870,31 @@ def _detect_text(difference: float) -> str:
     return f"{difference:.2f}" if difference < 1 else "more than the whole range, so no change at all (add cases and trials)"
 
 
+SATURATED_AFTER = 3  # consecutive runs of every trial passing before a capability case is proposed for graduation
+
+
+def case_flags(summary: Mapping[str, Mapping[str, object]], history: Mapping[str, Sequence[bool]]) -> dict[str, list[str]]:
+    """What a person should look at in a run, per case. `history` is each case's earlier runs, oldest first, as "every trial passed".
+
+    No trial passing (pass@k of 0) usually means a broken case, not an incapable agent, so the case is read before the plugin
+    is blamed. A capability case that passed every trial for the last few runs no longer discriminates and may graduate to
+    regression. Neither changes a case: a person decides.
+    """
+    flags: dict[str, list[str]] = {}
+    for name, case in summary.items():
+        found = []
+        if float(case["pass_at_k"]) == 0.0:  # type: ignore[arg-type]
+            found.append("no trial passed: read the transcripts and the case before the plugin; a case nothing passes is usually broken")
+        recent = [*history.get(name, ()), case["passed"] == case["trials"] and int(case["trials"]) > 0][-SATURATED_AFTER:]  # type: ignore[call-overload]
+        if case["suite"] == "capability" and len(recent) == SATURATED_AFTER and all(recent):
+            found.append(f"every trial passed in each of the last {SATURATED_AFTER} runs: no longer a hill to climb, so a person may graduate it to regression")
+        if found:
+            flags[name] = found
+    return flags
+
+
 def report_lines(summary: Mapping[str, object], meta: Mapping[str, object], version: str,
-                 samples: Sequence[tuple[TrialResult, Sequence[str]]]) -> list[str]:
+                 samples: Sequence[tuple[TrialResult, Sequence[str]]], flags: Mapping[str, Sequence[str]] | None = None) -> list[str]:
     lines = [f"Eval run {meta.get('run', '')}: plugin {meta.get('plugin', '')}, arm {meta.get('arm', '')}, "
              f"model {meta.get('model', '') or 'per case'}, {meta.get('where', '')}, prices {version}", ""]
     lines.append("| Case | Kind | Suite | Passed | pass@k | pass^k | Mean (SE) | Failing checks |")
@@ -855,6 +904,14 @@ def report_lines(summary: Mapping[str, object], meta: Mapping[str, object], vers
         lines.append(f"| {name} | {case['kind']} | {case['suite']} | {case['passed']}/{case['trials']} | {case['pass_at_k']:.2f} "
                      f"(k={case['k']}) | {case['pass_hat_k']:.2f} | {case['mean']:.2f} ({case['se']:.2f}) | {failing} |")
     lines.append("")
+    judged_rows = [(name, dimension, row) for name, case in dict(summary["cases"]).items() for dimension, row in dict(case.get("judged", {})).items()]
+    if judged_rows:
+        lines += ["Judged (a rubric judge, advisory unless calibrated):", "", "| Case | Dimension | Pass | Fail | Unknown | Model | Gating |", "|---|---|---|---|---|---|---|"]
+        lines += [f"| {name} | {dimension} | {row['pass']} | {row['fail']} | {row['unknown']} | {row['model']} | {'yes' if row['gating'] else 'no, not calibrated'} |"
+                  for name, dimension, row in judged_rows]
+        lines.append("")
+    if flags:
+        lines += ["Look at:"] + [f"- {name}: {note}" for name, notes in flags.items() for note in notes] + [""]
     for label, found in dict(summary["overall"]).items():
         detect = _detect_text(found["detectable"]) if found["detectable"] is not None else \
             f"not measured, since no trial differed from another; at a pass rate of one half it would be {_detect_text(found['detectable_worst_case'])}"
@@ -1085,6 +1142,7 @@ class Options:
     container: bool = False
     image: str = IMAGE
     deny_read: tuple[str, ...] = ()  # host folders the agent must not read: this repository and the results
+    judge_model: str = ""  # the model that judges rubric dimensions; the default is the judge module's
 
 
 def load_case(folder: Path) -> tuple[Case, ModuleType]:
@@ -1441,12 +1499,21 @@ def _validate(selected: Sequence[str], keep: bool, plugin: Path) -> int:
             checks = resolver(module, "checks")
             for check in case.checks:
                 checks(check)
+            for dimension in case.judges:
+                load_dimension(dimension)
+            if case.judges and not callable(getattr(module, "artefacts", None)):
+                raise CaseError(f"{case.name}: judges {list(case.judges)} need `def artefacts(outcome, case) -> {{dimension: text}}` in case.py, the text each judge reads")
             results = {}
             for mode in ("reference", "null"):
                 with tempfile.TemporaryDirectory(prefix=f"asdlc-eval-{mode}-") as scratch:
                     root = Path(scratch)
                     found, _, _ = trial(case, module, plugin, root / "transcripts", scripted_session, mode, root / "fixture")
                     results[mode] = run_checks(found, case, checks)
+                    if mode == "reference" and case.judges:
+                        texts = module.artefacts(found, case)
+                        empty = [d for d in case.judges if not str(texts.get(d, "")).strip()]
+                        if empty:
+                            raise CaseError(f"{case.name}: the reference run gives the judge nothing to read for {', '.join(empty)}: `artefacts` returned no text for it")
                     if keep:
                         shutil.copytree(root, RESULTS / "validate" / case.name / mode, dirs_exist_ok=True, symlinks=True)
             failed_null = [r.name for r in results["null"] if not r.passed]
@@ -1508,13 +1575,16 @@ def execute(selected: Sequence[str], trials: int, options: Options, plugin_sourc
                         shutil.copytree(config, where / "claude-projects", dirs_exist_ok=True)
                 results_ = run_checks(found, case, checks)
                 tally = counts(streams, found.events)
-                passed = all(r.passed for r in results_)
+                judged = run_judges(case, module, found, options.judge_model or JUDGE_MODEL, results)
+                passed = trial_passed(results_, judged)
                 (where / "outcome.json").write_text(json.dumps(outcome_json(found), indent=1))
                 (where / "trial.json").write_text(json.dumps({
                     "case": case.name, "kind": str(case.kind), "suite": str(case.suite), "trial": number, "passed": passed,
-                    "checks": [asdict(r) for r in results_], "counts": counts_json(tally), "arm": str(options.arm),
+                    "checks": [asdict(r) for r in results_], "judged": judged_json(judged), "counts": counts_json(tally), "arm": str(options.arm),
                     "model": options.model or case.model, "agent": case.agent, "plugin": version, "source": case.source}, indent=2))
                 print(f"  {'passed' if passed else 'FAILED'}: " + "; ".join(f"{r.name} {'ok' if r.passed else 'fail ' + r.detail}" for r in results_), flush=True)
+                for j in judged:
+                    print(f"  judge {j.dimension}: {j.verdict}{'' if j.gating else ' (advisory)'}: {j.reasoning}", flush=True)
     return out
 
 
@@ -1581,6 +1651,49 @@ def gate(base_ref: str, everything: bool, trials: int, options: Options, root: P
     return 0 if judged.passed else 1
 
 
+def calibrate(selected: Sequence[str], model: str, results: Path = RESULTS, asker: Callable[[str, str], str] = ask_model,
+              folder: Path = CALIBRATION) -> int:
+    """Measure each rubric judge's agreement with the person's labels, and record it for the dimensions that reach their bar.
+
+    Exits 0 when every dimension reached its bar, 1 when one did not, 2 when one could not be run.
+    """
+    names = sorted(p.stem for p in folder.glob("*.toml")) if folder.is_dir() else []
+    if selected:
+        unknown = sorted(set(selected) - set(names))
+        if unknown:
+            raise CaseError(f"no rubric named {', '.join(unknown)}; the rubrics are {', '.join(names) or 'none yet'}")
+        names = [n for n in names if n in selected]
+    if not names:
+        print("no rubric dimensions to calibrate: write evals/calibration/<dimension>.toml with a rubric and labelled samples")
+        return 2
+    model = model or JUDGE_MODEL
+    worst = 0
+    for name in names:
+        dimension = load_dimension(name, folder)
+        if not dimension.samples:
+            print(f"{name}: no labelled samples, so there is nothing to measure agreement with; add [[samples]] with a text and a label")
+            worst = max(worst, 2)
+            continue
+        print(f"{name}: asking {model} about {len(dimension.samples)} samples ...", flush=True)
+        try:
+            found, answers = calibrate_judge(dimension, model, asker)
+        except RubricError as error:
+            print(f"{name}: could not run the judge: {error}")
+            worst = max(worst, 2)
+            continue
+        reached = found.rate >= dimension.bar
+        print(f"{name}: agreement {found.matched}/{found.total} = {found.rate:.2f} against the bar {dimension.bar:.2f}: "
+              + ("reached; its verdicts may gate trials for this model" if reached else "not reached; its verdicts stay advisory"))
+        for index in found.mismatches:
+            sample_ = dimension.samples[index]
+            print(f"  sample {index + 1} you labelled {sample_.label}, the judge said {answers[index].verdict}: {answers[index].reasoning}")
+        record = calibration_record(dimension, model, found, datetime.now(UTC).isoformat(timespec="seconds"))
+        (results / "calibration").mkdir(parents=True, exist_ok=True)
+        (results / "calibration" / f"{name}.json").write_text(json.dumps(record, indent=2))
+        worst = max(worst, 0 if reached else 1)
+    return worst
+
+
 def regrade(folder: Path) -> int:
     """Grade stored outcomes again with the checks as they are now, and count the stored
     transcripts again with the parser as it is now: a check or a count fixed after a run judges
@@ -1606,13 +1719,80 @@ def regrade(folder: Path) -> int:
     return report(folder, 2)
 
 
+def load_dimension(name: str, folder: Path = CALIBRATION) -> Dimension:
+    """A rubric dimension from `evals/calibration/<name>.toml`.
+
+    Raises: CaseError: no such file, or it can't be used.
+    """
+    path = folder / f"{name}.toml"
+    if not path.is_file():
+        raise CaseError(f"no rubric for the judged dimension {name!r}: write evals/calibration/{name}.toml with its rubric (and labelled samples to calibrate on)")
+    try:
+        return parse_dimension(path.read_text(), name)
+    except RubricError as error:
+        raise CaseError(str(error)) from None
+
+
+def calibration_state(results: Path, name: str) -> dict[str, object] | None:
+    """What `calibrate` recorded for a dimension, None when it never ran."""
+    try:
+        found = json.loads((results / "calibration" / f"{name}.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return found if isinstance(found, dict) else None
+
+
+def trial_passed(checks: Sequence[CheckResult], judged: Sequence[Judged]) -> bool:
+    """A trial passes when every check does and no judge that may gate said fail. An advisory judge, or an unknown, never fails one."""
+    return all(r.passed for r in checks) and not any(j.gating and j.verdict is JudgeVerdict.FAIL for j in judged)
+
+
+def run_judges(case: Case, module: ModuleType, found: Outcome, model: str, results: Path,
+               asker: Callable[[str, str], str] = ask_model, folder: Path = CALIBRATION) -> tuple[Judged, ...]:
+    """Each of the case's judged dimensions, answered once on the artefact the case's `artefacts` returns for it.
+
+    A judge that can't answer (no claude, not signed in) is an `unknown` that says why and gates nothing: the trial
+    is graded by its checks alone, and the report shows the unknown.
+    """
+    if not case.judges:
+        return ()
+    texts = getattr(module, "artefacts")(found, case)
+    answers = []
+    for name in case.judges:
+        dimension = load_dimension(name, folder)
+        try:
+            answers.append(ask_judge(dimension, str(texts.get(name, "")), model, calibration_state(results, name), asker))
+        except RubricError as error:
+            answers.append(Judged(name, JudgeVerdict.UNKNOWN, f"judge unavailable: {error}", model, False))
+    return tuple(answers)
+
+
+def judged_json(found: Sequence[Judged]) -> list[dict[str, object]]:
+    return [{"dimension": j.dimension, "verdict": str(j.verdict), "reasoning": j.reasoning, "model": j.model, "gating": j.gating} for j in found]
+
+
+def judged_from_json(rows: Sequence[Mapping[str, object]]) -> tuple[Judged, ...]:
+    return tuple(Judged(str(r["dimension"]), JudgeVerdict(str(r["verdict"])), str(r.get("reasoning", "")), str(r.get("model", "")), bool(r.get("gating", False)))
+                 for r in rows)
+
+
+def case_history(results: Path, name: str, before: str) -> list[bool]:
+    """Whether every trial passed, for each earlier run of a case in the results folder, oldest first."""
+    found = []
+    for run_folder in sorted(p for p in results.glob("*") if (p / "run.json").exists() and p.name < before):
+        trials = [json.loads(path.read_text()) for path in sorted((run_folder / name).glob("trial-*/trial.json"))]
+        if trials:
+            found.append(all(t["passed"] for t in trials))
+    return found
+
+
 def load_trials(folder: Path) -> list[TrialResult]:
     found = []
     for path in sorted(folder.glob("*/trial-*/trial.json")):
         data = json.loads(path.read_text())
         found.append(TrialResult(data["case"], data["kind"], data["suite"], data["trial"], data["passed"],
                                  tuple(CheckResult(**c) for c in data["checks"]), counts_from_json(data["counts"]),
-                                 data["arm"], data["model"], data["plugin"], str(path.parent)))
+                                 data["arm"], data["model"], data["plugin"], str(path.parent), judged_from_json(data.get("judged", []))))
     return found
 
 
@@ -1629,11 +1809,14 @@ def report(folder: Path | None, samples: int) -> int:
         return 1
     version, prices = parse_prices(PRICES.read_text())
     meta = json.loads((folder / "run.json").read_text()) if (folder / "run.json").exists() else {}
+    summary = summarise(trials, prices)
+    history = {name: case_history(folder.parent, name, folder.name) for name in dict(summary["cases"])}
+    flags = case_flags(summary["cases"], history)  # type: ignore[arg-type]
     chosen = []
     for t in sample(trials, samples, max(1, samples // 2)):
         outcome = json.loads((Path(t.folder) / "outcome.json").read_text())
         chosen.append((t, key_moments([event_from_json(e) for e in outcome.get("events", [])])))
-    print("\n".join(report_lines(summarise(trials, prices), meta, version, chosen)))
+    print("\n".join(report_lines(summary, meta, version, chosen, flags)))
     return 0
 
 
@@ -1653,11 +1836,16 @@ def main(argv: Sequence[str]) -> int:
     running.add_argument("--container", action="store_true", help="run each agent inside the eval image")
     running.add_argument("--image", default=IMAGE)
     running.add_argument("--results", default=str(RESULTS))
+    running.add_argument("--judge-model", default="", help="the model that judges rubric dimensions (default: the judge module's; a different family from the agent under test is better)")
     gating = commands_.add_parser("gate", help="run what a change to the steering paths must pass, and record the evidence (spends tokens)")
     gating.add_argument("--base", default="", help="the ref the change is measured from (default: origin/main, else main)")
     gating.add_argument("--all", action="store_true", help="run every case, not only the regression cases, whatever changed")
     gating.add_argument("--trials", type=int, default=DEFAULT_TRIALS)
     gating.add_argument("--model", default="", help="override every session's model")
+    gating.add_argument("--judge-model", default="", help="the model that judges rubric dimensions")
+    calibrating = commands_.add_parser("calibrate", help="measure each rubric judge's agreement with your labels (spends tokens)")
+    calibrating.add_argument("--dimension", action="append", default=[])
+    calibrating.add_argument("--judge-model", default="", help="the model to calibrate")
     regrading = commands_.add_parser("regrade", help="grade a run's stored outcomes again with the checks as they are now")
     regrading.add_argument("folder")
     reporting = commands_.add_parser("report", help="statistics, counts, cost and a sample of transcripts")
@@ -1671,12 +1859,14 @@ def main(argv: Sequence[str]) -> int:
             case "run":
                 if args.trials < 1:
                     parser.error("--trials must be at least 1")
-                options = Options(model=args.model, arm=Arm(args.arm), container=args.container, image=args.image)
+                options = Options(model=args.model, arm=Arm(args.arm), container=args.container, image=args.image, judge_model=args.judge_model)
                 return run(args.case, args.trials, options, args.plugin or default_plugin(), Path(args.results))
             case "gate":
                 if args.trials < 1:
                     parser.error("--trials must be at least 1")
-                return gate(args.base, args.all, args.trials, Options(model=args.model))
+                return gate(args.base, args.all, args.trials, Options(model=args.model, judge_model=args.judge_model))
+            case "calibrate":
+                return calibrate(args.dimension, args.judge_model)
             case "regrade":
                 return regrade(Path(args.folder))
             case "report":

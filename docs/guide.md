@@ -230,6 +230,20 @@ scripts/eval regrade .eval-results/<run>     # grade a run again after fixing a 
 - **In the container**, `--container` runs each session inside the eval image instead: only the fixture is mounted (read-write) and the release (read-only), Bash runs in Claude Code's sandbox with no network of its own, and the image holds no credentials. Build the image once with `docker build -t asdlc-evals:local .devcontainer`, and pass `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or `ANTHROPIC_API_KEY` in your environment. The same image is the repository's dev container.
 - **Results** go to `.eval-results/<time>-<commit>-<arm>/` (ignored by git): per trial, every session's transcript, subagent transcripts, `outcome.json` and `trial.json` with each check's verdict and the counts. `report` gives each case's pass@k, pass^k and mean pass rate, the overall mean with its standard error clustered by case, the smallest change a run of that size can detect, tokens by model, turns, tool calls and errors, cost at API prices from `evals/prices.toml` beside Claude Code's own figure, and the key moments of a few failing and passing transcripts, so you can check the checks.
 
+### Judging what no check can decide
+
+Some things (is each requirement answerable yes or no? does the intent keep the requester's words?) have no deterministic check. A case can name a rubric dimension in `judges = ["requirements_checkable"]` and define `artefacts(outcome, case)` in `case.py`, returning the text each judge reads. The dimension is a file, `evals/calibration/<dimension>.toml`: the rubric (one question), the `bar` of agreement with your labels the judge must reach, and your labelled samples (`pass`, `fail` or `unknown`).
+
+```sh
+scripts/eval calibrate [--dimension <name>] [--judge-model M]   # asks the judge about your samples; spends tokens
+```
+
+- **One judge per dimension, with `unknown` allowed.** A judge that can't tell says so; unknown is neither a pass nor a fail. It reads the artefact in a fresh Claude Code configuration, with no tools, one turn, from an empty folder, and treats it as data.
+- **Advisory until calibrated.** `calibrate` records the agreement it measured, the model and a fingerprint of the rubric under `.eval-results/calibration/`. A judge's `fail` fails a trial only when the recorded agreement is at or above the bar for the model that is judging now; changing the rubric, adding samples or changing the judge model makes it advisory again. Reports show each dimension's passes, fails and unknowns and whether it gated.
+- **Use another model family than the agent under test** (`--judge-model`) where you can: a judge that shares the agent's blind spots agrees with it. The labels are yours; nobody else can supply them.
+
+`scripts/eval report` ends with a "Look at" list: a case no trial passed (usually a broken case, not an incapable agent, so read it before blaming the plugin), and a capability case that passed every trial in each of its last three runs (no longer a hill to climb; a person may graduate it to regression, and nothing changes until one does).
+
 ### The gate
 
 Before a change to the agent's steering paths merges (`CLAUDE.md`, `skills/`, `hooks/`, `agents/`, `commands/`), the suite has to have passed on it. In the plugin's own repository:
