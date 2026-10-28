@@ -3,6 +3,8 @@ shell pieces whose mistakes would grade a trial wrongly (a forced push missed, t
 handed to the agent). The cases themselves are proven by `scripts/eval validate`, which
 `./scripts/check` runs."""
 
+import contextlib
+import io
 import json
 import math
 import os
@@ -11,8 +13,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import ROOT, load, run_script
+from tests.support import ROOT, commit_file, git, load, make_repo, run_script
 
+load("scripts/protected_paths.py")  # scripts/gate_evidence.py imports it from beside itself
+gate_evidence = load("scripts/gate_evidence.py")  # scripts/eval imports it from beside itself
 ev = load("scripts/eval")
 
 CASE = """
@@ -393,6 +397,131 @@ class ShellTest(unittest.TestCase):
         done = run_script("scripts/eval", "report", str(self.root))
         self.assertEqual(done.returncode, 1)
         self.assertIn("no trials", done.stdout)
+
+
+class GateTest(unittest.TestCase):
+    """`eval gate` on a throwaway repository, with the agents replaced by a function that writes trial results."""
+
+    SUITES = {"keeps-the-gate": "regression", "keeps-the-rule": "regression", "measures-skill": "capability"}
+
+    def setUp(self) -> None:
+        handle, self.repo = make_repo()
+        self.addCleanup(handle.cleanup)
+        commit_file(self.repo, "skills/a/SKILL.md", "---\nname: a\n---\n")
+        commit_file(self.repo, "README.md", "hello\n")
+        git(self.repo, "branch", "-M", "main")
+        git(self.repo, "switch", "-q", "-c", "work")
+        self.calls: list[list[str]] = []
+        self.passing: dict[str, int] = {}  # a case's passes per trial count; missing means all
+        self.during = None
+
+    def fake_run(self, chosen: list[str], trials: int, options: object, plugin_source: str, results: Path) -> Path:
+        self.calls.append(list(chosen))
+        out = results / f"2026010{len(self.calls)}T000000Z-abc-with-plugin"
+        out.mkdir(parents=True)
+        (out / "run.json").write_text(json.dumps({"run": out.name, "plugin": "abc", "arm": "with-plugin", "model": "", "where": "native", "trials": trials}))
+        for name in chosen:
+            for number in range(1, trials + 1):
+                where = out / name / f"trial-{number}"
+                where.mkdir(parents=True)
+                passed = number <= self.passing.get(name, trials)
+                checks = [{"name": "the_check", "passed": passed, "detail": "" if passed else "it did not"}]
+                (where / "trial.json").write_text(json.dumps({
+                    "case": name, "kind": "outcome", "suite": self.SUITES[name], "trial": number, "passed": passed, "checks": checks,
+                    "counts": ev.counts_json(ev.Counts({}, 1, 1, 0, 1000, 0.0, 0, 1, 1)), "arm": "with-plugin", "model": "sonnet", "plugin": "abc"}))
+                (where / "outcome.json").write_text("{}")
+                (where / "session-0.jsonl").write_text("{}\n")
+        if self.during:
+            self.during()
+        return out
+
+    def gate(self, everything: bool = False, suites: dict[str, str] | None = None, base: str = "main") -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ev.gate(base, everything, 3, ev.Options(), root=self.repo, suites=suites or self.SUITES, run_cases=self.fake_run)
+        return code, out.getvalue(), err.getvalue()
+
+    def edit_skill(self, text: str) -> None:
+        commit_file(self.repo, "skills/a/SKILL.md", f"---\nname: a\n---\n{text}\n")
+
+    def test_a_change_with_no_steering_path_runs_nothing(self) -> None:
+        commit_file(self.repo, "docs/guide.md", "words\n")
+        code, out, _ = self.gate()
+        self.assertEqual(code, 0)
+        self.assertIn("gate not needed", out)
+        self.assertEqual(self.calls, [])
+
+    def test_a_steering_change_runs_the_regression_cases_and_records_passing_evidence(self) -> None:
+        self.edit_skill("new")
+        code, out, _ = self.gate()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.calls, [["keeps-the-gate", "keeps-the-rule"]])
+        self.assertIn("This spends tokens", out)
+        self.assertIn("gate passed", out)
+        self.assertEqual(gate_evidence.check_change(self.repo, "main").state, gate_evidence.State.PASS)
+
+    def test_a_second_run_for_the_same_content_spends_nothing(self) -> None:
+        self.edit_skill("new")
+        self.gate()
+        code, out, _ = self.gate()
+        self.assertEqual(code, 0)
+        self.assertIn("already passed", out)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_a_failing_regression_case_fails_the_gate_and_the_evidence_says_so(self) -> None:
+        self.edit_skill("new")
+        self.passing = {"keeps-the-rule": 2}
+        code, out, _ = self.gate()
+        self.assertEqual(code, 1)
+        self.assertIn("keeps-the-rule: 2 of 3 trials passed (failing: the_check x1)", out)
+        verdict = gate_evidence.check_change(self.repo, "main")
+        self.assertEqual(verdict.state, gate_evidence.State.FAIL)
+        self.assertIn("2 of 3 trials passed", verdict.reason)
+
+    def test_a_steering_path_edited_while_the_gate_ran_records_nothing(self) -> None:
+        self.edit_skill("new")
+        self.during = lambda: (self.repo / "skills" / "a" / "SKILL.md").write_text("edited during the run\n")
+        code, _, err = self.gate()
+        self.assertEqual(code, 2)
+        self.assertIn("changed while the gate ran", err)
+        self.assertFalse(list((self.repo / ".eval-results" / "gate").glob("*.json")) if (self.repo / ".eval-results" / "gate").exists() else [])
+
+    def test_a_transcript_edited_after_the_run_voids_the_evidence(self) -> None:
+        self.edit_skill("new")
+        self.gate()
+        next(self.repo.glob(".eval-results/*/keeps-the-gate/trial-1/session-0.jsonl")).write_text("{\"forged\": 1}\n")
+        verdict = gate_evidence.check_change(self.repo, "main")
+        self.assertEqual(verdict.state, gate_evidence.State.FAIL)
+        self.assertIn("was edited", verdict.reason)
+
+    def test_with_no_regression_case_it_refuses_rather_than_pass_untested(self) -> None:
+        self.edit_skill("new")
+        code, _, err = self.gate(suites={"measures-skill": "capability"})
+        self.assertEqual(code, 2)
+        self.assertIn("no regression case", err)
+        self.assertEqual(self.calls, [])
+
+    def test_no_base_is_refused(self) -> None:
+        git(self.repo, "branch", "-m", "work", "trunk")
+        git(self.repo, "branch", "-D", "main")
+        code, _, err = self.gate(base="")
+        self.assertEqual(code, 2)
+        self.assertIn("--base", err)
+
+    def test_all_runs_capability_cases_and_a_later_drop_beyond_noise_fails(self) -> None:
+        suites = {**self.SUITES, "measures-more": "capability", "measures-again": "capability", "and-again": "capability"}
+        self.SUITES = suites
+        self.edit_skill("one")
+        self.assertEqual(self.gate(everything=True, suites=suites)[0], 0)
+        self.passing = {"measures-skill": 0, "measures-more": 0, "measures-again": 0, "and-again": 0}
+        self.edit_skill("two")
+        code, out, _ = self.gate(everything=True, suites=suites)
+        self.assertEqual(code, 1)
+        self.assertIn("capability cases fell from 1.00 to 0.00", out)
+
+    def test_the_gate_command_line_refuses_zero_trials(self) -> None:
+        done = run_script("scripts/eval", "gate", "--trials", "0", cwd=self.repo)
+        self.assertEqual(done.returncode, 2)
 
 
 if __name__ == "__main__":

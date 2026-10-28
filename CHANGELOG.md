@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### The eval gate, run locally, and hooks that check for its evidence ([plan](plan/eval-suite.md))
+
+- `scripts/eval gate`: when steering paths changed since the base, runs the regression cases (every case with `--all`) against the working copy, judges them, and writes a report keyed by a digest of the steering paths and the suite. Every trial of a regression case must pass; capability cases must be no worse than the last passing gate beyond their own noise.
+- `scripts/gate_evidence.py verify` answers pass, fail, missing, stale, unknown or not needed, and is the only reader of a report. `./scripts/check` prints a reminder when evidence is missing and never fails for it.
+- `hooks/guard_gate.py`, in a repository that has the suite: refuses a push while steering paths changed without passing evidence, `--no-verify`, hand-written files under `.eval-results/` and `.asdlc/`, and an edit that would mix the plugin and the suite in one branch (R23). `hooks/gate_status.py` says where the gate stands at session start.
+- `guard_board.py` and `guard_test_edits.py` make a few helpers public for the new guard.
+
 ### The test-edit guard on bug tasks, and repeated findings turned into rules ([plan](plan/bug-guard-and-repeat-findings.md))
 
 From the second review against the playbook (plays 04, 07 and 09).

@@ -109,6 +109,98 @@ def verify(report: Mapping[str, object] | None, steering: Mapping[str, str], sui
     return Verdict(State.PASS, f"passed for these steering paths and this suite ({report.get('created', 'time unrecorded')})")
 
 
+# --- what the gate runs and how it judges -------------------------------------------------
+
+DRIFT_Z = 1.96  # two-sided 5%: a capability drop smaller than this many standard errors is noise
+
+
+@dataclass(frozen=True)
+class Judgement:
+    passed: bool
+    failures: tuple[str, ...]
+    notes: tuple[str, ...]
+
+    @property
+    def summary(self) -> str:
+        return "; ".join(self.failures) if self.failures else "; ".join(self.notes) or "passed"
+
+
+def select_cases(changed: Iterable[str], suites: Mapping[str, str], everything: bool) -> tuple[str, ...] | None:
+    """The cases a change must pass: None when it touches no steering path, every case when asked, else the regression cases.
+
+    `suites` maps each case to `regression` or `capability`.
+    """
+    if everything:
+        return tuple(sorted(suites))
+    if not needs_evidence(changed):
+        return None
+    return tuple(sorted(name for name, suite in suites.items() if suite == "regression"))
+
+
+def _rate(cases: Mapping[str, Mapping[str, object]], names: Iterable[str]) -> tuple[float, float]:
+    """Mean pass rate over every trial of the named cases, and its standard error clustered by case (a case's trials are not independent)."""
+    rows = [(int(cases[name]["trials"]), int(cases[name]["passed"])) for name in names if int(cases[name]["trials"]) > 0]  # type: ignore[call-overload]
+    total = sum(trials for trials, _ in rows)
+    if not total:
+        return 0.0, 0.0
+    mean = sum(passed for _, passed in rows) / total
+    spread = sum((passed - trials * mean) ** 2 for trials, passed in rows)
+    return mean, spread ** 0.5 / total
+
+
+def judge(ran: Iterable[str], summary: Mapping[str, Mapping[str, object]], baseline: Mapping[str, Mapping[str, object]] | None) -> Judgement:
+    """The gate's rule: every trial of every regression case passes; capability cases are no worse than the baseline beyond noise.
+
+    `summary` is what the run produced per case (suite, trials, passed, failing_checks); `baseline` is the same
+    from the last passing gate, None when there is none, and then capability cases are reported only.
+    """
+    failures: list[str] = []
+    notes: list[str] = []
+    ran = list(ran)
+    for name in ran:
+        if name not in summary or int(summary[name]["trials"]) == 0:  # type: ignore[call-overload]
+            failures.append(f"{name}: selected but produced no trials")
+    regression = sorted(name for name in ran if name in summary and summary[name]["suite"] == "regression" and int(summary[name]["trials"]) > 0)  # type: ignore[call-overload]
+    for name in regression:
+        trials, passed = int(summary[name]["trials"]), int(summary[name]["passed"])  # type: ignore[call-overload]
+        if passed != trials:
+            failing = dict(summary[name].get("failing_checks") or {})  # type: ignore[call-overload]
+            why = ", ".join(f"{check} x{count}" for check, count in sorted(failing.items())) or "no check named"
+            failures.append(f"{name}: {passed} of {trials} trials passed (failing: {why})")
+    if regression:
+        notes.append(f"{len(regression)} regression case{'s' * (len(regression) != 1)}"
+                     + (", every trial passed" if not any(f.startswith(tuple(regression)) for f in failures) else ""))
+    capability = sorted(name for name in ran if name in summary and summary[name]["suite"] == "capability" and int(summary[name]["trials"]) > 0)  # type: ignore[call-overload]
+    if capability:
+        before = [name for name in capability if baseline and name in baseline and int(baseline[name]["trials"]) > 0]  # type: ignore[call-overload]
+        if baseline is None or not before:
+            notes.append(f"{len(capability)} capability case{'s' * (len(capability) != 1)} reported only: no baseline from an earlier passing gate")
+        else:
+            now, now_se = _rate(summary, before)
+            was, was_se = _rate(baseline or {}, before)
+            allowed = DRIFT_Z * (now_se ** 2 + was_se ** 2) ** 0.5
+            if was - now > allowed:
+                failures.append(f"capability cases fell from {was:.2f} to {now:.2f}, more than the noise of {allowed:.2f} (cases: {', '.join(before)})")
+            else:
+                notes.append(f"{len(before)} capability case{'s' * (len(before) != 1)} no worse than the baseline ({now:.2f} against {was:.2f}, noise {allowed:.2f})")
+            fresh = [name for name in capability if name not in before]
+            if fresh:
+                notes.append(f"{', '.join(fresh)} not in the baseline, reported only")
+    return Judgement(not failures, tuple(failures), tuple(notes))
+
+
+def build_report(*, created: str, steering: Mapping[str, str], suite: str, judgement: Judgement, summary: Mapping[str, Mapping[str, object]],
+                 transcripts: Mapping[str, str], meta: Mapping[str, object], base: str, scope: str) -> dict[str, object]:
+    """The record `verify` reads: what was digested, what ran, what it found."""
+    return {
+        "schema": SCHEMA, "created": created, "steering": dict(steering), "suite": suite,
+        "verdict": "pass" if judgement.passed else "fail", "summary": judgement.summary, "scope": scope, "base": base,
+        "meta": dict(meta),
+        "cases": {name: {"suite": row["suite"], "trials": row["trials"], "passed": row["passed"]} for name, row in sorted(summary.items())},
+        "transcripts": dict(sorted(transcripts.items())),
+    }
+
+
 # --- the shell: git and files ------------------------------------------------------------
 
 
@@ -176,6 +268,19 @@ def root_of(path: Path) -> Path | None:
 def has_gate(root: Path) -> bool:
     """Whether a repository holds the plugin's eval suite and its runner: the repositories the gate is for."""
     return (root / "scripts" / "eval").is_file() and (root / "evals" / "cases").is_dir()
+
+
+def latest_baseline(root: Path, except_key: str) -> Mapping[str, Mapping[str, object]] | None:
+    """The per-case results of the most recent passing gate report other than the one for `except_key`, or None."""
+    best: tuple[str, Mapping[str, Mapping[str, object]]] | None = None
+    for path in sorted((root / EVIDENCE_FOLDER).glob("*.json")):
+        found = read_report(path)
+        if found is None or path.name == f"{except_key[:16]}.json" or found.get("verdict") != "pass" or not isinstance(found.get("cases"), dict):
+            continue
+        created = str(found.get("created", ""))
+        if best is None or created > best[0]:
+            best = (created, found["cases"])  # type: ignore[assignment]
+    return best[1] if best else None
 
 
 def resolve_base(root: Path, requested: str | None = None) -> str | None:

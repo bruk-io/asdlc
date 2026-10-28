@@ -90,6 +90,87 @@ class VerifyTest(unittest.TestCase):
         self.assertTrue(gate.Verdict(gate.State.NOT_NEEDED, "x").holds)
 
 
+def row(suite: str, trials: int, passed: int, **failing: int) -> dict[str, object]:
+    return {"suite": suite, "trials": trials, "passed": passed, "failing_checks": failing}
+
+
+class SelectTest(unittest.TestCase):
+    SUITES = {"a": "regression", "b": "capability", "c": "regression"}
+
+    def test_a_change_with_no_steering_path_runs_nothing(self) -> None:
+        self.assertIsNone(gate.select_cases(["README.md", "docs/guide.md"], self.SUITES, False))
+
+    def test_a_steering_change_runs_the_regression_cases(self) -> None:
+        self.assertEqual(gate.select_cases(["skills/a/SKILL.md"], self.SUITES, False), ("a", "c"))
+
+    def test_everything_runs_every_case_even_for_a_docs_only_change(self) -> None:
+        self.assertEqual(gate.select_cases(["README.md"], self.SUITES, True), ("a", "b", "c"))
+
+
+class JudgeTest(unittest.TestCase):
+    def test_every_trial_of_every_regression_case_must_pass(self) -> None:
+        verdict = gate.judge(["a", "c"], {"a": row("regression", 3, 3), "c": row("regression", 3, 3)}, None)
+        self.assertTrue(verdict.passed)
+        self.assertIn("2 regression cases, every trial passed", verdict.summary)
+
+    def test_one_failing_trial_fails_the_gate_and_names_the_check(self) -> None:
+        verdict = gate.judge(["a", "c"], {"a": row("regression", 3, 2, no_force_push=1), "c": row("regression", 3, 3)}, None)
+        self.assertFalse(verdict.passed)
+        self.assertIn("a: 2 of 3 trials passed (failing: no_force_push x1)", verdict.failures)
+
+    def test_a_selected_case_that_produced_no_trials_fails_never_passes_silently(self) -> None:
+        verdict = gate.judge(["a", "c"], {"a": row("regression", 3, 3)}, None)
+        self.assertFalse(verdict.passed)
+        self.assertIn("c: selected but produced no trials", verdict.failures)
+
+    def test_nothing_run_is_not_a_pass_for_the_cases_asked_for(self) -> None:
+        self.assertFalse(gate.judge(["a"], {}, None).passed)
+
+    def test_capability_cases_are_reported_only_without_a_baseline(self) -> None:
+        verdict = gate.judge(["b"], {"b": row("capability", 3, 0)}, None)
+        self.assertTrue(verdict.passed)
+        self.assertIn("reported only", verdict.summary)
+
+    def test_a_capability_drop_beyond_noise_fails(self) -> None:
+        was = {name: row("capability", 3, 3) for name in "bcde"}
+        now = {name: row("capability", 3, 0) for name in "bcde"}
+        verdict = gate.judge(list(now), now, was)
+        self.assertFalse(verdict.passed)
+        self.assertIn("fell from 1.00 to 0.00", verdict.summary)
+
+    def test_a_capability_wobble_inside_noise_passes(self) -> None:
+        was = {"b": row("capability", 3, 2), "c": row("capability", 3, 1), "d": row("capability", 3, 3)}
+        now = {"b": row("capability", 3, 1), "c": row("capability", 3, 2), "d": row("capability", 3, 3)}
+        verdict = gate.judge(list(now), now, was)
+        self.assertTrue(verdict.passed, verdict.summary)
+        self.assertIn("no worse than the baseline", verdict.summary)
+
+    def test_a_new_capability_case_is_reported_only(self) -> None:
+        was = {"b": row("capability", 3, 2)}
+        now = {"b": row("capability", 3, 2), "z": row("capability", 3, 0)}
+        verdict = gate.judge(["b", "z"], now, was)
+        self.assertTrue(verdict.passed)
+        self.assertIn("z not in the baseline", verdict.summary)
+
+
+class ReportTest(unittest.TestCase):
+    def test_a_built_report_verifies_against_what_it_digested(self) -> None:
+        verdict = gate.judge(["a"], {"a": row("regression", 3, 3)}, None)
+        built = gate.build_report(created="t", steering=STEERING, suite="s", judgement=verdict, summary={"a": row("regression", 3, 3)},
+                                  transcripts={"run-1/t.jsonl": "t1"}, meta={"model": "sonnet"}, base="abc", scope="regression")
+        self.assertEqual(built["verdict"], "pass")
+        self.assertEqual(built["cases"], {"a": {"suite": "regression", "trials": 3, "passed": 3}})
+        self.assertEqual(verify(built).state, gate.State.PASS)
+
+    def test_a_failing_report_verifies_as_fail_with_the_reason(self) -> None:
+        verdict = gate.judge(["a"], {"a": row("regression", 3, 1, x=2)}, None)
+        built = gate.build_report(created="t", steering=STEERING, suite="s", judgement=verdict, summary={"a": row("regression", 3, 1)},
+                                  transcripts={"run-1/t.jsonl": "t1"}, meta={}, base="abc", scope="regression")
+        found = verify(built)
+        self.assertEqual(found.state, gate.State.FAIL)
+        self.assertIn("1 of 3 trials passed", found.reason)
+
+
 class OnDiskTest(unittest.TestCase):
     """The shell: a real repository, with the report written where `eval gate` writes it."""
 

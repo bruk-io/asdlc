@@ -14,14 +14,21 @@ model calls, and `./scripts/check` runs `validate`.
     eval validate [--case <name>]... [--plugin <git ref or folder>]
     eval run [--case <name>]... [--trials N] [--model M] [--arm with-plugin|without-skills]
              [--plugin <path or git ref>] [--container] [--image <tag>] [--results <dir>]
+    eval gate [--base <ref>] [--all] [--trials N] [--model M]
     eval report [<results dir>] [--samples N]
     eval regrade <results dir>
+
+`gate` is what the playbook's continuous-evals play does in CI, run by a person: when steering
+paths (CLAUDE.md, skills, hooks, agents, commands) changed since the base it runs the regression
+cases, or every case with `--all`, against the working copy, judges them, and writes a report
+under `.eval-results/gate/` that `scripts/gate_evidence.py` verifies. It spends tokens.
 
 The logic (cases, transcripts, board history, checks, statistics, cost) takes data and
 returns data; git, files, subprocesses and the clock stay in the shell below it.
 """
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -41,6 +48,19 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from types import ModuleType
+
+from gate_evidence import (
+    build_report,
+    changed_since,
+    check,
+    current,
+    judge,
+    key,
+    latest_baseline,
+    report_file,
+    resolve_base,
+    select_cases,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 EVALS = ROOT / "evals"
@@ -1449,6 +1469,13 @@ def default_plugin() -> str:
 
 
 def run(selected: Sequence[str], trials: int, options: Options, plugin_source: str, results: Path) -> int:
+    out = execute(selected, trials, options, plugin_source, results)
+    print(f"results: {out}")
+    return report(out, 2)
+
+
+def execute(selected: Sequence[str], trials: int, options: Options, plugin_source: str, results: Path) -> Path:
+    """Run the cases with real agents, the shell of `run` and `gate`: the folder the trials were written to."""
     folders = all_cases(selected)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     with tempfile.TemporaryDirectory(prefix="asdlc-eval-plugin-") as scratch:
@@ -1488,8 +1515,70 @@ def run(selected: Sequence[str], trials: int, options: Options, plugin_source: s
                     "checks": [asdict(r) for r in results_], "counts": counts_json(tally), "arm": str(options.arm),
                     "model": options.model or case.model, "agent": case.agent, "plugin": version, "source": case.source}, indent=2))
                 print(f"  {'passed' if passed else 'FAILED'}: " + "; ".join(f"{r.name} {'ok' if r.passed else 'fail ' + r.detail}" for r in results_), flush=True)
-    print(f"results: {out}")
-    return report(out, 2)
+    return out
+
+
+def case_suites() -> dict[str, str]:
+    """Each case's suite, `regression` or `capability`, read from its definition."""
+    return {folder.name: str(parse_case((folder / "case.toml").read_text(), folder.name).suite) for folder in all_cases([])}
+
+
+def trial_evidence(out: Path, results: Path) -> dict[str, str]:
+    """A digest of each trial's verdict, graded outcome and transcripts, named relative to the results folder, for the gate report."""
+    found = {}
+    for pattern in ("*/trial-*/trial.json", "*/trial-*/outcome.json", "*/trial-*/session-*.jsonl"):
+        for path in sorted(out.glob(pattern)):
+            found[path.relative_to(results).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return found
+
+
+def gate(base_ref: str, everything: bool, trials: int, options: Options, root: Path = ROOT,
+         suites: Mapping[str, str] | None = None, run_cases: Callable[..., Path] = execute) -> int:
+    """Run what a change to the agent's steering paths must pass, judge it, and write the report `gate_evidence.verify` reads.
+
+    Exits 0 when the gate passed or was not needed, 1 when it failed, 2 when it could not run.
+    """
+    start = resolve_base(root, base_ref or None)
+    if start is None:
+        print("gate: no base to measure the change from (no origin/main or main); pass --base <ref>", file=sys.stderr)
+        return 2
+    chosen = select_cases(changed_since(root, start), suites if suites is not None else case_suites(), everything)
+    if chosen is None:
+        print(f"gate not needed: no steering path changed since {start[:12]}")
+        return 0
+    if not chosen:
+        print("gate: there is no regression case to run, so the gate would pass without testing anything; add one first", file=sys.stderr)
+        return 2
+    before = current(root)
+    if not everything and (earlier := check(root)).state == "pass":
+        print(f"gate already passed for these steering paths and this suite, so nothing was run: {earlier.reason}")
+        return 0
+    results = root / ".eval-results"
+    print(f"gate: {len(chosen)} case{'s' * (len(chosen) != 1)} x {trials} trial{'s' * (trials != 1)} against the working copy of {root}. "
+          "This spends tokens.", flush=True)
+    out = run_cases(list(chosen), trials, options, str(root), results)
+    after = current(root)
+    if after != before:
+        print("gate: the steering paths or the eval suite changed while the gate ran, so nothing was recorded. Run it again.", file=sys.stderr)
+        return 2
+    trials_found = load_trials(out)
+    price_version, prices = parse_prices(PRICES.read_text())
+    summary = summarise(trials_found, prices)["cases"]  # type: ignore[index]
+    evidence = key(*after)
+    judged = judge(chosen, summary, latest_baseline(root, evidence))
+    meta = json.loads((out / "run.json").read_text()) if (out / "run.json").exists() else {}
+    report_data = build_report(created=datetime.now(UTC).isoformat(timespec="seconds"), steering=after[0], suite=after[1], judgement=judged,
+                               summary=summary, transcripts=trial_evidence(out, results),
+                               meta={k: meta.get(k, "") for k in ("run", "plugin", "claude", "model", "arm", "where", "trials")} | {"prices": price_version},
+                               base=start, scope="all" if everything else "regression")
+    destination = report_file(root, evidence)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    scratch = destination.with_suffix(".tmp")
+    scratch.write_text(json.dumps(report_data, indent=2))
+    scratch.replace(destination)
+    print(f"gate {'passed' if judged.passed else 'FAILED'}: {judged.summary}")
+    print(f"report: {destination}")
+    return 0 if judged.passed else 1
 
 
 def regrade(folder: Path) -> int:
@@ -1564,6 +1653,11 @@ def main(argv: Sequence[str]) -> int:
     running.add_argument("--container", action="store_true", help="run each agent inside the eval image")
     running.add_argument("--image", default=IMAGE)
     running.add_argument("--results", default=str(RESULTS))
+    gating = commands_.add_parser("gate", help="run what a change to the steering paths must pass, and record the evidence (spends tokens)")
+    gating.add_argument("--base", default="", help="the ref the change is measured from (default: origin/main, else main)")
+    gating.add_argument("--all", action="store_true", help="run every case, not only the regression cases, whatever changed")
+    gating.add_argument("--trials", type=int, default=DEFAULT_TRIALS)
+    gating.add_argument("--model", default="", help="override every session's model")
     regrading = commands_.add_parser("regrade", help="grade a run's stored outcomes again with the checks as they are now")
     regrading.add_argument("folder")
     reporting = commands_.add_parser("report", help="statistics, counts, cost and a sample of transcripts")
@@ -1579,6 +1673,10 @@ def main(argv: Sequence[str]) -> int:
                     parser.error("--trials must be at least 1")
                 options = Options(model=args.model, arm=Arm(args.arm), container=args.container, image=args.image)
                 return run(args.case, args.trials, options, args.plugin or default_plugin(), Path(args.results))
+            case "gate":
+                if args.trials < 1:
+                    parser.error("--trials must be at least 1")
+                return gate(args.base, args.all, args.trials, Options(model=args.model))
             case "regrade":
                 return regrade(Path(args.folder))
             case "report":
