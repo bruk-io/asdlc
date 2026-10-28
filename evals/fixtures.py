@@ -122,7 +122,7 @@ def _backlog(seed: Path, *args: str) -> str:
 
 
 def team(fixture: ev.Fixture, *, agent: str, devs: dict[str, str], items: list[Spec], docs: list[Doc] = (),
-         settings: str = 'stale_after = "2h"\nreview_fallback_after = "30m"\n', publish: bool = True) -> Team:
+         settings: str = 'review_fallback_after = "30m"\n', publish: bool = True) -> Team:
     """The tasks repository, acme/api and a machine for each engineer in `devs` (name -> devs/<name>.yaml)."""
     env = fixture.seed_env()
     board_origin = ev.bare(fixture.origins / "board.git")

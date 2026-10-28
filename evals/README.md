@@ -66,7 +66,7 @@ Person steps live in `steps.py` (or in the case's own `case.py`): `def name(fixt
 
 | | Outcome | Process |
 |---|---|---|
-| Regression | A fixed bug stays fixed: the reaped worker stops, the sent-back branch survives | The approval gate holds in order |
+| Regression | A fixed bug stays fixed: the sent-back branch survives | The approval gate holds in order |
 | Capability | How well a judgement is made: reviewer recall and false alarms, skill triggering | Rare; prefer outcome |
 
 Regression cases should pass near 100% of the time; a drop is a bug. Capability cases measure a rate, and only the trend between versions means anything.
