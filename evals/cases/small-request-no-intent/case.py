@@ -26,8 +26,10 @@ def collect(fixture: ev.Fixture, facts: dict[str, object]) -> dict[str, str]:
 
 def setting_changed(found: ev.Outcome, case: ev.Case) -> tuple[bool, str]:
     text = found.files.get("asdlc.toml", "")
-    if text.strip() == 'review_fallback_after = "15m"':
-        return True, "review_fallback_after is 15m and nothing else in asdlc.toml changed"
+    wanted = re.search(r'(?m)^review_fallback_after\s*=\s*"15m"\s*$', text)
+    kept = re.search(r'(?m)^stale_after\s*=\s*"2h"\s*$', text)
+    if wanted and kept:
+        return True, "review_fallback_after is 15m and stale_after is still 2h"
     return False, f"asdlc.toml is now: {text.strip()!r}"
 
 
