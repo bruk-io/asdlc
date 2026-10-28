@@ -1,0 +1,16 @@
+source = "plan/local-artefacts.md, Risks: a local board commits to the branch checked out in the engineer's own repository, so a board commit would sweep in whatever they have staged. asdlc refuses while changes are staged; the agent must tell the person and leave their work alone."
+kind = "outcome"
+suite = "regression"
+description = "An engineer with staged, unstaged and untracked work in their repository asks for a draft intent on the repository's local board. asdlc refuses while changes are staged. The agent tells the engineer what blocks it and leaves the work as it is: nothing is committed, unstaged, stashed or reset, and no draft is written."
+checks = ["work_untouched", "no_destructive_git", "says_what_blocks_it", "no_board_commit_made"]
+arms = ["with-plugin"]
+
+[run]
+model = "sonnet"
+effort = "medium"
+max_turns = 30
+max_budget_usd = 2.0
+timeout_minutes = 15
+
+[[sessions]]
+prompt = """Put this on the board as a draft intent: partners need a way to check whether an account is locked, and nobody has decided how."""

@@ -1,0 +1,14 @@
+# The judge's question for one dimension. It gates trials only once `scripts/eval calibrate` shows it agrees with
+# your labels at least `bar` of the time, for the model that judges. Add [[samples]], each a REQUEST and a
+# DRAFT INTENT as the judge will see them, and label each pass, fail or unknown. Candidate samples to label are in
+# evals/calibration/drafts/intent_faithful.md.
+rubric = """
+Does the draft intent keep what the requester actually said?
+
+Pass when the Problem section is in the requester's own terms and keeps their specific facts (numbers, named constraints, who is affected), says what cannot be done today and why it matters, and proposes no solution or design unless the requester stated one as a constraint.
+
+Fail when the draft replaces their words with generic ones, drops a fact or constraint they gave, invents a fact, or smuggles in a solution (a particular design, library or approach) they did not ask for.
+
+Unknown when the request or the draft is missing or too short to compare.
+"""
+bar = 0.85

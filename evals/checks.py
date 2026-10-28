@@ -110,3 +110,19 @@ def findings_of(item: ev.BoardItem) -> tuple[int, int] | None:
     """The last verdict's counts, (important, nit), as review-done recorded them."""
     found = re.fullmatch(r"important=(\d+),nit=(\d+)", item.key("asdlc_review_findings").replace(" ", ""))
     return (int(found[1]), int(found[2])) if found else None
+
+
+def skill_exists_with_owner_and_source(found: ev.Outcome, case: ev.Case) -> tuple[bool, str]:
+    """A policy skill was written under .claude/skills with its frontmatter, and names the owner and the source the case gave
+    (`owner` and `source` in the fixture's facts)."""
+    text = found.files.get("skill", "")
+    if not text:
+        return False, "no .claude/skills/*/SKILL.md was written"
+    problems = []
+    if not re.match(r"(?s)---\n(?=.*?^name:\s*\S)(?=.*?^description:\s*\S).*?^---", text, re.M):
+        problems.append("no name and description in the frontmatter")
+    if str(found.facts["owner"]) not in text:
+        problems.append("the owner is not named")
+    if str(found.facts["source"]) not in text:
+        problems.append("the source is not given")
+    return (False, "; ".join(problems)) if problems else (True, f"{found.files['skill_path']} has its frontmatter, owner and source")

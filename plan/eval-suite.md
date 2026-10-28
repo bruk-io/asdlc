@@ -150,6 +150,23 @@ Departures, each because building it showed the plan was wrong or too loose:
 - **Not built:** the `PostToolUse` plan-sync hook, signing of reports, and git hooks, as decided above.
 - **Not yet done:** the rubric files and labels (`evals/calibration/`) are the owner's and belong to change 2; until they exist no case has a judge.
 
+## Change 2: what was built, and where it departs from this plan
+
+The suite change (`evals/`, `spec/agentic-sdlc-plugin-evals.md`), stacked on change 1. 20 cases validate (reference passes every check, null run fails at least one); none has had a real run yet, which spends tokens and needs the owner's go-ahead.
+
+- **Retired:** `reaped-worker-stops`, `grandchild-follows-lead`. **Rewritten:** `sent-back-resumes-branch` (the worker lets go of the task and its worktree is gone, instead of a reaped claim). **Updated:** `approval-before-build` (no `reap` step), `trigger-set` (30 requests, now also `write-spec` and `break-down-intent`, and no prompt about `reap`).
+- **New, 13:** `board-asks-where`, `board-found-without-asking`, `local-board-spares-staged-work`, `agent-cannot-approve`, `bug-repro-first`, `fix-cannot-edit-tests`, `claims-backed-by-output`, `repeat-mistake-claude-line` (capability), `policy-skill-names-the-real-backstop`, `policy-skill-flags-an-enforcement-gap`, `policy-skill-preference-advisory`, `policy-skill-backed-by-hook-and-ci` (capability) and `intent-in-their-words` (capability, with two rubric judges).
+- **A new world, `fixtures.solo`:** one engineer in one repository with a local board or none, which the one-machine cases need.
+- **Rubrics and candidate samples:** `evals/calibration/intent_faithful.toml` and `intent_checkable.toml` hold the rubric and bar; `evals/calibration/drafts/` holds unlabelled candidate samples. The labels are the owner's, so `scripts/eval calibrate` says there is nothing to measure yet and the judges stay advisory.
+
+Departures:
+
+- **`local-board-spares-code` became `local-board-spares-staged-work`.** What asdlc does with unstaged and untracked work is a unit-tested command's behaviour; the judgement worth an eval is what the agent does when asdlc refuses over staged changes.
+- **`policy-skill-enforced` became three cases, plus the playbook's version as a capability case.** `skills/write-policy-skill` says to name the backstop, to say advisory only when there is none and to tell the owner about the gap; it does not build a hook and a pull request check. The three regression cases test what the plugin says it does. `policy-skill-backed-by-hook-and-ci` tests what the playbook describes and starts as a hill to climb, a candidate plugin change.
+- **`repeat-mistake-claude-line` starts as a capability case,** because no skill teaches that a mistake made twice goes into CLAUDE.md.
+- **Deferred to later suite pull requests, each after its first real run is read:** `spec-covers-questions`, `spec-flags-policy-conflict`, `no-spec-for-small-intent`, `breakdown-cites-requirements`, `plan-from-plan-alone`, `plan-updated-on-departure`, `incident-becomes-intent`, `reviewer-checks-against-plan`, `parallel-tasks-own-worktrees`, `onboard-runs-what-it-writes`. They need worlds this tranche does not build (a spec and plan flow on a one-machine board, parallel worktrees, an onboarding) and are better written after real runs show what the agent does.
+- **The review queue stays for now.** The reviewer cases and the rewritten sent-back case still claim a review with `review-next` and record it with `review-done`: with one engineer that is the only way the orchestrator's reviewer holds a review, so the removal in change 3 is `lead`, `lead-of`, `heartbeat` and `reap`, and the review queue's simplification for one engineer waits for its own plan.
+
 ## Order of work
 
 1. Change 1, runner, in slices each with its tests and a passing `./scripts/check`: `gate_evidence.py` and `verify`; the write-deny and push guards; the R23 edit guard and the `SessionStart` line; `eval gate` itself, writing the report; the `scripts/check` reminder; then the judge kind on recorded verdicts with no model call, `calibrate`, the two `report` flags and the guide.

@@ -1,0 +1,11 @@
+# See intent_faithful.toml. Candidate samples are in evals/calibration/drafts/intent_checkable.md.
+rubric = """
+Can each acceptance criterion in the draft intent be judged met or not met by a check or a reviewer?
+
+Pass when every acceptance criterion names an observable result (something a person could look at, run or measure) and no criterion is a wish, a method or a restatement of the problem.
+
+Fail when any criterion is a wish ("feels faster"), prescribes how rather than what, or could not be told apart from the situation before the work.
+
+Unknown when the draft has no acceptance criteria to judge or is too short to tell.
+"""
+bar = 0.85

@@ -1,0 +1,16 @@
+source = "Spec R10 and the playbook's CLAUDE.md lesson: when Claude makes a mistake twice, the correction goes into CLAUDE.md, which stays under a page. Nothing in the plugin teaches this yet, so the case starts as a hill to climb (eval-driven development)."
+kind = "outcome"
+suite = "capability"
+description = "An engineer says a debugging print() has reached the repository for the second time and asks for the one in login.py to go. The agent replaces it with logging and adds one short rule to CLAUDE.md so it does not happen a third time; CLAUDE.md stays within 60 lines and its other lines are untouched."
+checks = ["print_replaced_with_logging", "rule_added_to_claude_md", "claude_md_stays_short"]
+arms = ["with-plugin"]
+
+[run]
+model = "sonnet"
+effort = "medium"
+max_turns = 30
+max_budget_usd = 2.0
+timeout_minutes = 15
+
+[[sessions]]
+prompt = """That's the second time a debugging print() has been committed to this repository. Get the one out of login.py, using logging instead."""

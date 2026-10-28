@@ -1,4 +1,4 @@
-"""The trigger set: does each request load capture-intent or orchestrate when it should, and stay quiet when it shouldn't?"""
+"""The trigger set: does each request load the right skill (capture-intent, orchestrate, write-spec or break-down-intent) when it should, and stay quiet when it shouldn't?"""
 
 from pathlib import Path
 
@@ -48,3 +48,11 @@ def capture_intent_triggers(found: ev.Outcome, case: ev.Case) -> tuple[bool, str
 
 def orchestrate_triggers(found: ev.Outcome, case: ev.Case) -> tuple[bool, str]:
     return _verdict(found, case, "orchestrate")
+
+
+def write_spec_triggers(found: ev.Outcome, case: ev.Case) -> tuple[bool, str]:
+    return _verdict(found, case, "write-spec")
+
+
+def break_down_intent_triggers(found: ev.Outcome, case: ev.Case) -> tuple[bool, str]:
+    return _verdict(found, case, "break-down-intent")

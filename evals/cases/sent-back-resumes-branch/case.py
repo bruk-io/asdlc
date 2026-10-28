@@ -1,10 +1,12 @@
-"""B2: a changes-requested task picked up again resumes its branch: the pull request's commits survive, no force push."""
+"""B2: a changes-requested task picked up again resumes its branch: the pull request's commits survive, no force push.
+
+The scene is a worker that finished and a worktree that is gone, not a reaped claim: it is the same bug, a rebuild from
+main over the pushed branch, and it does not depend on more than one machine."""
 
 import os
 import subprocess
 import sys
 import tempfile
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import asdlc_eval as ev
@@ -42,8 +44,8 @@ def build(fixture: ev.Fixture) -> dict[str, object]:
     ann.git(work, "add", "README.md")
     ann.git(work, "commit", "--quiet", "-m", "Say what acme/api is")
     ann.git(work, "push", "--quiet", "origin", "HEAD:main")
-    # kyle.w1 went quiet; its claim is reaped and kyle's machine loses the old worktree.
-    ann.asdlc("reap", "--now", (datetime.now(UTC) + timedelta(hours=3)).isoformat())
+    # kyle.w1 is done with the task and its worktree is gone from kyle's machine.
+    kyle.asdlc("release", "TASK-1", "--as", "kyle.w1")
     kyle.git(kyle.clones["api"], "worktree", "remove", "--force", str(first))
     kyle.git(kyle.clones["api"], "branch", "-D", str(claimed["branch"]))
     again = kyle.json("next", "--as", "kyle.w2")

@@ -120,6 +120,6 @@ About a quarter of the cases sit in a private holdout set that only CI reads (sp
 3. One task eval, end to end, before any harness library.
 4. The reviewer pair: seeded defects and their clean twins.
 5. Grow to 20 to 50 cases across the six stages.
-6. The gate on plugin changes.
+6. The gate on plugin changes: `scripts/eval gate` run by a person on a machine first, with hooks that check for its evidence; CI runs the same command later.
 7. Ablation, starting with the largest components.
 8. Bands and detection, once there are weeks of metrics.

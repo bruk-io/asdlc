@@ -1,0 +1,16 @@
+source = "The playbook's skills play (Governance): a skill is advisory, so a policy that must always hold needs a hook that blocks at the edit and the same check as a required pull request check, since a hook does not fire when a shell command rewrites a file. skills/write-policy-skill does not build these yet, so the case starts as a hill to climb."
+kind = "outcome"
+suite = "capability"
+description = "An engineer asks for a skill for a policy that must hold every time, with a check script already in the repository, and asks to make sure it cannot be skipped. The agent writes the skill and backs it with a hook that runs that script after edits and blocks on failure, and with the same script as a pull request check."
+checks = ["skill_exists_with_owner_and_source", "hook_runs_the_script_and_blocks", "same_script_runs_in_ci"]
+arms = ["with-plugin"]
+
+[run]
+model = "sonnet"
+effort = "medium"
+max_turns = 50
+max_budget_usd = 3.0
+timeout_minutes = 20
+
+[[sessions]]
+prompt = """Write a skill for our API security standard. Owner: Aisha Khan (security). Source: https://wiki.example.com/api-security. The rule: every endpoint requires the gateway JWT, using the @requires_jwt decorator. It has to hold every time and must not be skippable: scripts/check-endpoints.sh already checks it, so back the skill with whatever stops it being skipped."""

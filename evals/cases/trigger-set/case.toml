@@ -1,8 +1,8 @@
 source = "The owner (the approved evals plan, case 9), and spec/agentic-sdlc-plugin-evals.md: a should-stay-quiet case for each skill. Requests written as an engineer in their tasks clone would put them."
 kind = "outcome"
 suite = "capability"
-description = "Twenty realistic requests, each in a fresh session in kyle's tasks clone, read only for which skill the first turn loads. Ten should load capture-intent or orchestrate and ten neither; the checks count false positives and false negatives per skill."
-checks = ["capture_intent_triggers", "orchestrate_triggers"]
+description = "Thirty realistic requests, each in a fresh session in kyle's tasks clone, read only for which skill the first turn loads. Five should load each of capture-intent, orchestrate, write-spec and break-down-intent and ten none; the checks count false positives and false negatives for each skill, and a skill that loads when it should not is as much a failure as one that does not load."
+checks = ["capture_intent_triggers", "orchestrate_triggers", "write_spec_triggers", "break_down_intent_triggers"]
 arms = ["with-plugin"]
 
 [run]
@@ -53,7 +53,7 @@ prompt = "Run my workers on whatever's next until it's in review."
 expect = "orchestrate"
 
 [[items]]
-prompt = "What does stale_after in asdlc.toml mean?"
+prompt = "What does the workers setting in my devs file mean?"
 expect = "none"
 
 [[items]]
@@ -65,7 +65,7 @@ prompt = "How many tasks are in progress right now?"
 expect = "none"
 
 [[items]]
-prompt = "Explain what asdlc reap does, in two sentences."
+prompt = "Explain what asdlc route does, in two sentences."
 expect = "none"
 
 [[items]]
@@ -91,3 +91,43 @@ expect = "none"
 [[items]]
 prompt = "Who is assigned to TASK-1, if anyone?"
 expect = "none"
+
+[[items]]
+prompt = "The intent for failed-login reasons is accepted and its open questions are settled with the team. Write the spec for it: numbered requirements, the design, and anything where our policies clash."
+expect = "write-spec"
+
+[[items]]
+prompt = "Turn DRAFT-1 into requirements and a design I can send to product. Answer each open question or carry it forward, and flag the areas of concern."
+expect = "write-spec"
+
+[[items]]
+prompt = "We agreed what we want for session length. Draft the requirements and design for it, applying our security and UX policies, so engineering can plan against it."
+expect = "write-spec"
+
+[[items]]
+prompt = "I need a spec for the partner lock-status check: each requirement numbered so plans can cite it, with the open questions from the intent answered or carried forward."
+expect = "write-spec"
+
+[[items]]
+prompt = "Write the requirements and design for the audit log intent. If two of our policies conflict, say so and who owns each."
+expect = "write-spec"
+
+[[items]]
+prompt = "The spec for the failed-login work is approved. Break it into tasks, one per repository, with sizes and dependencies, and ask me to accept them."
+expect = "break-down-intent"
+
+[[items]]
+prompt = "TASK-4 is a size-8 and can't be started as it is. Split it into smaller tasks that each fit in one repository."
+expect = "break-down-intent"
+
+[[items]]
+prompt = "Take this intent and its spec and draft the child tasks: each citing the spec's requirement numbers, with an acceptance criterion and a size."
+expect = "break-down-intent"
+
+[[items]]
+prompt = "Draft the tasks for the session-length work across acme/api and acme/web, and mark which depends on which."
+expect = "break-down-intent"
+
+[[items]]
+prompt = "Split the audit log intent into child tasks, one per piece of work in one repository, so I can accept them all at once."
+expect = "break-down-intent"

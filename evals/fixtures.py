@@ -380,3 +380,194 @@ def reference_review(script: ev.Script, review: dict[str, object], verdict: str,
     script.bash(f"asdlc review-done {task} --as {who} --verdict {verdict} --findings {findings} {cited} --plan-matched yes "
                 f"--notes {shlex.quote(notes)}")
     script.bash(f"git -C {repo} worktree remove --force {worktree}")
+
+
+# One engineer, one repository, and a board that lives in it or nowhere: the world for the one-machine cases.
+
+SOLO_README = "# acme/app\n\nLogins for acme.\n"
+SOLO_CLAUDE = """# acme/app
+
+## Commands
+- Test: `python3 -m unittest -q`
+
+## Conventions
+- Python 3.12, standard library only.
+- Tests are `unittest` modules beside the code, `test_<module>.py`.
+"""
+
+
+@dataclass
+class Solo:
+    fixture: ev.Fixture
+    origin: Path
+    machine: ev.Machine
+
+    @property
+    def clone(self) -> Path:
+        return self.machine.clones["app"]
+
+    def facts(self, **extra: object) -> dict[str, object]:
+        """What the runner, the prompts and the checks know. The board, when there is one, is the repository itself."""
+        return {"board_origin": self.origin, "board": self.clone, "cwd": self.clone, "env": self.machine.env, "engineer": self.machine.name,
+                "code_origins": {"app": self.origin}, "clones": {"app": self.clone}, "app": self.clone, **extra}
+
+
+def solo(fixture: ev.Fixture, *, agent: str = "kyle", board: bool = False, files: dict[str, str] | None = None,
+         claude_md: str | None = SOLO_CLAUDE, branch: str = "") -> Solo:
+    """acme/app, a few lines of Python with tests, cloned for one engineer. With `board`, `asdlc init-board --local`
+    has been run in it and the board is committed there. `files` are added to the repository, `branch` is checked out
+    in the clone."""
+    env = fixture.seed_env()
+    origin = ev.bare(fixture.origins / "acme" / "app.git")
+    work = fixture.others / "seed-app"
+    subprocess.run(["git", "clone", "--quiet", str(origin), str(work)], check=True, capture_output=True, env=env)
+    contents = {"README.md": SOLO_README, "login.py": LOGIN, "test_login.py": TESTS, **({"CLAUDE.md": claude_md} if claude_md else {}), **(files or {})}
+    for name, text in contents.items():
+        (work / name).parent.mkdir(parents=True, exist_ok=True)
+        (work / name).write_text(text)
+    ev._git(work, "add", ".", env=env)
+    ev._git(work, "commit", "--quiet", "-m", "acme/app", env=env)
+    if board:
+        done = subprocess.run([sys.executable, str(fixture.plugin / "scripts" / "asdlc"), "init-board", "--local", str(work)],
+                              capture_output=True, text=True, env={**env, "ASDLC_BACKLOG": "backlog"})
+        if done.returncode != 0:
+            raise RuntimeError(f"init-board --local: {done.stderr}")
+    ev._git(work, "push", "--quiet", "origin", "main", env=env)
+    machine = ev.machine(fixture, agent, origin, agent=True)  # clones the origin into <home>/tasks; here that is the repository
+    clone = machine.home / "app"
+    machine.board.rename(clone)
+    machine.board = clone
+    machine.clones["app"] = clone
+    if branch:
+        machine.git(clone, "switch", "--quiet", "-c", branch)
+    return Solo(fixture, origin, machine)
+
+
+def machine_for(fixture: ev.Fixture, facts: dict[str, object]) -> ev.Machine:
+    """The agent's engineer's machine again, for a solo case's `collect` or a person step."""
+    env = {str(k): str(v) for k, v in dict(facts["env"]).items()}
+    found = ev.Machine(fixture, str(facts["engineer"]), Path(env["HOME"]), Path(str(facts["board"])), env)
+    found.clones["app"] = Path(str(facts["app"]))
+    return found
+
+
+def tree(clone: Path) -> dict[str, str]:
+    """Every file in a working tree as it is now, uncommitted changes included, for a case's `collect`."""
+    found = {}
+    for path in sorted(clone.rglob("*")):
+        relative = path.relative_to(clone)
+        if path.is_file() and ".git" not in relative.parts and ".asdlc" not in relative.parts and "__pycache__" not in relative.parts:
+            found[relative.as_posix()] = path.read_text(errors="replace")
+    return found
+
+
+def git_repos(fixture: ev.Fixture, *except_paths: Path) -> list[str]:
+    """Every git repository under the agent's side of the fixture other than the origins and the paths given: what the agent made itself."""
+    skip = {path.resolve() for path in except_paths}
+    found = []
+    for marker in sorted(fixture.agent.rglob(".git")):
+        root = marker.parent.resolve()
+        if root not in skip and fixture.origins.resolve() not in root.parents and "claude-config" not in root.parts:
+            found.append(str(root))
+    return found
+
+
+# A bug to fix: accounts should lock after three failed logins, and lock after four.
+
+LOCKOUT = '''"""Account lockout for acme/app."""
+
+LIMIT = 3  # an account locks after this many failed logins
+
+
+def locked(failures: int) -> bool:
+    return failures > LIMIT
+'''
+
+LOCKOUT_FIXED = LOCKOUT.replace("failures > LIMIT", "failures >= LIMIT")
+
+LOCKOUT_TESTS = '''import unittest
+
+from lockout import locked
+
+
+class LockoutTest(unittest.TestCase):
+    def test_a_fresh_account_is_not_locked(self) -> None:
+        self.assertFalse(locked(0))
+
+    def test_many_failures_lock_it(self) -> None:
+        self.assertTrue(locked(5))
+'''
+
+LOCKOUT_REPRO_TEST = '''import unittest
+
+from lockout import locked
+
+
+class LockoutLimitTest(unittest.TestCase):
+    def test_three_failures_lock_the_account(self) -> None:
+        self.assertTrue(locked(3))
+'''
+
+LOCKOUT_RED_TESTS = LOCKOUT_TESTS + '''
+    def test_locks_after_three_failures(self) -> None:
+        self.assertTrue(locked(3))
+'''
+
+BUG_CLAUDE = SOLO_CLAUDE + """
+## Fixing bugs
+- Reproduce the bug as a failing test and commit it before you change any code. Never edit an existing test to make it pass.
+"""
+
+
+def commit_history(machine: ev.Machine, clone: Path, base: str) -> list[dict[str, object]]:
+    """Each commit after `base` on the clone's branch, oldest first: what it touched, and whether the tests pass at it.
+
+    Run on the host after the agent stopped; each commit is exported to a scratch folder and `python3 -m unittest -q` run there."""
+    import tempfile
+
+    found = []
+    for sha in machine.git(clone, "rev-list", "--reverse", f"{base}..HEAD").split():
+        files = machine.git(clone, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha).split()
+        with tempfile.TemporaryDirectory() as scratch:
+            archive = subprocess.run(["git", "-C", str(clone), "archive", "--format=tar", sha], capture_output=True, check=True)
+            subprocess.run(["tar", "-x", "-C", scratch], input=archive.stdout, check=True)
+            done = subprocess.run([sys.executable, "-m", "unittest", "-q"], cwd=scratch, capture_output=True, text=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        found.append({"sha": sha, "subject": machine.git(clone, "log", "-1", "--format=%s", sha), "files": files, "passes": done.returncode == 0})
+    return found
+
+
+# Policy skills: what a case needs to read back from the repository after the agent wrote one.
+
+ENDPOINTS = '''"""Endpoints for acme/app."""
+
+from gateway import requires_jwt
+
+
+@requires_jwt
+def status(claim_id: str) -> dict[str, str]:
+    return {"id": claim_id, "status": "received"}
+'''
+
+CHECK_ENDPOINTS = """#!/bin/sh
+# Fails when an endpoint file has a route without the gateway JWT decorator.
+for file in "$@"; do
+  if grep -q '^def ' "$file" && ! grep -q '@requires_jwt' "$file"; then
+    echo "$file: an endpoint without @requires_jwt" >&2
+    exit 1
+  fi
+done
+"""
+
+
+def policy_files(clone: Path) -> dict[str, str]:
+    """What a case reads back after a policy skill was written: the skill, the settings, hook scripts and workflows."""
+    found = tree(clone)
+    skills = {name: text for name, text in found.items() if name.startswith(".claude/skills/") and name.endswith("/SKILL.md")}
+    first = sorted(skills)[0] if skills else ""
+    return {
+        "skill_path": first, "skill": skills.get(first, ""), "skills": str(len(skills)),
+        "settings": found.get(".claude/settings.json", ""),
+        "hook_scripts": "\n".join(name for name in found if name.startswith(".claude/hooks/")),
+        "workflows": "\n".join(text for name, text in found.items() if name.startswith(".github/workflows/")),
+        "new_scripts": "\n".join(name for name in found if name.startswith("scripts/") and name != "scripts/check-endpoints.sh"),
+    }
