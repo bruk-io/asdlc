@@ -230,6 +230,36 @@ scripts/eval regrade .eval-results/<run>     # grade a run again after fixing a 
 - **In the container**, `--container` runs each session inside the eval image instead: only the fixture is mounted (read-write) and the release (read-only), Bash runs in Claude Code's sandbox with no network of its own, and the image holds no credentials. Build the image once with `docker build -t asdlc-evals:local .devcontainer`, and pass `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or `ANTHROPIC_API_KEY` in your environment. The same image is the repository's dev container.
 - **Results** go to `.eval-results/<time>-<commit>-<arm>/` (ignored by git): per trial, every session's transcript, subagent transcripts, `outcome.json` and `trial.json` with each check's verdict and the counts. `report` gives each case's pass@k, pass^k and mean pass rate, the overall mean with its standard error clustered by case, the smallest change a run of that size can detect, tokens by model, turns, tool calls and errors, cost at API prices from `evals/prices.toml` beside Claude Code's own figure, and the key moments of a few failing and passing transcripts, so you can check the checks.
 
+### Judging what no check can decide
+
+Some things (is each requirement answerable yes or no? does the intent keep the requester's words?) have no deterministic check. A case can name a rubric dimension in `judges = ["requirements_checkable"]` and define `artefacts(outcome, case)` in `case.py`, returning the text each judge reads. The dimension is a file, `evals/calibration/<dimension>.toml`: the rubric (one question), the `bar` of agreement with your labels the judge must reach, and your labelled samples (`pass`, `fail` or `unknown`).
+
+```sh
+scripts/eval calibrate [--dimension <name>] [--judge-model M]   # asks the judge about your samples; spends tokens
+```
+
+- **One judge per dimension, with `unknown` allowed.** A judge that can't tell says so; unknown is neither a pass nor a fail. It reads the artefact in a fresh Claude Code configuration, with no tools, one turn, from an empty folder, and treats it as data.
+- **Advisory until calibrated.** `calibrate` records the agreement it measured, the model and a fingerprint of the rubric under `.eval-results/calibration/`. A judge's `fail` fails a trial only when the recorded agreement is at or above the bar for the model that is judging now; changing the rubric, adding samples or changing the judge model makes it advisory again. Reports show each dimension's passes, fails and unknowns and whether it gated.
+- **Use another model family than the agent under test** (`--judge-model`) where you can: a judge that shares the agent's blind spots agrees with it. The labels are yours; nobody else can supply them.
+
+`scripts/eval report` ends with a "Look at" list: a case no trial passed (usually a broken case, not an incapable agent, so read it before blaming the plugin), and a capability case that passed every trial in each of its last three runs (no longer a hill to climb; a person may graduate it to regression, and nothing changes until one does).
+
+### The gate
+
+Before a change to the agent's steering paths merges (`CLAUDE.md`, `skills/`, `hooks/`, `agents/`, `commands/`), the suite has to have passed on it. In the plugin's own repository:
+
+```sh
+scripts/eval gate --base main                # the regression cases, if a steering path changed since main
+scripts/eval gate --all                      # every case, whatever changed (a weekly run, say)
+uv run --script scripts/gate_evidence.py verify --base main    # is there passing evidence for what is on disk?
+```
+
+- **It spends tokens, so a person runs it.** The hooks never do. `./scripts/check` prints one reminder line when the evidence is missing, and never fails because of it.
+- **The rule.** Every trial of every regression case passes. Capability cases are no worse than the last passing gate's, beyond the noise of their own standard error; with no earlier gate they are reported only. A case that was selected and produced no trials fails the gate.
+- **The evidence** is `.eval-results/gate/<key>.json`, keyed by a digest of the steering paths and the suite as they are on disk, uncommitted edits included. A docs-only commit after a pass doesn't invalidate it; any edit to a skill does. It records a digest of every trial's transcript and graded outcome, and `verify` fails when one has been edited or removed.
+- **The hooks** (`hooks/guard_gate.py`, `hooks/gate_status.py`) only ask `verify`: a session tells you where the gate stands; `git push` is refused while steering paths changed and no passing evidence exists; `--no-verify` on a commit or push is refused; a hand-written file under `.eval-results/` or `.asdlc/` is refused; and an edit that would put a plugin change and an eval change in one branch is refused (R23) before the pull request's check would. They apply only in a repository that holds the suite and `scripts/eval`. They are guardrails: a person in a terminal can still bypass them, and the repository's branch protection, with `ci` and `protected paths` as required checks, is what stops that.
+- **CI later** runs the same command and `verify` as a second job; nothing here needs to change for it.
+
 ## Stop and remove it
 
 To stop for the day, tell your orchestrator to stop, or close the session. Claims it held go stale and are released after `stale_after`. To hand them back now, list them with `asdlc mine --as <you>` and release each:

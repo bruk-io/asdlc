@@ -21,12 +21,24 @@ def _run(label: str, command: list[str]) -> bool:
     return passed
 
 
+def _gate_reminder() -> None:
+    """One line when the eval gate has no passing evidence for the steering paths on disk. Never changes the exit code:
+    a real run spends tokens, so a person decides when to pay for one."""
+    verifier = ROOT / "scripts" / "gate_evidence.py"
+    if not verifier.is_file():
+        return
+    done = subprocess.run([sys.executable, str(verifier), "verify"], cwd=ROOT, capture_output=True, text=True)
+    if done.returncode == 1:
+        print(f"== reminder: {done.stdout.strip()}. Run `scripts/eval gate` before this change merges; it spends tokens, so it is not part of this check.\n", flush=True)
+
+
 def main() -> int:
     results = [
         _run("artefacts", [sys.executable, str(ROOT / "scripts" / "artefacts.py")]),
         _run("tests", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."]),
         _run("evals", [sys.executable, str(ROOT / "scripts" / "eval"), "validate"]),
     ]
+    _gate_reminder()
     return 0 if all(results) else 1
 
 

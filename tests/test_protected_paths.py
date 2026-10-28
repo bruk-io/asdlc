@@ -24,6 +24,14 @@ class ViolationTest(unittest.TestCase):
         self.assertIsNone(protected.violation(["skills/a/SKILL.md", "spec/a.md", "plan/y.md"]))
 
 
+class IsSuiteTest(unittest.TestCase):
+    def test_the_suite_is_evals_and_the_evals_definitions(self) -> None:
+        for path in ("evals/cases/a/case.py", "evals/README.md", "spec/agentic-sdlc-plugin-evals.md"):
+            self.assertTrue(protected.is_suite(path), path)
+        for path in ("spec/agentic-sdlc-plugin.md", "scripts/eval", "skills/a/SKILL.md", "evals.md", "docs/evals/x.md"):
+            self.assertFalse(protected.is_suite(path), path)
+
+
 class ProtectedPathsScriptTest(unittest.TestCase):
     """The script as CI runs it, against a real branch."""
 

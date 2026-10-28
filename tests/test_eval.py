@@ -3,6 +3,8 @@ shell pieces whose mistakes would grade a trial wrongly (a forced push missed, t
 handed to the agent). The cases themselves are proven by `scripts/eval validate`, which
 `./scripts/check` runs."""
 
+import contextlib
+import io
 import json
 import math
 import os
@@ -11,8 +13,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import ROOT, load, run_script
+from tests.support import ROOT, commit_file, git, load, make_repo, run_script
 
+load("scripts/protected_paths.py")  # scripts/gate_evidence.py imports it from beside itself
+gate_evidence = load("scripts/gate_evidence.py")  # scripts/eval imports it from beside itself
+rubric_judge = load("scripts/rubric_judge.py")
 ev = load("scripts/eval")
 
 CASE = """
@@ -393,6 +398,341 @@ class ShellTest(unittest.TestCase):
         done = run_script("scripts/eval", "report", str(self.root))
         self.assertEqual(done.returncode, 1)
         self.assertIn("no trials", done.stdout)
+
+
+JUDGE_RUBRIC = """
+rubric = "Each requirement can be answered yes or no."
+bar = 0.6
+
+[[samples]]
+text = "R1. The panel shows status."
+label = "pass"
+
+[[samples]]
+text = "R1. It should feel fast."
+label = "fail"
+"""
+
+
+def verdict_line(verdict: str) -> str:
+    return json.dumps({"verdict": verdict, "reasoning": f"said {verdict}"})
+
+
+class JudgedCaseTest(unittest.TestCase):
+    CASE = """
+source = "a person"
+kind = "outcome"
+suite = "capability"
+description = "d"
+checks = ["c"]
+judges = ["requirements_checkable"]
+
+[[sessions]]
+prompt = "p"
+"""
+
+    def test_a_case_names_the_dimensions_a_judge_grades(self) -> None:
+        self.assertEqual(ev.parse_case(self.CASE, "x").judges, ("requirements_checkable",))
+        self.assertEqual(ev.parse_case(self.CASE.replace('judges = ["requirements_checkable"]\n', ""), "x").judges, ())
+
+    def test_a_dimension_must_be_a_lower_case_word_naming_a_file(self) -> None:
+        with self.assertRaisesRegex(ev.CaseError, "judges must name rubric dimensions"):
+            ev.parse_case(self.CASE.replace("requirements_checkable", "../escape"), "x")
+
+    def test_a_missing_rubric_says_what_to_write(self) -> None:
+        with tempfile.TemporaryDirectory() as folder, self.assertRaisesRegex(ev.CaseError, "evals/calibration/requirements_checkable.toml"):
+            ev.load_dimension("requirements_checkable", Path(folder))
+
+
+class TrialPassedTest(unittest.TestCase):
+    def judged(self, verdict: str, gating: bool) -> object:
+        return ev.Judged("d", ev.JudgeVerdict(verdict), "why", "opus", gating)
+
+    def test_a_gating_fail_fails_the_trial_and_nothing_else_does(self) -> None:
+        checks = (ev.CheckResult("c", True, ""),)
+        self.assertFalse(ev.trial_passed(checks, [self.judged("fail", True)]))
+        self.assertTrue(ev.trial_passed(checks, [self.judged("fail", False)]), "advisory")
+        self.assertTrue(ev.trial_passed(checks, [self.judged("unknown", True)]), "unknown is neither")
+        self.assertTrue(ev.trial_passed(checks, [self.judged("pass", True)]))
+        self.assertFalse(ev.trial_passed((ev.CheckResult("c", False, "x"),), [self.judged("pass", True)]))
+
+
+class RunJudgesTest(unittest.TestCase):
+    def setUp(self) -> None:
+        handle = tempfile.TemporaryDirectory()
+        self.addCleanup(handle.cleanup)
+        self.root = Path(handle.name)
+        (self.root / "calibration").mkdir()
+        (self.root / "calibration" / "requirements_checkable.toml").write_text(JUDGE_RUBRIC)
+        self.case = ev.parse_case(JudgedCaseTest.CASE, "x")
+
+        class Module:
+            @staticmethod
+            def artefacts(found: object, case: object) -> dict[str, str]:
+                return {"requirements_checkable": "R1. The panel shows status."}
+
+        self.module = Module
+
+    def run_judges(self, asker: object, results: Path | None = None) -> tuple[object, ...]:
+        return ev.run_judges(self.case, self.module, None, "opus", results or self.root, asker, self.root / "calibration")
+
+    def test_uncalibrated_the_judge_answers_and_gates_nothing(self) -> None:
+        (answer,) = self.run_judges(lambda prompt, model: verdict_line("fail"))
+        self.assertEqual((answer.verdict, answer.gating, answer.model), (ev.JudgeVerdict.FAIL, False, "opus"))
+
+    def test_calibrated_at_the_bar_for_this_model_the_judge_gates(self) -> None:
+        dimension = ev.load_dimension("requirements_checkable", self.root / "calibration")
+        record = ev.calibration_record(dimension, "opus", rubric_judge.Agreement(2, 2, ()), "now")
+        results = self.root / "results"
+        (results / "calibration").mkdir(parents=True)
+        (results / "calibration" / "requirements_checkable.json").write_text(json.dumps(record))
+        (answer,) = self.run_judges(lambda prompt, model: verdict_line("fail"), results)
+        self.assertTrue(answer.gating)
+        (other,) = ev.run_judges(self.case, self.module, None, "sonnet", results, lambda p, m: verdict_line("fail"), self.root / "calibration")
+        self.assertFalse(other.gating, "calibrated for opus, not sonnet")
+
+    def test_a_judge_that_cannot_answer_is_unknown_and_says_why(self) -> None:
+        def broken(prompt: str, model: str) -> str:
+            raise ev.RubricError("not signed in")
+
+        (answer,) = self.run_judges(broken)
+        self.assertEqual((answer.verdict, answer.gating), (ev.JudgeVerdict.UNKNOWN, False))
+        self.assertIn("judge unavailable: not signed in", answer.reasoning)
+
+    def test_a_case_with_no_judges_asks_nothing(self) -> None:
+        plain = ev.parse_case(JudgedCaseTest.CASE.replace('judges = ["requirements_checkable"]\n', ""), "x")
+        self.assertEqual(ev.run_judges(plain, self.module, None, "opus", self.root, lambda p, m: 1 / 0, self.root / "calibration"), ())
+
+    def test_what_was_judged_is_stored_and_read_back(self) -> None:
+        stored = ev.judged_json((ev.Judged("d", ev.JudgeVerdict.PASS, "why", "opus", True),))
+        self.assertEqual(ev.judged_from_json(json.loads(json.dumps(stored))), (ev.Judged("d", ev.JudgeVerdict.PASS, "why", "opus", True),))
+
+
+class CalibrateCommandTest(unittest.TestCase):
+    def setUp(self) -> None:
+        handle = tempfile.TemporaryDirectory()
+        self.addCleanup(handle.cleanup)
+        self.root = Path(handle.name)
+        self.folder = self.root / "calibration"
+        self.folder.mkdir()
+        (self.folder / "requirements_checkable.toml").write_text(JUDGE_RUBRIC)
+        self.results = self.root / "results"
+
+    def run_calibrate(self, answers: list[str], selected: tuple[str, ...] = ()) -> tuple[int, str]:
+        said = iter(answers)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = ev.calibrate(list(selected), "opus", self.results, lambda prompt, model: next(said), self.folder)
+        return code, out.getvalue()
+
+    def test_reaching_the_bar_records_it_and_exits_0(self) -> None:
+        code, out = self.run_calibrate([verdict_line("pass"), verdict_line("fail")])
+        self.assertEqual(code, 0, out)
+        self.assertIn("agreement 2/2 = 1.00 against the bar 0.60: reached", out)
+        record = json.loads((self.results / "calibration" / "requirements_checkable.json").read_text())
+        self.assertEqual((record["model"], record["rate"], record["samples"]), ("opus", 1.0, 2))
+
+    def test_missing_the_bar_names_the_samples_it_got_wrong_and_exits_1(self) -> None:
+        code, out = self.run_calibrate([verdict_line("pass"), verdict_line("pass")])
+        self.assertEqual(code, 1)
+        self.assertIn("not reached; its verdicts stay advisory", out)
+        self.assertIn("sample 2 you labelled fail, the judge said pass", out)
+
+    def test_a_dimension_with_no_samples_cannot_be_measured(self) -> None:
+        (self.folder / "requirements_checkable.toml").write_text('rubric = "r"\n')
+        code, out = self.run_calibrate([])
+        self.assertEqual(code, 2)
+        self.assertIn("no labelled samples", out)
+
+    def test_no_rubrics_says_what_to_write(self) -> None:
+        (self.folder / "requirements_checkable.toml").unlink()
+        code, out = self.run_calibrate([])
+        self.assertEqual(code, 2)
+        self.assertIn("write evals/calibration/<dimension>.toml", out)
+
+    def test_an_unknown_dimension_is_named(self) -> None:
+        with self.assertRaisesRegex(ev.CaseError, "no rubric named nope"):
+            self.run_calibrate([], ("nope",))
+
+
+class FlagsTest(unittest.TestCase):
+    def case(self, suite: str, trials: int, passed: int) -> dict[str, object]:
+        return {"suite": suite, "trials": trials, "passed": passed, "pass_at_k": 1.0 if passed else 0.0}
+
+    def test_a_case_nothing_passes_is_read_before_the_plugin_is_blamed(self) -> None:
+        flags = ev.case_flags({"a": self.case("regression", 3, 0)}, {})
+        self.assertIn("usually broken", flags["a"][0])
+
+    def test_a_capability_case_that_passed_every_trial_for_three_runs_may_graduate(self) -> None:
+        flags = ev.case_flags({"a": self.case("capability", 3, 3)}, {"a": [True, True]})
+        self.assertIn("may graduate it to regression", flags["a"][0])
+
+    def test_two_runs_are_not_yet_saturation_and_one_miss_resets_it(self) -> None:
+        self.assertEqual(ev.case_flags({"a": self.case("capability", 3, 3)}, {"a": [True]}), {})
+        self.assertEqual(ev.case_flags({"a": self.case("capability", 3, 3)}, {"a": [True, False, True]}), {})
+        self.assertEqual(ev.case_flags({"a": self.case("capability", 3, 2)}, {"a": [True, True]}), {})
+
+    def test_a_regression_case_passing_everything_is_just_healthy(self) -> None:
+        self.assertEqual(ev.case_flags({"a": self.case("regression", 3, 3)}, {"a": [True, True, True]}), {})
+
+    def test_history_reads_earlier_runs_of_a_case_oldest_first(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            results = Path(folder)
+            for run, passes in (("20260101T000000Z-a-with-plugin", [True, True]), ("20260102T000000Z-a-with-plugin", [True, False]),
+                                ("20260103T000000Z-a-with-plugin", [True])):
+                (results / run).mkdir()
+                (results / run / "run.json").write_text("{}")
+                for number, passed in enumerate(passes, start=1):
+                    where = results / run / "case-a" / f"trial-{number}"
+                    where.mkdir(parents=True)
+                    (where / "trial.json").write_text(json.dumps({"passed": passed}))
+            self.assertEqual(ev.case_history(results, "case-a", "20260103T000000Z-a-with-plugin"), [True, False])
+            self.assertEqual(ev.case_history(results, "other", "20260103T000000Z-a-with-plugin"), [])
+
+
+class JudgedReportTest(unittest.TestCase):
+    def trial(self, number: int, passed: bool, *judged: object) -> object:
+        return ev.TrialResult("a", "outcome", "capability", number, passed, (ev.CheckResult("c", passed, ""),),
+                              ev.Counts({}, 1, 1, 0, 1000, 0.0, 0, 1, 1), "with-plugin", "sonnet", "abc", "", tuple(judged))
+
+    def test_judged_verdicts_are_counted_per_dimension_and_shown_with_their_gating(self) -> None:
+        judged = lambda verdict, gating: ev.Judged("checkable", ev.JudgeVerdict(verdict), "why", "opus", gating)  # noqa: E731
+        trials = [self.trial(1, True, judged("pass", False)), self.trial(2, True, judged("fail", False)), self.trial(3, True, judged("unknown", False))]
+        summary = ev.summarise(trials, ())
+        self.assertEqual(summary["cases"]["a"]["judged"]["checkable"], {"pass": 1, "fail": 1, "unknown": 1, "gating": False, "model": "opus"})
+        text = "\n".join(ev.report_lines(summary, {}, "v", [], {"a": ["look here"]}))
+        self.assertIn("| a | checkable | 1 | 1 | 1 | opus | no, not calibrated |", text)
+        self.assertIn("- a: look here", text)
+
+    def test_a_report_with_nothing_judged_and_no_flags_has_neither_section(self) -> None:
+        text = "\n".join(ev.report_lines(ev.summarise([self.trial(1, True)], ()), {}, "v", []))
+        self.assertNotIn("Judged", text)
+        self.assertNotIn("Look at", text)
+
+
+class GateTest(unittest.TestCase):
+    """`eval gate` on a throwaway repository, with the agents replaced by a function that writes trial results."""
+
+    SUITES = {"keeps-the-gate": "regression", "keeps-the-rule": "regression", "measures-skill": "capability"}
+
+    def setUp(self) -> None:
+        handle, self.repo = make_repo()
+        self.addCleanup(handle.cleanup)
+        commit_file(self.repo, "skills/a/SKILL.md", "---\nname: a\n---\n")
+        commit_file(self.repo, "README.md", "hello\n")
+        git(self.repo, "branch", "-M", "main")
+        git(self.repo, "switch", "-q", "-c", "work")
+        self.calls: list[list[str]] = []
+        self.passing: dict[str, int] = {}  # a case's passes per trial count; missing means all
+        self.during = None
+
+    def fake_run(self, chosen: list[str], trials: int, options: object, plugin_source: str, results: Path) -> Path:
+        self.calls.append(list(chosen))
+        out = results / f"2026010{len(self.calls)}T000000Z-abc-with-plugin"
+        out.mkdir(parents=True)
+        (out / "run.json").write_text(json.dumps({"run": out.name, "plugin": "abc", "arm": "with-plugin", "model": "", "where": "native", "trials": trials}))
+        for name in chosen:
+            for number in range(1, trials + 1):
+                where = out / name / f"trial-{number}"
+                where.mkdir(parents=True)
+                passed = number <= self.passing.get(name, trials)
+                checks = [{"name": "the_check", "passed": passed, "detail": "" if passed else "it did not"}]
+                (where / "trial.json").write_text(json.dumps({
+                    "case": name, "kind": "outcome", "suite": self.SUITES[name], "trial": number, "passed": passed, "checks": checks,
+                    "counts": ev.counts_json(ev.Counts({}, 1, 1, 0, 1000, 0.0, 0, 1, 1)), "arm": "with-plugin", "model": "sonnet", "plugin": "abc"}))
+                (where / "outcome.json").write_text("{}")
+                (where / "session-0.jsonl").write_text("{}\n")
+        if self.during:
+            self.during()
+        return out
+
+    def gate(self, everything: bool = False, suites: dict[str, str] | None = None, base: str = "main") -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ev.gate(base, everything, 3, ev.Options(), root=self.repo, suites=suites or self.SUITES, run_cases=self.fake_run)
+        return code, out.getvalue(), err.getvalue()
+
+    def edit_skill(self, text: str) -> None:
+        commit_file(self.repo, "skills/a/SKILL.md", f"---\nname: a\n---\n{text}\n")
+
+    def test_a_change_with_no_steering_path_runs_nothing(self) -> None:
+        commit_file(self.repo, "docs/guide.md", "words\n")
+        code, out, _ = self.gate()
+        self.assertEqual(code, 0)
+        self.assertIn("gate not needed", out)
+        self.assertEqual(self.calls, [])
+
+    def test_a_steering_change_runs_the_regression_cases_and_records_passing_evidence(self) -> None:
+        self.edit_skill("new")
+        code, out, _ = self.gate()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.calls, [["keeps-the-gate", "keeps-the-rule"]])
+        self.assertIn("This spends tokens", out)
+        self.assertIn("gate passed", out)
+        self.assertEqual(gate_evidence.check_change(self.repo, "main").state, gate_evidence.State.PASS)
+
+    def test_a_second_run_for_the_same_content_spends_nothing(self) -> None:
+        self.edit_skill("new")
+        self.gate()
+        code, out, _ = self.gate()
+        self.assertEqual(code, 0)
+        self.assertIn("already passed", out)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_a_failing_regression_case_fails_the_gate_and_the_evidence_says_so(self) -> None:
+        self.edit_skill("new")
+        self.passing = {"keeps-the-rule": 2}
+        code, out, _ = self.gate()
+        self.assertEqual(code, 1)
+        self.assertIn("keeps-the-rule: 2 of 3 trials passed (failing: the_check x1)", out)
+        verdict = gate_evidence.check_change(self.repo, "main")
+        self.assertEqual(verdict.state, gate_evidence.State.FAIL)
+        self.assertIn("2 of 3 trials passed", verdict.reason)
+
+    def test_a_steering_path_edited_while_the_gate_ran_records_nothing(self) -> None:
+        self.edit_skill("new")
+        self.during = lambda: (self.repo / "skills" / "a" / "SKILL.md").write_text("edited during the run\n")
+        code, _, err = self.gate()
+        self.assertEqual(code, 2)
+        self.assertIn("changed while the gate ran", err)
+        self.assertFalse(list((self.repo / ".eval-results" / "gate").glob("*.json")) if (self.repo / ".eval-results" / "gate").exists() else [])
+
+    def test_a_transcript_edited_after_the_run_voids_the_evidence(self) -> None:
+        self.edit_skill("new")
+        self.gate()
+        next(self.repo.glob(".eval-results/*/keeps-the-gate/trial-1/session-0.jsonl")).write_text("{\"forged\": 1}\n")
+        verdict = gate_evidence.check_change(self.repo, "main")
+        self.assertEqual(verdict.state, gate_evidence.State.FAIL)
+        self.assertIn("was edited", verdict.reason)
+
+    def test_with_no_regression_case_it_refuses_rather_than_pass_untested(self) -> None:
+        self.edit_skill("new")
+        code, _, err = self.gate(suites={"measures-skill": "capability"})
+        self.assertEqual(code, 2)
+        self.assertIn("no regression case", err)
+        self.assertEqual(self.calls, [])
+
+    def test_no_base_is_refused(self) -> None:
+        git(self.repo, "branch", "-m", "work", "trunk")
+        git(self.repo, "branch", "-D", "main")
+        code, _, err = self.gate(base="")
+        self.assertEqual(code, 2)
+        self.assertIn("--base", err)
+
+    def test_all_runs_capability_cases_and_a_later_drop_beyond_noise_fails(self) -> None:
+        suites = {**self.SUITES, "measures-more": "capability", "measures-again": "capability", "and-again": "capability"}
+        self.SUITES = suites
+        self.edit_skill("one")
+        self.assertEqual(self.gate(everything=True, suites=suites)[0], 0)
+        self.passing = {"measures-skill": 0, "measures-more": 0, "measures-again": 0, "and-again": 0}
+        self.edit_skill("two")
+        code, out, _ = self.gate(everything=True, suites=suites)
+        self.assertEqual(code, 1)
+        self.assertIn("capability cases fell from 1.00 to 0.00", out)
+
+    def test_the_gate_command_line_refuses_zero_trials(self) -> None:
+        done = run_script("scripts/eval", "gate", "--trials", "0", cwd=self.repo)
+        self.assertEqual(done.returncode, 2)
 
 
 if __name__ == "__main__":

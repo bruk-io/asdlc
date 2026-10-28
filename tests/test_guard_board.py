@@ -164,7 +164,7 @@ class BoardStatusTest(unittest.TestCase):
 
     def test_the_guards_never_ask(self) -> None:
         """I10: a hook that answered `ask` would add a permission prompt; the guards only deny or allow."""
-        for hook in ("guard_board.py", "guard_test_edits.py", "load_rules.py"):
+        for hook in ("guard_board.py", "guard_test_edits.py", "guard_gate.py", "load_rules.py"):
             with self.subTest(hook=hook):
                 text = (ROOT / "hooks" / hook).read_text()
                 self.assertNotRegex(text, r'"permissionDecision":\s*"ask"')
