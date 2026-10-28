@@ -1,0 +1,16 @@
+source = "The owner, 2026-10-27: the should-not twin of board-asks-where. When the repository already has a board the plugin uses it and does not ask where the work should be kept."
+kind = "outcome"
+suite = "regression"
+description = "An engineer asks, in a repository that already has a local board, to write a piece of work down. The agent writes the intent as a draft on that board without asking where to keep it, and creates no board or repository of its own."
+checks = ["did_not_ask_where", "intent_on_the_existing_board", "nothing_else_created"]
+arms = ["with-plugin"]
+
+[run]
+model = "sonnet"
+effort = "medium"
+max_turns = 30
+max_budget_usd = 2.0
+timeout_minutes = 15
+
+[[sessions]]
+prompt = """I want to write down a piece of work so the team can pick it up. Customers who fail to log in only see "Login failed", and support wants to tell them why (a locked account, say) without us revealing whether an account exists. Nobody has decided how."""

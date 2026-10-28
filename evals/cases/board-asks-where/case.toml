@@ -1,0 +1,19 @@
+source = "The owner, 2026-10-27: a first user had to set up a new repository for tasks before the plugin worked. The board must live where its user chooses, and the plugin must ask rather than assume a tasks repository."
+kind = "outcome"
+suite = "regression"
+description = "An engineer asks, in a repository that has no board anywhere, to write a piece of work down. The agent asks once where the work should be kept and does not create a separate tasks repository or a board on its own. The engineer answers: in this repository. The agent then makes a local board here, writes the intent as a draft on it, and records the choice as a line in CLAUDE.md."
+checks = ["asked_before_creating", "no_separate_tasks_repository", "intent_on_a_board_in_this_repository", "choice_recorded_in_claude_md", "no_push"]
+arms = ["with-plugin"]
+
+[run]
+model = "sonnet"
+effort = "medium"
+max_turns = 40
+max_budget_usd = 3.0
+timeout_minutes = 20
+
+[[sessions]]
+prompt = """I want to write down a piece of work so the team can pick it up. Customers who fail to log in only see "Login failed", and support wants to tell them why (a locked account, say) without us revealing whether an account exists. Nobody has decided how."""
+
+[[sessions]]
+prompt = """In this repository, please."""

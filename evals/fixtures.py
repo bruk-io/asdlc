@@ -380,3 +380,93 @@ def reference_review(script: ev.Script, review: dict[str, object], verdict: str,
     script.bash(f"asdlc review-done {task} --as {who} --verdict {verdict} --findings {findings} {cited} --plan-matched yes "
                 f"--notes {shlex.quote(notes)}")
     script.bash(f"git -C {repo} worktree remove --force {worktree}")
+
+
+# One engineer, one repository, and a board that lives in it or nowhere: the world for the one-machine cases.
+
+SOLO_README = "# acme/app\n\nLogins for acme.\n"
+SOLO_CLAUDE = """# acme/app
+
+## Commands
+- Test: `python3 -m unittest -q`
+
+## Conventions
+- Python 3.12, standard library only.
+- Tests are `unittest` modules beside the code, `test_<module>.py`.
+"""
+
+
+@dataclass
+class Solo:
+    fixture: ev.Fixture
+    origin: Path
+    machine: ev.Machine
+
+    @property
+    def clone(self) -> Path:
+        return self.machine.clones["app"]
+
+    def facts(self, **extra: object) -> dict[str, object]:
+        """What the runner, the prompts and the checks know. The board, when there is one, is the repository itself."""
+        return {"board_origin": self.origin, "board": self.clone, "cwd": self.clone, "env": self.machine.env, "engineer": self.machine.name,
+                "code_origins": {"app": self.origin}, "clones": {"app": self.clone}, "app": self.clone, **extra}
+
+
+def solo(fixture: ev.Fixture, *, agent: str = "kyle", board: bool = False, files: dict[str, str] | None = None,
+         claude_md: str | None = SOLO_CLAUDE, branch: str = "") -> Solo:
+    """acme/app, a few lines of Python with tests, cloned for one engineer. With `board`, `asdlc init-board --local`
+    has been run in it and the board is committed there. `files` are added to the repository, `branch` is checked out
+    in the clone."""
+    env = fixture.seed_env()
+    origin = ev.bare(fixture.origins / "acme" / "app.git")
+    work = fixture.others / "seed-app"
+    subprocess.run(["git", "clone", "--quiet", str(origin), str(work)], check=True, capture_output=True, env=env)
+    contents = {"README.md": SOLO_README, "login.py": LOGIN, "test_login.py": TESTS, **({"CLAUDE.md": claude_md} if claude_md else {}), **(files or {})}
+    for name, text in contents.items():
+        (work / name).parent.mkdir(parents=True, exist_ok=True)
+        (work / name).write_text(text)
+    ev._git(work, "add", ".", env=env)
+    ev._git(work, "commit", "--quiet", "-m", "acme/app", env=env)
+    if board:
+        done = subprocess.run([sys.executable, str(fixture.plugin / "scripts" / "asdlc"), "init-board", "--local", str(work)],
+                              capture_output=True, text=True, env={**env, "ASDLC_BACKLOG": "backlog"})
+        if done.returncode != 0:
+            raise RuntimeError(f"init-board --local: {done.stderr}")
+    ev._git(work, "push", "--quiet", "origin", "main", env=env)
+    machine = ev.machine(fixture, agent, origin, agent=True)  # clones the origin into <home>/tasks; here that is the repository
+    clone = machine.home / "app"
+    machine.board.rename(clone)
+    machine.board = clone
+    machine.clones["app"] = clone
+    if branch:
+        machine.git(clone, "switch", "--quiet", "-c", branch)
+    return Solo(fixture, origin, machine)
+
+
+def machine_for(fixture: ev.Fixture, facts: dict[str, object]) -> ev.Machine:
+    """The agent's engineer's machine again, for a solo case's `collect` or a person step."""
+    env = {str(k): str(v) for k, v in dict(facts["env"]).items()}
+    found = ev.Machine(fixture, str(facts["engineer"]), Path(env["HOME"]), Path(str(facts["board"])), env)
+    found.clones["app"] = Path(str(facts["app"]))
+    return found
+
+
+def tree(clone: Path) -> dict[str, str]:
+    """Every file in a working tree as it is now, uncommitted changes included, for a case's `collect`."""
+    found = {}
+    for path in sorted(clone.rglob("*")):
+        relative = path.relative_to(clone)
+        if path.is_file() and ".git" not in relative.parts and ".asdlc" not in relative.parts and "__pycache__" not in relative.parts:
+            found[relative.as_posix()] = path.read_text(errors="replace")
+    return found
+
+
+def git_repos(fixture: ev.Fixture, *except_paths: Path) -> list[str]:
+    """Every git repository under the agent's side of the fixture other than the origins and the paths given: what the agent made itself."""
+    skip = {path.resolve() for path in except_paths}
+    found = []
+    for marker in sorted(fixture.agent.rglob(".git")):
+        root = marker.parent.resolve()
+        if root not in skip and fixture.origins.resolve() not in root.parents and "claude-config" not in root.parts:
+            found.append(str(root))
+    return found
