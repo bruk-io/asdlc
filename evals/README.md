@@ -17,6 +17,7 @@ kind = "outcome"        # outcome: the end state is graded. process: the order i
 suite = "regression"    # regression: should hold near 100%. capability: measures how well.
 description = "What happens, and what passing looks like, in a few sentences."
 checks = ["setting_changed", "no_intent_captured"]
+judges = ["intent_faithful"]  # optional: rubric dimensions a judge grades (see "Judged dimensions" below)
 arms = ["with-plugin"]  # leave out to run under both arms; say with-plugin when the case needs the plugin's agents
 
 [run]
@@ -44,6 +45,7 @@ A case has `sessions` (the first is fresh, each later one resumes it after its p
 - `reference(script, fixture, facts, session) -> final message`: the correct actions, scripted with no model. Each `script.bash`, `script.write`, `script.read`, `script.skill` and `script.agent` really runs and is written down as a session would write it, so the checks read the same thing from a reference run as from a real one.
 - `null(...)`, optional: what the null run does. By default it does nothing.
 - `collect(fixture, facts) -> dict`, optional: anything else the checks need, gathered on the host after the agent stopped (a file's text, the result of running the pushed code).
+- `artefacts(outcome, case) -> {dimension: text}`, only for a case with `judges`: the text each judge reads.
 - Checks, by the names `case.toml` gives: `def name(outcome, case) -> (passed, why)`. A name is looked up in `case.py`, then in `checks.py`, which holds the checks several cases share.
 
 Person steps live in `steps.py` (or in the case's own `case.py`): `def name(fixture, facts) -> what the person did`. Each runs as the agent's engineer, on the host, and the trace records it with the board as it stood.
@@ -72,3 +74,11 @@ Regression cases should pass near 100% of the time; a drop is a bug. Capability 
 ## What a run records
 
 Every trial keeps its transcripts (stream-json, one file per session, with subagent transcripts beside them), `outcome.json`, and `trial.json` with each check's verdict and the counts: tokens by model (input, output, cache reads, cache writes and how many of those were to the one-hour cache), turns, tool calls, tool errors, permission denials, time, the model, the arm and the plugin's commit. Cost is derived when the report is made, from `prices.toml`, so a run can be repriced and runs on a subscription are priced like any other (R29).
+
+## Judged dimensions
+
+Some things have no deterministic check: is each requirement answerable yes or no, does the draft keep the requester's words. A case names them in `judges` and returns the text to read from `artefacts`. Each dimension is a file, `evals/calibration/<dimension>.toml`: one rubric (one question, with what pass, fail and unknown look like), a `bar`, and the owner's labelled `[[samples]]`. `scripts/eval calibrate` measures how often the judge agrees with the labels. A judge's `fail` fails a trial only when its recorded agreement reaches the bar for the model that judges now; until then it is advisory and the report says so. `validate` checks that each dimension has a rubric and that the reference run gives it something to read, with no model call. Candidate samples to label are in `calibration/drafts/`.
+
+## Worlds
+
+`fixtures.team(...)` is the shared board with engineers' machines. `fixtures.solo(...)` is one engineer in one repository (acme/app), with a local board in it (`board=True`) or none, the way a one-machine session works; `solo` cases read the working tree back with `fixtures.tree` and `fixtures.policy_files`, and per-commit test results with `fixtures.commit_history`.
