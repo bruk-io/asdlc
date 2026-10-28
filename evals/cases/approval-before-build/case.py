@@ -32,7 +32,6 @@ def reference(script: ev.Script, fixture: ev.Fixture, facts: dict[str, object], 
     if session == 0:
         script.skill("asdlc:orchestrate")
         script.bash("asdlc whoami --json")
-        script.bash("asdlc reap --json")
         claims = [json.loads(script.bash(f"asdlc next --as kyle.w{n} --json").stdout) for n in (1, 2)]
         for claim in claims:
             script.bash(f"asdlc route {claim['task']}")

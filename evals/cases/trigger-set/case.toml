@@ -53,7 +53,7 @@ prompt = "Run my workers on whatever's next until it's in review."
 expect = "orchestrate"
 
 [[items]]
-prompt = "What does stale_after in asdlc.toml mean?"
+prompt = "What does the workers setting in my devs file mean?"
 expect = "none"
 
 [[items]]
@@ -65,7 +65,7 @@ prompt = "How many tasks are in progress right now?"
 expect = "none"
 
 [[items]]
-prompt = "Explain what asdlc reap does, in two sentences."
+prompt = "Explain what asdlc route does, in two sentences."
 expect = "none"
 
 [[items]]
