@@ -42,11 +42,11 @@ _TEST_NAME = re.compile(
     r"|.*\.(test|spec)\.[cm]?[jt]sx?|.*tests?\.(java|kt|swift|cs))$",
     re.IGNORECASE,
 )
-_SHELL_WRITES = re.compile(
+SHELL_WRITES = re.compile(
     r"\bsed\b[^|;&]*\s-i|\bperl\b[^|;&]*\s-[a-z]*i|\btee\b|\btruncate\b|\b(mv|rm|cp|install|patch)\b"
     r"|\bgit(?:\s+(?:-C|--git-dir|--work-tree)\s+\S+|\s+-\S+)*\s+(checkout|restore|apply|rm|mv)\b"
 )
-_REDIRECT_TARGET = re.compile(r"(?<![0-9&])>>?\s*([^\s;&|]+)")
+REDIRECT_TARGET = re.compile(r"(?<![0-9&])>>?\s*([^\s;&|]+)")
 
 
 @dataclass(frozen=True)
@@ -78,7 +78,7 @@ def is_test_path(relative: str) -> bool:
     return bool(_TEST_NAME.match(path.name)) or any(part.lower() in _TEST_DIRS for part in path.parts[:-1])
 
 
-def _segments(command: str) -> list[list[str]]:
+def segments(command: str) -> list[list[str]]:
     """The simple commands in a shell line, split at `&&`, `||`, `;` and `|` outside quotes."""
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
@@ -107,9 +107,9 @@ def tests_written_by(
     anywhere in its arguments.
     """
     existing = set(existing_tests)
-    hits = {to_relative(target) for target in _REDIRECT_TARGET.findall(command)} & existing
-    for words in _segments(command):
-        if not _SHELL_WRITES.search(" ".join(words)):
+    hits = {to_relative(target) for target in REDIRECT_TARGET.findall(command)} & existing
+    for words in segments(command):
+        if not SHELL_WRITES.search(" ".join(words)):
             continue
         named = words[-1:] if words[0] in _COPIES else words
         hits |= {to_relative(word) for word in named} & existing

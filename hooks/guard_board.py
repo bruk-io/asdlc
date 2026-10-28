@@ -73,7 +73,7 @@ _LAUNCHERS = frozenset({"env", "sudo", "command", "exec", "time", "nohup", "nice
 _LAUNCHER_VALUES = frozenset({"--with", "--python", "-p", "--project", "--directory", "--package", "-u", "-n",
                               "-I", "-P", "-L", "-d", "-E", "-s", "-a", "--max-args", "--max-procs", "--delimiter", "--arg-file"})
 _KEYWORDS = frozenset({"if", "then", "else", "elif", "fi", "for", "select", "while", "until", "do", "done", "case", "esac", "{", "}", "!"})
-_SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
+SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
 _BACKLOG = frozenset({"backlog", "backlog.md"})
 _PUSH_VALUES = frozenset({"-o", "--push-option", "--receive-pack", "--exec", "--repo"})
 _GIT_VALUES = frozenset({"-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"})
@@ -297,7 +297,7 @@ def simple_commands(command: str) -> list[list[str]]:
     return [words for words in commands if words]
 
 
-def _without_assignments(words: Sequence[str]) -> list[str]:
+def without_assignments(words: Sequence[str]) -> list[str]:
     """The words without leading assignments and shell keywords (`do`, `then`, `{`, `!` ...), so the
     command inside a loop or a conditional is judged like any other."""
     index = 0
@@ -320,7 +320,7 @@ def directory_of(base: Path | None, raw: str) -> Path | None:
 
 def unwrap(words: Sequence[str]) -> list[str]:
     """The command a launcher (env, uv run, python, npx, sudo) actually runs."""
-    words = _without_assignments(words)
+    words = without_assignments(words)
     while words and PurePath(words[0]).name in _LAUNCHERS or (words and re.fullmatch(r"python3(\.\d+)?", PurePath(words[0]).name)):
         words = words[1:]
         while words and (words[0].startswith("-") or "=" in words[0].split("/")[0]):
@@ -482,7 +482,7 @@ def push_destinations(arguments: Sequence[str], branch: str) -> frozenset[str]:
     return frozenset(destinations)
 
 
-def _git_call(words: Sequence[str], directory: Path | None) -> tuple[str, list[str], Path | None]:
+def git_call(words: Sequence[str], directory: Path | None) -> tuple[str, list[str], Path | None]:
     """A git command's subcommand, its arguments, and the directory it runs in (None when it can't be told)."""
     index = 1
     while index < len(words) and words[index].startswith("-"):
@@ -572,7 +572,7 @@ def gh_outcome(arguments: Sequence[str]) -> Outcome | None:
     return None
 
 
-def _shell_script(words: Sequence[str]) -> str | None:
+def shell_script(words: Sequence[str]) -> str | None:
     """The script `sh -c`, `bash -lc` or `sh -ec` runs, or None."""
     for index, word in enumerate(words[1:-1], start=1):
         if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", word):
@@ -594,7 +594,7 @@ def decide_command(command: str, cwd: Path | None, lookup: Lookup) -> Outcome:
     for words in commands:
         if reason := git_env_refusal(env_names(words)):  # GIT_* only ever changes what git does
             return Outcome(Verdict.DENY, reason)
-        words = _without_assignments(words)
+        words = without_assignments(words)
         if words[:1] == ["cd"]:
             directory = directory_of(directory, words[1] if len(words) > 1 else "~")
             continue
@@ -610,7 +610,7 @@ def _decide_simple(words: Sequence[str], directory: Path | None, lookup: Lookup)
     if not words:
         return ALLOW
     name = PurePath(words[0]).name
-    if name in _SHELLS and (script := _shell_script(words)) is not None:
+    if name in SHELLS and (script := shell_script(words)) is not None:
         return decide_command(script, directory, lookup)
     if name in _BACKLOG:
         if reason := backlog_refusal(words[1:]):
@@ -633,7 +633,7 @@ def _decide_simple(words: Sequence[str], directory: Path | None, lookup: Lookup)
     elif name == "git":
         if reason := git_program_refusal(words):
             return Outcome(Verdict.DENY, reason)
-        subcommand, rest, where = _git_call(words, directory)
+        subcommand, rest, where = git_call(words, directory)
         if subcommand == "push":
             return _decide_push(rest, where, lookup)
     return ALLOW

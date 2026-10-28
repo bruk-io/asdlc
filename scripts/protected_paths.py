@@ -24,6 +24,11 @@ _EVALS = re.compile(r"^(evals/|spec/[^/]+-evals\.md$)")
 _TRAVELS_WITH_EITHER = ("intent/", "spec/", "plan/", "incident/", "README.md")
 
 
+def is_suite(path: str) -> bool:
+    """Whether a path is part of the eval suite: `evals/` and the evals definitions in `spec/`."""
+    return bool(_EVALS.match(path))
+
+
 def violation(changed: Iterable[str]) -> str | None:
     """Say why a set of changed paths breaks the rule, or None when it doesn't."""
     paths = sorted(set(changed))
