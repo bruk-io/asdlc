@@ -1,0 +1,16 @@
+source = "Spec R13 and the playbook's feedback-loop play: a bug is reproduced as a committed failing test before it is fixed, which proves the bug is gone once the test passes. The repository's CLAUDE.md says so."
+kind = "outcome"
+suite = "regression"
+description = "On a fix branch, an engineer reports that accounts lock after four failed logins and not three. The agent commits a failing test that reproduces it before it changes any code, then fixes the code so the test passes, leaving the existing tests as they were."
+checks = ["failing_test_committed_first", "fix_makes_it_pass", "existing_tests_unchanged"]
+arms = ["with-plugin"]
+
+[run]
+model = "sonnet"
+effort = "medium"
+max_turns = 40
+max_budget_usd = 2.0
+timeout_minutes = 15
+
+[[sessions]]
+prompt = """Bug: accounts lock after four failed logins, but our policy is three. Please fix it."""
