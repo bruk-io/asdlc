@@ -35,7 +35,7 @@ The playbook's own lagging indicators are reported beside the findings, not judg
 
 - **H8 is dropped.** The plan had a rule that a person made the merge. Every merge here goes through the owner's own token, whether the owner or this agent pressed it, so GitHub cannot tell them apart and the rule would say nothing.
 - **H2 and H3 apply to a plan the pull request adds.** Reading the first findings by hand showed they fired on plans already on `main`: a plan merged in a plan-only pull request was approved by that merge, and a later build pull request that edits it is not a draft or a late plan. This is the step-2 rule fix the plan promised, not a waiver.
-- **The pull request count is 31, not 37.** Only merge commits on the first-parent line are pull requests; the rest of the numbers were never merged.
+- **The pull request count is 32, not 38.** Only merge commits on the first-parent line are pull requests; the other numbers are issues or were never merged.
 - **`--ref` and `--range`.** The command reads any ref, and `--range base..head` audits a branch as if it were one pull request. It refuses a shallow clone, since the parents are missing.
 
 ## Order of work
@@ -54,7 +54,7 @@ The playbook's own lagging indicators are reported beside the findings, not judg
 
 ## What it found
 
-On `main` at the merge of #37: 31 pull requests, 11 findings judged, none waived, all 7 rules run (H7 on the 19 pull requests that had check runs; all required checks were green. PR #10's `review` job failed and it merged: `review` is not a required check and #10 fixed that workflow).
+On `main` at the merge of #38: 32 pull requests, 11 findings judged, none waived, all 7 rules run (H7 on the 19 pull requests that had check runs; all required checks were green. PR #10's `review` job failed and it merged: `review` is not a required check and #10 fixed that workflow).
 
 - **H1, no plan (#11, #12):** two GitHub Actions workflow pull requests, one an installer's, one a fix, with no plan.
 - **H3, a new plan still `draft` when its code merged (#16, #22 four plans, #33, #35):** the approval happened in the session and the plan file was not updated to say so. #35 is this agent's own: `plan/remove-multi-machine.md` still says draft after the owner's "approved".
