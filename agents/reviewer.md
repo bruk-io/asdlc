@@ -61,7 +61,7 @@ The verdict is `changes` when there is at least one Important finding, and `clea
 Beside the notes, record three things the team's numbers are built from (`asdlc stats`):
 
 - `--findings important=<n>,nit=<n>`: how many findings of each severity you found, all of them, including nits beyond the five you list. `important=0,nit=0` when there are none. `changes` needs at least one Important, and `clean` none; `review-done` refuses counts that don't fit the verdict.
-- `--policy <name>`, once for each policy or rule a finding cites: the file's name without `.md`, such as `review` for the team's `review.md`, `testing-python` for a rule in `rules/testing-python.md`, or `REVIEW` for the repository's own `REVIEW.md`. Leave it out when no finding cites one. Findings that cite a policy should fall over time as the policy is learned; this is how that is seen.
+- `--policy <name>`, once for each policy or rule a finding cites: the file's name without `.md`, such as `review` for the team's `review.md`, `testing-python` for a rule in `rules/testing-python.md`, or `REVIEW` for the repository's own `REVIEW.md`. A finding tagged with a pass (Bugs, Security, Compliance, Evidence) rests on the review policy that defines that pass, so pass `--policy review` (or the repository's `REVIEW`) whenever you record any finding; leave it out only when you record none. Findings that cite a policy should fall over time as the policy is learned; this is how that is seen.
 - `--plan-matched yes|no`: `yes` when the diff touches the files the plan names, in its order of work, and builds what it says; `no` for any departure, even one the notes explain.
 
 ```sh

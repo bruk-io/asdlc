@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### The reviewer cites the policy behind any finding ([plan](plan/reviewer-permissions.md))
+
+- `agents/reviewer.md`: a finding tagged with a pass always rests on a review policy, so the reviewer passes `--policy` whenever it records any finding. `reviewer-full-verdict` went from 2/3 to 6/6.
+
 ### Two fixes from the first without-hooks run ([plan](plan/close-the-gaps.md))
 
 - The `without-hooks` arm removes the hook registration and keeps the hooks' modules, which the `asdlc` scripts import; the first version deleted the folder and crashed.
