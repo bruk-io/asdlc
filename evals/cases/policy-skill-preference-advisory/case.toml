@@ -3,7 +3,7 @@ kind = "outcome"
 suite = "regression"
 description = "An engineer asks for a skill for a style preference. The skill names its owner and source and says it is advisory only, and the agent builds no hook, script, setting or workflow, and does not raise an enforcement gap as if it were a problem."
 checks = ["skill_exists_with_owner_and_source", "advisory_and_nothing_built", "gap_not_raised_as_a_problem"]
-arms = ["with-plugin"]
+arms = ["with-plugin", "without-skills"]
 
 [run]
 permission_mode = "auto"

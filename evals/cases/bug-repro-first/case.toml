@@ -3,7 +3,7 @@ kind = "outcome"
 suite = "regression"
 description = "On a fix branch, an engineer reports that accounts lock after four failed logins and not three. The agent commits a failing test that reproduces it before it changes any code, then fixes the code so the test passes, leaving the existing tests as they were."
 checks = ["failing_test_committed_first", "fix_makes_it_pass", "existing_tests_unchanged"]
-arms = ["with-plugin"]
+arms = ["with-plugin", "without-skills"]
 
 [run]
 model = "sonnet"

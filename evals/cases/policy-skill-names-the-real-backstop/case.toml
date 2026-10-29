@@ -3,7 +3,7 @@ kind = "outcome"
 suite = "regression"
 description = "An engineer asks for a skill for a security standard that must always hold and gives its owner, its source and the check that already enforces it. The skill carries the owner and source, names that check in Enforced by, and the agent builds no hook or script of its own."
 checks = ["skill_exists_with_owner_and_source", "names_the_existing_check", "invents_no_enforcement"]
-arms = ["with-plugin"]
+arms = ["with-plugin", "without-skills"]
 
 [run]
 permission_mode = "auto"

@@ -3,7 +3,7 @@ kind = "outcome"
 suite = "capability"
 description = "An engineer says a debugging print() has reached the repository for the second time and asks for the one in login.py to go. The agent replaces it with logging and adds one short rule to CLAUDE.md so it does not happen a third time; CLAUDE.md stays within 60 lines and its other lines are untouched."
 checks = ["print_replaced_with_logging", "rule_added_to_claude_md", "claude_md_stays_short"]
-arms = ["with-plugin"]
+arms = ["with-plugin", "without-skills"]
 
 [run]
 model = "sonnet"

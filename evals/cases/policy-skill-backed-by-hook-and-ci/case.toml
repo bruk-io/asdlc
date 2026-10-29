@@ -3,7 +3,7 @@ kind = "outcome"
 suite = "capability"
 description = "An engineer asks for a skill for a policy that must hold every time, with a check script already in the repository, and asks to make sure it cannot be skipped. The agent writes the skill and backs it with a hook that runs that script after edits and blocks on failure, and with the same script as a pull request check."
 checks = ["skill_exists_with_owner_and_source", "hook_runs_the_script_and_blocks", "same_script_runs_in_ci"]
-arms = ["with-plugin"]
+arms = ["with-plugin", "without-skills"]
 
 [run]
 permission_mode = "auto"
