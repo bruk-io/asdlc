@@ -6,6 +6,10 @@
 
 - `scripts/history_audit.py` reads the merged pull requests and reports, per rule, where a change to the plugin carried no plan, put the plan after the code, merged a new plan still marked draft, mixed the plugin with the eval suite, skipped tests or the changelog, or merged with a required check not green. It also prints the playbook's lagging indicators for each pull request. Known departures go in `scripts/history_waivers.toml` and stay listed.
 
+### The plugin against the playbook, claim by claim ([plan](plan/playbook-conformance.md))
+
+- `spec/playbook-conformance.md` lists 84 claims from the twelve plays, each with what builds it and what tests it, or why nothing does. `scripts/conformance.py`, run by `./scripts/check`, fails on a claim with no mapping, a target that does not exist, a repeated id, or a requirement that serves no claim and is not listed as beyond the playbook.
+
 ### The reviewer can diff and log a registered clone ([plan](plan/reviewer-permissions.md))
 
 - `asdlc permissions` allows `git diff` and `git log` in a registered clone, and the reviewer agent is told that a branch name with `-c` in it trips the deny rules, so it diffs in its review worktree against `HEAD`.
