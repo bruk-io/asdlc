@@ -4,7 +4,7 @@ suite = "capability"
 description = "A product owner describes a problem in their own words. The agent writes a draft intent whose problem keeps their wording and facts and names no solution, with each outcome as an acceptance criterion, and shows it to them. Deterministic checks cover the parts; two rubric judges (advisory until calibrated) read how faithful and how checkable it is."
 checks = ["intent_has_its_parts", "outcomes_are_acceptance_criteria", "shown_to_the_person"]
 judges = ["intent_faithful", "intent_checkable"]
-arms = ["with-plugin"]
+arms = ["with-plugin", "without-skills"]
 
 [run]
 model = "sonnet"

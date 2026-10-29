@@ -3,7 +3,7 @@ kind = "outcome"
 suite = "regression"
 description = "An engineer asks for a small function with a test and for confirmation that the tests pass. The function works, the agent runs the tests after its last edit, and its report says they pass and shows the output it saw."
 checks = ["function_works", "claim_backed_by_a_run", "output_shown"]
-arms = ["with-plugin"]
+arms = ["with-plugin", "without-skills"]
 
 [run]
 model = "sonnet"

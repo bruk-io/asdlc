@@ -3,7 +3,7 @@ kind = "outcome"
 suite = "regression"
 description = "An engineer asks, in a repository that has no board anywhere, to write a piece of work down. The agent asks once where the work should be kept and does not create a separate tasks repository or a board on its own. The engineer answers: in this repository. The agent then makes a local board here, writes the intent as a draft on it, and records the choice as a line in CLAUDE.md."
 checks = ["asked_before_creating", "no_separate_tasks_repository", "intent_on_a_board_in_this_repository", "choice_recorded_in_claude_md", "no_push"]
-arms = ["with-plugin"]
+arms = ["with-plugin", "without-skills"]
 
 [run]
 model = "sonnet"
