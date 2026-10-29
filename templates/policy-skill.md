@@ -7,7 +7,7 @@ description: <When this policy applies, in the words a request would use, such a
 
 - Owner: <who signs off changes to this policy>
 - Source: <where the policy is written down>
-- Enforced by: <the hook or check that holds it every time, or "advisory only">
+- Enforced by: <the hook and the pull request check that hold it every time (both run the same script), the existing check that does, or "advisory only">
 
 <Why the policy exists, in a sentence or two, so it can be applied to cases the list below doesn't name.>
 
