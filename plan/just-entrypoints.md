@@ -1,7 +1,7 @@
 # Plan: a justfile with the standard entrypoints
 
 - Spec: [`spec/agentic-sdlc-plugin.md`](../spec/agentic-sdlc-plugin.md)
-- Status: draft. Merging this file, after the owner approves it in session, starts the build.
+- Status: approved by the owner in session, 2026-10-29. Built; see Departures.
 - Delivers: R13 (each check tier is one command that exits non-zero on failure), R21 (the released version builds the next one in a worktree)
 
 Setting the project up today is a list of eight manual steps in `docs/guide.md`, and running its checks means knowing four script paths. A `justfile` at the root gives both a name: `just setup` once, then the same few commands a contributor or a hook can call.
@@ -33,6 +33,12 @@ The owner asked for "my standard entrypoints" and the repository does not record
 | `just doctor` | `asdlc doctor` |
 | `just try` | A worktree of the current commit under `.worktrees/` and the command to load the plugin from it (`CLAUDE.md`: never from the working copy) |
 | `just eval ...` | Passes its arguments to `scripts/eval`. A separate `just gate` and `just eval-run` are not added: both spend tokens, so a person types them with the full command, which says so |
+
+## Departures
+
+- **`setup` leaves an existing link alone** and prints the `ln -sf` to replace it, instead of asking: a recipe has no one to ask when it runs from a script.
+- **`setup` shows doctor's summary line, not its output.** On a new machine doctor reports "no board" and "who are you" as failures, which are about a repository and not the machine, and the full output was misleading. The recipe says where the board checks apply.
+- **`just` is not in the CI job**, so the two tests that run it are skipped there; the pure ones (recipe names, scripts exist and are executable, no recipe spends tokens) run everywhere.
 
 ## Order of work
 

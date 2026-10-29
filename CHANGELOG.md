@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### A justfile with the standard entrypoints ([plan](plan/just-entrypoints.md))
+
+- `just setup` checks git, uv, npm and gh, installs Python 3.15 and Backlog.md 1.55.2 when missing, links `asdlc` and `asdlc-plugin` into `~/.local/bin` and says what is left; running it again changes nothing. `just check`, `test`, `artefacts`, `conformance`, `validate`, `audit`, `doctor`, `try` and `eval` call the scripts that already exist.
+
 ### An audit of the repository's history against its own rules ([plan](plan/history-audit.md))
 
 - `scripts/history_audit.py` reads the merged pull requests and reports, per rule, where a change to the plugin carried no plan, put the plan after the code, merged a new plan still marked draft, mixed the plugin with the eval suite, skipped tests or the changelog, or merged with a required check not green. It also prints the playbook's lagging indicators for each pull request. Known departures go in `scripts/history_waivers.toml` and stay listed.
