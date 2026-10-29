@@ -258,6 +258,17 @@ uv run --script scripts/gate_evidence.py verify --base main    # is there passin
 - **The hooks** (`hooks/guard_gate.py`, `hooks/gate_status.py`) only ask `verify`: a session tells you where the gate stands; `git push` is refused while steering paths changed and no passing evidence exists; `--no-verify` on a commit or push is refused; a hand-written file under `.eval-results/` or `.asdlc/` is refused; and an edit that would put a plugin change and an eval change in one branch is refused (R23) before the pull request's check would. They apply only in a repository that holds the suite and `scripts/eval`. They are guardrails: a person in a terminal can still bypass them, and the repository's branch protection, with `ci` and `protected paths` as required checks, is what stops that.
 - **CI later** runs the same command and `verify` as a second job; nothing here needs to change for it.
 
+## Auditing the history
+
+`scripts/history_audit.py` reads this repository's merged pull requests from git and reports where the history departs from its own rules: a change to the plugin without a plan (H1), a plan committed after the code (H2), a new plan still marked `draft` when its code merged (H3), a pull request that changed both the plugin and the eval suite (H4), a script or hook changed without a test (H5), and a plugin change without a `CHANGELOG.md` line (H6). With `--pulls <json>` of the check runs exported from the GitHub API it also reports a required check that was not green at merge (H7). Pull requests before #4, which built the loop itself, are listed and not judged.
+
+```
+uv run --script scripts/history_audit.py --report          # every merged pull request, with the indicators
+uv run --script scripts/history_audit.py --range origin/main..HEAD   # this branch, before it merges
+```
+
+Git is a proxy: a plan file in a pull request is not proof that a person approved it, and the audit cannot see an approval given in a session. A departure the owner accepts goes in `scripts/history_waivers.toml` with a reason and who accepted it; it stays in every report. The clone must have its full history (`git fetch --unshallow`).
+
 ## Stop and remove it
 
 To stop for the day, tell your orchestrator to stop, or close the session. Nothing frees a claim for you, so hand them back: list them with `asdlc mine --as <you>` and release each:

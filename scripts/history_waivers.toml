@@ -1,0 +1,8 @@
+# Known departures from the rules scripts/history_audit.py reads. A waived finding is still listed in every report.
+# Add an entry only when the owner has accepted the departure, and say who:
+#
+# [[waiver]]
+# pr = 12
+# rule = "H1"
+# reason = "a one-line workflow fix"
+# accepted_by = "the owner"
