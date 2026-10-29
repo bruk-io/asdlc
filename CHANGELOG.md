@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### A justfile with the standard entrypoints ([plan](plan/just-entrypoints.md))
+
+- `just setup` checks git, uv, npm and gh, installs Python 3.15 and Backlog.md 1.55.2 when missing, links `asdlc` and `asdlc-plugin` into `~/.local/bin` and says what is left; running it again changes nothing. `just check`, `test`, `artefacts`, `conformance`, `validate`, `audit`, `doctor`, `try` and `eval` call the scripts that already exist.
+
 ### The policy skill backs a policy when asked, and a no-hooks eval arm ([plan](plan/close-the-gaps.md))
 
 - `write-policy-skill`: when the engineer asks for a policy to be backed and a check script already exists, it adds a `PostToolUse` hook that runs that script and blocks, and a pull request workflow that runs the same script. It still builds nothing unasked, and names the gap when no script exists. Over three trials the four policy cases went from 0/3, 1/3, 3/3, 3/3 to 3/3 each.
