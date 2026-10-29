@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### The reviewer can diff and log a registered clone ([plan](plan/reviewer-permissions.md))
+
+- `asdlc permissions` allows `git diff` and `git log` in a registered clone, and the reviewer agent is told that a branch name with `-c` in it trips the deny rules, so it diffs in its review worktree against `HEAD`.
+
 ### One orchestrator: no leads, heartbeats or reaping ([plan](plan/remove-multi-machine.md))
 
 - Removed `asdlc lead`, `asdlc lead-of`, `asdlc heartbeat` and `asdlc reap`, with the `lead` skill, the `stale_after` and `approval_wait` settings, the `leads` list in `asdlc mine`, and the metric that counted reaped holds. They kept one orchestrator in charge of an intent across machines, kept a claim alive, and freed one whose machine went away; with one orchestrator launching its own workers none has a job. A task's old `asdlc_lead` and `asdlc_heartbeat` keys are ignored.
