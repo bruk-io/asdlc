@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### The policy skill backs a policy when asked, and a no-hooks eval arm ([plan](plan/close-the-gaps.md))
+
+- `write-policy-skill`: when the engineer asks for a policy to be backed and a check script already exists, it adds a `PostToolUse` hook that runs that script and blocks, and a pull request workflow that runs the same script. It still builds nothing unasked, and names the gap when no script exists. Over three trials the four policy cases went from 0/3, 1/3, 3/3, 3/3 to 3/3 each.
+- `scripts/eval run --arm without-hooks` removes `hooks/`, so no guard runs; a case runs it only when its `arms` names it.
+
 ### An audit of the repository's history against its own rules ([plan](plan/history-audit.md))
 
 - `scripts/history_audit.py` reads the merged pull requests and reports, per rule, where a change to the plugin carried no plan, put the plan after the code, merged a new plan still marked draft, mixed the plugin with the eval suite, skipped tests or the changelog, or merged with a required check not green. It also prints the playbook's lagging indicators for each pull request. Known departures go in `scripts/history_waivers.toml` and stay listed.

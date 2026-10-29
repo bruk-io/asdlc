@@ -12,7 +12,7 @@ every check, and a null run, which must fail at least one; `validate` runs both,
 model calls, and `./scripts/check` runs `validate`.
 
     eval validate [--case <name>]... [--plugin <git ref or folder>]
-    eval run [--case <name>]... [--trials N] [--model M] [--arm with-plugin|without-skills]
+    eval run [--case <name>]... [--trials N] [--model M] [--arm with-plugin|without-skills|without-hooks]
              [--plugin <path or git ref>] [--container] [--image <tag>] [--results <dir>]
     eval gate [--base <ref>] [--all] [--trials N] [--model M]
     eval calibrate [--dimension <name>]... [--judge-model M]
@@ -104,6 +104,10 @@ class Suite(StrEnum):
 class Arm(StrEnum):
     WITH_PLUGIN = "with-plugin"
     WITHOUT_SKILLS = "without-skills"  # scripts, hooks and commands; no skills, no agents
+    WITHOUT_HOOKS = "without-hooks"  # skills, agents, scripts and commands; no hooks, so no guard runs at all
+
+
+DEFAULT_ARMS = (Arm.WITH_PLUGIN, Arm.WITHOUT_SKILLS)  # a case that declares no `arms` runs these two; the others are asked for by name
 
 
 @dataclass(frozen=True)
@@ -139,7 +143,7 @@ class Case:
     max_budget_usd: float = 5.0
     timeout_minutes: int = 30
     permission_mode: str = "acceptEdits"
-    arms: tuple[Arm, ...] = (Arm.WITH_PLUGIN, Arm.WITHOUT_SKILLS)
+    arms: tuple[Arm, ...] = DEFAULT_ARMS
 
     @property
     def runs(self) -> tuple[Session, ...]:
@@ -198,7 +202,7 @@ def parse_case(text: str, name: str) -> Case:
         items.append(Item(str(raw["prompt"]).strip(), str(raw["expect"]).strip()))
     if bool(sessions) == bool(items):
         problems.append("a case has sessions or items, not both and not neither")
-    arms = data.get("arms", [str(a) for a in Arm])
+    arms = data.get("arms", [str(a) for a in DEFAULT_ARMS])
     if not arms or any(a not in {str(x) for x in Arm} for a in arms):
         problems.append(f"arms must be among {[str(a) for a in Arm]}")
     mode = settings.get("permission_mode", "acceptEdits") if isinstance(settings, dict) else "acceptEdits"
@@ -1458,6 +1462,8 @@ def export_plugin(source: str, into: Path, arm: Arm) -> tuple[Path, str]:
     if arm == Arm.WITHOUT_SKILLS:
         for folder in ("skills", "agents"):
             shutil.rmtree(target / folder, ignore_errors=True)
+    if arm == Arm.WITHOUT_HOOKS:
+        shutil.rmtree(target / "hooks", ignore_errors=True)
     for path in sorted(target.rglob("*"), reverse=True):
         mode = path.stat().st_mode
         path.chmod(mode & ~0o222)

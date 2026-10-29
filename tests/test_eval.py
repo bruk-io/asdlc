@@ -120,6 +120,11 @@ class ParseCaseTest(unittest.TestCase):
         self.assertEqual(case.runs, (ev.Session("Set {thing} to 15m."),))
         self.assertEqual(case.arms, (ev.Arm.WITH_PLUGIN, ev.Arm.WITHOUT_SKILLS))
 
+    def test_a_case_asks_for_the_arm_without_hooks_by_name_and_does_not_get_it_by_default(self) -> None:
+        text = CASE.replace('kind = "outcome"', 'kind = "outcome"\narms = ["with-plugin", "without-hooks"]', 1)
+        self.assertEqual(ev.parse_case(text, "small").arms, (ev.Arm.WITH_PLUGIN, ev.Arm.WITHOUT_HOOKS))
+        self.assertNotIn(ev.Arm.WITHOUT_HOOKS, ev.parse_case(CASE, "small").arms)
+
     def test_every_problem_is_named_at_once(self) -> None:
         with self.assertRaises(ev.CaseError) as raised:
             ev.parse_case('kind = "vibes"\nsuite = "x"\nflavour = 1\n[run]\npermission_mode = "bypassPermissions"\n', "bad")
@@ -369,6 +374,16 @@ class ShellTest(unittest.TestCase):
         bare, _ = ev.export_plugin(str(source), self.root / "out2", ev.Arm.WITHOUT_SKILLS)
         self.addCleanup(ev.make_writable, self.root / "out2")
         self.assertFalse((bare / "skills").exists())
+        (source / "hooks").mkdir(exist_ok=True)
+        (source / "hooks" / "guard.py").write_text("x")
+        unguarded, _ = ev.export_plugin(str(source), self.root / "out3", ev.Arm.WITHOUT_HOOKS)
+        self.addCleanup(ev.make_writable, self.root / "out3")
+        self.assertFalse((unguarded / "hooks").exists())
+        self.assertTrue((unguarded / "skills" / "a" / "SKILL.md").exists())
+        self.assertTrue((unguarded / "scripts" / "asdlc").exists())
+        full, _ = ev.export_plugin(str(source), self.root / "out4", ev.Arm.WITH_PLUGIN)
+        self.addCleanup(ev.make_writable, self.root / "out4")
+        self.assertTrue((full / "hooks" / "guard.py").exists())
 
     def test_every_case_definition_parses(self) -> None:
         for folder in sorted((ROOT / "evals" / "cases").iterdir()):
