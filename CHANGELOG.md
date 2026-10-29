@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### The plugin against the playbook, claim by claim ([plan](plan/playbook-conformance.md))
+
+- `spec/playbook-conformance.md` lists 84 claims from the twelve plays, each with what builds it and what tests it, or why nothing does. `scripts/conformance.py`, run by `./scripts/check`, fails on a claim with no mapping, a target that does not exist, a repeated id, or a requirement that serves no claim and is not listed as beyond the playbook.
+
 ### One orchestrator: no leads, heartbeats or reaping ([plan](plan/remove-multi-machine.md))
 
 - Removed `asdlc lead`, `asdlc lead-of`, `asdlc heartbeat` and `asdlc reap`, with the `lead` skill, the `stale_after` and `approval_wait` settings, the `leads` list in `asdlc mine`, and the metric that counted reaped holds. They kept one orchestrator in charge of an intent across machines, kept a claim alive, and freed one whose machine went away; with one orchestrator launching its own workers none has a job. A task's old `asdlc_lead` and `asdlc_heartbeat` keys are ignored.

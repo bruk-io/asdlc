@@ -3,6 +3,7 @@
 - Intent: [`intent/agentic-sdlc-plugin.md`](../intent/agentic-sdlc-plugin.md), accepted 2026-10-20 (#1)
 - Status: draft. Merging this file approves it and starts planning.
 - Evals: [`agentic-sdlc-plugin-evals.md`](agentic-sdlc-plugin-evals.md) is part of this spec.
+- Conformance: [`playbook-conformance.md`](playbook-conformance.md) maps each claim the playbook makes to what implements and tests it; this spec's requirements must each serve a claim or be listed there as beyond the playbook.
 
 The plugin implements all twelve plays of Anthropic's AI-native SDLC playbook as one Claude Code plugin, keeps every artefact as a plain file in git with a pull request as each gate, and replaces itself only when its own eval suite says the new version is no worse. The four design choices that answer the intent's open questions were agreed by the gate owner on 2026-10-20.
 

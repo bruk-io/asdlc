@@ -30,6 +30,22 @@ class CheckCommandTest(unittest.TestCase):
             self.assertIn("artefacts: FAILED", done.stdout)
 
 
+class ConformanceStepTest(unittest.TestCase):
+    """scripts/check runs the playbook conformance check, and a failure there fails the whole check."""
+
+    def test_a_failing_conformance_check_fails_the_whole_check(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "scripts").mkdir()
+            (root / "tests").mkdir()
+            shutil.copy(ROOT / "scripts" / "check", root / "scripts" / "check")
+            (root / "scripts" / "artefacts.py").write_text("raise SystemExit(0)\n")
+            (root / "scripts" / "conformance.py").write_text("raise SystemExit(1)\n")
+            done = subprocess.run([sys.executable, str(root / "scripts" / "check")], capture_output=True, text=True)
+            self.assertEqual(done.returncode, 1)
+            self.assertIn("conformance: FAILED", done.stdout)
+
+
 class GateReminderTest(unittest.TestCase):
     """scripts/check prints a reminder when the gate has no evidence, and never lets it change the exit code."""
 
@@ -39,6 +55,7 @@ class GateReminderTest(unittest.TestCase):
         (root / "tests").mkdir()
         shutil.copy(ROOT / "scripts" / "check", root / "scripts" / "check")
         (root / "scripts" / "artefacts.py").write_text("raise SystemExit(0)\n")
+        (root / "scripts" / "conformance.py").write_text("raise SystemExit(0)\n")
         (root / "scripts" / "eval").write_text("raise SystemExit(0)\n")
         (root / "tests" / "__init__.py").write_text("")
         (root / "tests" / "test_ok.py").write_text("import unittest\n\n\nclass T(unittest.TestCase):\n    def test_it(self) -> None:\n        pass\n")
