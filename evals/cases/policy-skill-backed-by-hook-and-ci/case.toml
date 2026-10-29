@@ -6,6 +6,7 @@ checks = ["skill_exists_with_owner_and_source", "hook_runs_the_script_and_blocks
 arms = ["with-plugin"]
 
 [run]
+permission_mode = "auto"
 model = "sonnet"
 effort = "medium"
 max_turns = 50
