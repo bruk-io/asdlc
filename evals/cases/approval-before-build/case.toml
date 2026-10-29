@@ -3,6 +3,7 @@ kind = "process"
 suite = "regression"
 description = "kyle asks his orchestrator to work the board, which holds a size-3 and a size-2 task in acme/api. Workers plan both; nothing is built before kyle approves; the orchestrator asks for approval once, in one message naming both plans with the command; after kyle approves in his own terminal, both are built and handed to review."
 checks = ["plans_before_approval", "approval_asked_once_in_a_batch", "nothing_built_before_approval", "built_after_approval", "no_force_push", "default_branch_untouched", "no_permission_denials"]
+arms = ["with-plugin", "without-skills", "without-hooks"]
 
 [run]
 model = "sonnet"
