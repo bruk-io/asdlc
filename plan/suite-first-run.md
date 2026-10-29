@@ -1,6 +1,6 @@
 # Plan: the suite after its first real run
 
-- Spec: [`spec/agentic-sdlc-plugin-evals.md`](../spec/agentic-sdlc-plugin-evals.md), R22 to R24; follows `plan/eval-suite.md`
+- Spec: [`spec/agentic-sdlc-plugin.md`](../spec/agentic-sdlc-plugin.md); follows `plan/eval-suite.md`
 - Status: approved by the owner in session, 2026-10-29 ("go for it")
 - Delivers: R22 (cases that measure the agent), R23 (suite changes in their own pull request)
 
@@ -12,6 +12,12 @@ The first real run (20 cases, 3 trials, with the plugin, $6.59) scored 0.27. Rea
 |---|---|
 | `evals/fixtures.py` | `solo` writes `.claude/settings.local.json` with the git, test and read-only shell rules a solo engineer would allow, adds the plugin folder, and keeps `.claude/` out of the repository's status |
 | `evals/cases/policy-skill-*/case.toml` | `permission_mode = "auto"`, since these cases write under `.claude/` |
+
+## Order of work
+
+1. Give `solo` the permissions and re-run the cases it broke.
+2. Run the policy cases in `auto` mode and re-run them.
+3. Run `./scripts/check`, open the pull request.
 
 ## Proof
 
