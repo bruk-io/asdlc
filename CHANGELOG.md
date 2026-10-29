@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### An audit of the repository's history against its own rules ([plan](plan/history-audit.md))
+
+- `scripts/history_audit.py` reads the merged pull requests and reports, per rule, where a change to the plugin carried no plan, put the plan after the code, merged a new plan still marked draft, mixed the plugin with the eval suite, skipped tests or the changelog, or merged with a required check not green. It also prints the playbook's lagging indicators for each pull request. Known departures go in `scripts/history_waivers.toml` and stay listed.
+
 ### The reviewer can diff and log a registered clone ([plan](plan/reviewer-permissions.md))
 
 - `asdlc permissions` allows `git diff` and `git log` in a registered clone, and the reviewer agent is told that a branch name with `-c` in it trips the deny rules, so it diffs in its review worktree against `HEAD`.

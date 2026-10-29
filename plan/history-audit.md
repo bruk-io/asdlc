@@ -1,7 +1,7 @@
 # Plan: an audit of the repository's own history against its own rules
 
 - Spec: [`spec/agentic-sdlc-plugin.md`](../spec/agentic-sdlc-plugin.md)
-- Status: draft. Merging this file, after the owner approves it in session, starts the build.
+- Status: approved by the owner in session, 2026-10-29. Built; see Departures and What it found.
 - Delivers: R20 (every change to the plugin starts as an intent and goes through the loop), with R9 (plan approved before edits), R23 (suite and plugin never change together) and R1 (each stage leaves a committed artefact) as the rules it reads.
 
 The repository says it builds itself: every change carries an approved plan, and a pull request that changes the plugin never changes the suite. Nothing checks that this was done, only that each new pull request passes today's checks. This change reads the 37 merged pull requests (and any branch before it merges) and reports, rule by rule, where the history departs from the rules. It is the second step of `plan/playbook-conformance.md`'s series and the first thing that tests adherence, not just the mapping.
@@ -27,9 +27,16 @@ Each is a finding, with the pull request and the reason the rule exists.
 4. **H4, suite and plugin never together (R23).** No pull request changes both `evals/` (or `spec/*-evals.md`) and the plugin.
 5. **H5, tests ship with scripts and hooks.** A pull request that changes a script or hook changes something under `tests/` (the repository's own convention in `CLAUDE.md`).
 6. **H6, the change is announced.** A pull request that changes the plugin changes `CHANGELOG.md`, from the first pull request that had one.
-7. **With `--pulls` only:** H7, the required checks passed at merge; H8, the merge was made by a person, not by the agent.
+7. **With `--pulls` only:** H7, the required checks (`check`, `protected-paths`) passed at merge.
 
 The playbook's own lagging indicators are reported beside the findings, not judged: plan-to-diff match (the share of changed plugin files the plan names), plan commits after the first code commit (rework), commits and lead time from first commit to merge, and the share of pull requests that merged from their first implementation commit.
+
+## Departures
+
+- **H8 is dropped.** The plan had a rule that a person made the merge. Every merge here goes through the owner's own token, whether the owner or this agent pressed it, so GitHub cannot tell them apart and the rule would say nothing.
+- **H2 and H3 apply to a plan the pull request adds.** Reading the first findings by hand showed they fired on plans already on `main`: a plan merged in a plan-only pull request was approved by that merge, and a later build pull request that edits it is not a draft or a late plan. This is the step-2 rule fix the plan promised, not a waiver.
+- **The pull request count is 31, not 37.** Only merge commits on the first-parent line are pull requests; the rest of the numbers were never merged.
+- **`--ref` and `--range`.** The command reads any ref, and `--range base..head` audits a branch as if it were one pull request. It refuses a shallow clone, since the parents are missing.
 
 ## Order of work
 
@@ -44,6 +51,14 @@ The playbook's own lagging indicators are reported beside the findings, not judg
 - **How far back?** The rules are dated 2026-10-20 (the spec) but the first ten pull requests built the loop itself. I propose to report everything and to judge from PR #4 (`v0-bootstrap`) on; earlier ones are listed as informational.
 - **Is this a report or a gate?** I propose a report you run on demand, plus one run before each merge on the branch alone (`--range origin/main..HEAD`), not added to `./scripts/check` yet. Making it a required check is a separate decision once its findings are trusted.
 - **Waivers.** The stacked-pull-request exception (the suite and the plugin changing in two pull requests that merged in order) is not a departure, but "short circuit the rules for now" on the skill split in PR #32 is. I would list it and ask you before waiving.
+
+## What it found
+
+On `main` at the merge of #37: 31 pull requests, 11 findings judged, none waived, all 7 rules run (H7 on the 19 pull requests that had check runs; all required checks were green. PR #10's `review` job failed and it merged: `review` is not a required check and #10 fixed that workflow).
+
+- **H1, no plan (#11, #12):** two GitHub Actions workflow pull requests, one an installer's, one a fix, with no plan.
+- **H3, a new plan still `draft` when its code merged (#16, #22 four plans, #33, #35):** the approval happened in the session and the plan file was not updated to say so. #35 is this agent's own: `plan/remove-multi-machine.md` still says draft after the owner's "approved".
+- **H2 and H6, the skill split (#32):** the code came before the plan and no changelog line, the one the owner said to short-circuit. Left as an open finding.
 
 ## Risks
 
