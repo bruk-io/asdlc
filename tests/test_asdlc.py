@@ -774,6 +774,12 @@ CHANGES = ("--findings", "important=1", "--plan-matched", "yes")
 class PermissionRulesTest(unittest.TestCase):
     """I10, and the second review's Important 3: the narrow allow rules normal work needs, and merging them in."""
 
+    def test_the_reviewer_may_diff_and_log_the_registered_clone(self) -> None:
+        for sub in ("diff", "log"):
+            self.assertIn(f"Bash(git -C /home/kyle/api {sub} *)", RULES.allow)
+        for write in ("push", "commit", "reset", "checkout"):
+            self.assertNotIn(f"Bash(git -C /home/kyle/api {write} *)", RULES.allow)
+
     def test_deny_rules_for_git_that_runs_a_program(self) -> None:
         """The orchestrator's review of #26: deny beats allow, so git with -c, grep -O, --upload-pack and the like is refused even
         where an allow rule's `*` would match it."""
