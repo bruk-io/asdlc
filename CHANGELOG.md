@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Two fixes from the first without-hooks run ([plan](plan/close-the-gaps.md))
+
+- The `without-hooks` arm removes the hook registration and keeps the hooks' modules, which the `asdlc` scripts import; the first version deleted the folder and crashed.
+- The worker agent is told not to look for rules in the tasks clone, where git is refused and the rule loader already supplies them. `approval-before-build` went from 0/3 to 3/3.
+
 ### A justfile with the standard entrypoints ([plan](plan/just-entrypoints.md))
 
 - `just setup` checks git, uv, npm and gh, installs Python 3.15 and Backlog.md 1.55.2 when missing, links `asdlc` and `asdlc-plugin` into `~/.local/bin` and says what is left; running it again changes nothing. `just check`, `test`, `artefacts`, `conformance`, `validate`, `audit`, `doctor`, `try` and `eval` call the scripts that already exist.
@@ -9,7 +14,7 @@
 ### The policy skill backs a policy when asked, and a no-hooks eval arm ([plan](plan/close-the-gaps.md))
 
 - `write-policy-skill`: when the engineer asks for a policy to be backed and a check script already exists, it adds a `PostToolUse` hook that runs that script and blocks, and a pull request workflow that runs the same script. It still builds nothing unasked, and names the gap when no script exists. Over three trials the four policy cases went from 0/3, 1/3, 3/3, 3/3 to 3/3 each.
-- `scripts/eval run --arm without-hooks` removes `hooks/`, so no guard runs; a case runs it only when its `arms` names it.
+- `scripts/eval run --arm without-hooks` removes `hooks/hooks.json`, so no hook is registered and no guard runs; a case runs it only when its `arms` names it.
 
 ### An audit of the repository's history against its own rules ([plan](plan/history-audit.md))
 
