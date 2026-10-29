@@ -35,6 +35,7 @@ def _gate_reminder() -> None:
 def main() -> int:
     results = [
         _run("artefacts", [sys.executable, str(ROOT / "scripts" / "artefacts.py")]),
+        _run("conformance", [sys.executable, str(ROOT / "scripts" / "conformance.py"), str(ROOT)]),
         _run("tests", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."]),
         _run("evals", [sys.executable, str(ROOT / "scripts" / "eval"), "validate"]),
     ]

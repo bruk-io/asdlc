@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### The plugin against the playbook, claim by claim ([plan](plan/playbook-conformance.md))
+
+- `spec/playbook-conformance.md` lists 84 claims from the twelve plays, each with what builds it and what tests it, or why nothing does. `scripts/conformance.py`, run by `./scripts/check`, fails on a claim with no mapping, a target that does not exist, a repeated id, or a requirement that serves no claim and is not listed as beyond the playbook.
+
 ### The reviewer can diff and log a registered clone ([plan](plan/reviewer-permissions.md))
 
 - `asdlc permissions` allows `git diff` and `git log` in a registered clone, and the reviewer agent is told that a branch name with `-c` in it trips the deny rules, so it diffs in its review worktree against `HEAD`.
