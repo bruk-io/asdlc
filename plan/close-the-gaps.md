@@ -12,7 +12,7 @@ The first comparison of the plugin with the plain agent (`plan/arm-comparison.md
 |---|---|---|---|
 | `skills/write-policy-skill/SKILL.md` | no | A step after **Enforced by**: when the engineer asks for the policy to be backed, and a check script already exists, register a `PostToolUse` hook in `.claude/settings.json` that runs that script on the edited file and exits 2 with the rule's name, and add a pull request workflow that runs the same script as a required check. Nothing is built that was not asked for. With no script, the skill still names the gap and does not write one | R11 |
 | `templates/policy-skill.md` | no | The **Enforced by** line shows the hook and the check as the two things it names when the policy is backed | R11 |
-| `scripts/eval` | no | A third arm, `without-hooks` (`hooks/` removed, so the guards do not run). A case that declares no `arms` keeps its two (`with-plugin`, `without-skills`) and does not pick up the new one by default | R25 |
+| `scripts/eval` | no | A third arm, `without-hooks` (`hooks/hooks.json` removed, so no hook is registered and no guard runs; the scripts import the hooks' modules, so the folder stays). A case that declares no `arms` keeps its two (`with-plugin`, `without-skills`) and does not pick up the new one by default | R25 |
 | `tests/test_eval.py` | no | The new arm exports without `hooks/` and the default arms stay two | R25 |
 | `docs/guide.md` | no | The arm in the evals section | - |
 | `CHANGELOG.md` | no | Two lines | - |
@@ -21,6 +21,8 @@ The first comparison of the plugin with the plain agent (`plan/arm-comparison.md
 ## Departures
 
 - The skill's first draft sent `policy-skill-preference-advisory` from 3/3 to 0/3: it told the agent to say when nothing enforces a policy, and the agent said so about a preference ("it needs a check script first"). I scoped that sentence to a policy that must always hold and added that a preference is advisory only with nothing built. A second run was 1/3 because the agent copied my phrase "no gap to raise" into its message and the case's pattern flags the word "gap" even negated; I took the phrase out. Both were fixes to the skill's wording, not to the case.
+- **The arm removes `hooks/hooks.json`, not `hooks/`.** The first build deleted the folder, and the first real run crashed: `asdlc-plugin` imports `hooks/load_rules.py`. The registration is the only thing that makes a hook run, so removing it is the whole arm.
+- **`agents/worker.md` gains one line**, not in the approved plan: worker subagents in `approval-before-build` listed the tasks clone's `plugins/` folder with git, which is refused (a test pins that git in the tasks clone stays refused) and which they do not need, since the rule loader puts the rules in their context. The line tells them not to. The case went from 0/3 to 3/3 with it.
 - The case's pattern flagging a negated "gap" is a weakness in `policy-skill-preference-advisory`'s check. It is left for a suite change, since R23 keeps it out of this one.
 
 ## Order of work

@@ -376,14 +376,16 @@ class ShellTest(unittest.TestCase):
         self.assertFalse((bare / "skills").exists())
         (source / "hooks").mkdir(exist_ok=True)
         (source / "hooks" / "guard.py").write_text("x")
+        (source / "hooks" / "hooks.json").write_text("{}")
         unguarded, _ = ev.export_plugin(str(source), self.root / "out3", ev.Arm.WITHOUT_HOOKS)
         self.addCleanup(ev.make_writable, self.root / "out3")
-        self.assertFalse((unguarded / "hooks").exists())
+        self.assertFalse((unguarded / "hooks" / "hooks.json").exists())  # no hook is registered
+        self.assertTrue((unguarded / "hooks" / "guard.py").exists())  # the scripts still import the hooks' modules
         self.assertTrue((unguarded / "skills" / "a" / "SKILL.md").exists())
         self.assertTrue((unguarded / "scripts" / "asdlc").exists())
         full, _ = ev.export_plugin(str(source), self.root / "out4", ev.Arm.WITH_PLUGIN)
         self.addCleanup(ev.make_writable, self.root / "out4")
-        self.assertTrue((full / "hooks" / "guard.py").exists())
+        self.assertTrue((full / "hooks" / "hooks.json").exists())
 
     def test_every_case_definition_parses(self) -> None:
         for folder in sorted((ROOT / "evals" / "cases").iterdir()):

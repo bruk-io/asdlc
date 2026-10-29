@@ -6,6 +6,8 @@ Setting up takes about twenty minutes. `asdlc doctor` tells you when you're done
 
 ## Install
 
+`just setup` (install [`just`](https://github.com/casey/just) first) does steps 1, 2 and 5 below and reports step 3 and your handle; it is safe to run again. The steps are what it does, and still work by hand.
+
 1. **uv.** The plugin's hooks and scripts are Python 3.15 scripts run through uv, which fetches 3.15 the first time: <https://docs.astral.sh/uv/>.
 2. **Backlog.md 1.55.2.** `npm i -g backlog.md@1.55.2`. Older versions drop asdlc's own keys from tasks when they edit them, so asdlc refuses anything before 1.55.1.
 3. **gh, signed in for git too.** Install the GitHub CLI, then `gh auth login` and `gh auth setup-git`. Workers open pull requests with it, reviewers comment on them, and `setup-git` stores a credential git uses without asking, which background plugin updates need.

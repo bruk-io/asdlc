@@ -104,7 +104,7 @@ class Suite(StrEnum):
 class Arm(StrEnum):
     WITH_PLUGIN = "with-plugin"
     WITHOUT_SKILLS = "without-skills"  # scripts, hooks and commands; no skills, no agents
-    WITHOUT_HOOKS = "without-hooks"  # skills, agents, scripts and commands; no hooks, so no guard runs at all
+    WITHOUT_HOOKS = "without-hooks"  # everything but hooks/hooks.json, so no hook is registered and no guard runs
 
 
 DEFAULT_ARMS = (Arm.WITH_PLUGIN, Arm.WITHOUT_SKILLS)  # a case that declares no `arms` runs these two; the others are asked for by name
@@ -1463,7 +1463,7 @@ def export_plugin(source: str, into: Path, arm: Arm) -> tuple[Path, str]:
         for folder in ("skills", "agents"):
             shutil.rmtree(target / folder, ignore_errors=True)
     if arm == Arm.WITHOUT_HOOKS:
-        shutil.rmtree(target / "hooks", ignore_errors=True)
+        (target / "hooks" / "hooks.json").unlink(missing_ok=True)  # the scripts import the hooks' modules; only the registration goes
     for path in sorted(target.rglob("*"), reverse=True):
         mode = path.stat().st_mode
         path.chmod(mode & ~0o222)

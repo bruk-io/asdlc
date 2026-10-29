@@ -4,7 +4,9 @@ An agentic SDLC as a Claude Code plugin, built on Anthropic's AI-native SDLC pla
 
 ## Install
 
-uv is the one prerequisite: the plugin's hooks and checks are Python 3.15 scripts run through it, and uv fetches 3.15 on first use. Install it from <https://docs.astral.sh/uv/>.
+To work on this repository, or to run its commands from a clone, install [`just`](https://github.com/casey/just) (`brew install just`, or `uv tool install rust-just`) and run `just setup`: it checks git, uv and npm, installs Python 3.15 and Backlog.md 1.55.2 if they are missing, links `asdlc` and `asdlc-plugin` into `~/.local/bin`, and tells you what is left (your handle, `gh auth login`). It is safe to run again. `just` lists the other recipes: `check`, `test`, `validate`, `audit`, `doctor`, `try`.
+
+To use the plugin from Claude Code, uv is the one prerequisite: the plugin's hooks and checks are Python 3.15 scripts run through it, and uv fetches 3.15 on first use. Install it from <https://docs.astral.sh/uv/>.
 
 Then, in Claude Code:
 
