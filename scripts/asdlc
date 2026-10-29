@@ -2972,7 +2972,7 @@ READ_ONLY_GIT = ("ls-files", "grep", "blame", "cat-file", "ls-tree", "merge-base
 WORKTREE_GIT = ("fetch", "status", "diff", "log", "show", "add", "commit", "push", "rebase", "merge", "switch", "checkout -b",
                 "rev-parse", "branch", "symbolic-ref", "mv", "rm", "restore", "stash", "reset", *READ_ONLY_GIT)
 # What the reviewer runs in the registered clone itself: reads, and making and removing its review worktree.
-CLONE_GIT = ("fetch", "worktree", "show", "rev-parse", "symbolic-ref", *READ_ONLY_GIT)
+CLONE_GIT = ("fetch", "worktree", "show", "diff", "log", "rev-parse", "symbolic-ref", *READ_ONLY_GIT)
 # Git that runs a program the command doesn't name, or with configuration the command sets. The `*` in the
 # allow rules above would let these through, so they are denied, and deny beats allow. The board guard
 # refuses the same forms with its reasons; these hold even if the hook isn't loaded. A `*` matches any
