@@ -3,7 +3,7 @@ kind = "outcome"
 suite = "regression"
 description = "An engineer asks for a skill for a policy that must hold every time, and nothing in the repository enforces it. The skill says it is advisory only and does not claim a check or hook that does not exist, and the agent tells the engineer that nothing enforces it yet."
 checks = ["skill_exists_with_owner_and_source", "enforced_by_says_advisory", "tells_the_person_about_the_gap"]
-arms = ["with-plugin"]
+arms = ["with-plugin", "without-skills"]
 
 [run]
 permission_mode = "auto"

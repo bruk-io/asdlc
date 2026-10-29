@@ -3,7 +3,7 @@ kind = "outcome"
 suite = "regression"
 description = "An engineer asks, in a repository that already has a local board, to write a piece of work down. The agent writes the intent as a draft on that board without asking where to keep it, and creates no board or repository of its own."
 checks = ["did_not_ask_where", "intent_on_the_existing_board", "nothing_else_created"]
-arms = ["with-plugin"]
+arms = ["with-plugin", "without-skills"]
 
 [run]
 model = "sonnet"
