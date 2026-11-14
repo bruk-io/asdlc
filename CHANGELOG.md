@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### A repository that holds its own board can take work ([plan](plan/board-in-the-code-repository.md))
+
+- `asdlc register` accepts the repository the board lives in, where it used to refuse it as "a board", so tasks there can carry a project and `asdlc next` and `asdlc review-next` offer them. Its `asdlc.board` names the repository itself, so a task's worktree uses the board in the main checkout and not its own copy of `backlog/`. A board is still not registered for a different board. The rule loader and the board guard don't cover such a repository yet.
+
 ### Two fixes from the first without-hooks run ([plan](plan/close-the-gaps.md))
 
 - The `without-hooks` arm removes the hook registration and keeps the hooks' modules, which the `asdlc` scripts import; the first version deleted the folder and crashed.
