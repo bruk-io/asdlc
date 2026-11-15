@@ -1677,6 +1677,14 @@ class IdentityAndRegisterTest(unittest.TestCase):
         self.assertIn("acme-docs added to the board's projects", done.stdout)
         self.assertEqual(_git(team.boards.origin, "log", "-1", "--format=%s", "main"), "Register project acme-docs")
 
+    def test_a_board_is_not_registered_for_a_different_board(self) -> None:
+        team = Team(self, [])
+        other = team.boards.clone("other-board")
+        done = _asdlc("register", "--board", str(team.board), cwd=other, env=team.machine)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("holds a board of its own", done.stderr)
+        self.assertNotIn(str(other), (team.boards.root / "config" / "asdlc" / "repos.toml").read_text())
+
     def test_register_needs_an_origin(self) -> None:
         team = Team(self, [])
         lonely = team.boards.root / "lonely"
@@ -1692,6 +1700,57 @@ class IdentityAndRegisterTest(unittest.TestCase):
         self.assertEqual(report["board"], str(team.board))
         self.assertEqual((report["preferences"]["prefer"], report["preferences"]["workers"]), (["acme-web"], 2))
         self.assertEqual(sorted(report["repos"]), ["acme-api", "acme-web"])
+
+
+@needs_backlog
+class BoardInTheCodeRepositoryTest(unittest.TestCase):
+    """A repository that keeps its own board is registered like any code repository, so its work can be picked."""
+
+    def setUp(self) -> None:
+        handle = tempfile.TemporaryDirectory()
+        self.addCleanup(handle.cleanup)
+        self.root = Path(handle.name).resolve()
+        self.machine = {"XDG_CONFIG_HOME": str(self.root / "config")}
+
+    def run_in(self, repo: Path, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        done = _asdlc(*args, cwd=cwd or repo, env=self.machine, engineer="kyle")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done
+
+    def assert_work_is_picked_and_the_worktree_uses_the_main_checkouts_board(self, repo: Path) -> None:
+        registered = json.loads(self.run_in(repo, "register", "--json").stdout)
+        slug = registered["slug"]
+        self.assertEqual((registered["path"], registered["board"], registered["added_to_board"]), (str(repo), str(repo), True))
+        self.assertEqual(_git(repo, "config", "asdlc.board"), str(repo))
+        self.run_in(repo, "board", "task", "create", *_sized("First", "size-2", "--project", slug))
+        report = json.loads(self.run_in(repo, "next", "--as", "kyle.w1", "--json").stdout)
+        worktree = repo.parent / f"{repo.name}.worktrees" / "task-1"
+        self.assertEqual((report["task"], report["project"], report["worktree"]), ("TASK-1", slug, str(worktree)))
+        branch_head = _git(worktree, "rev-parse", "HEAD")
+        self.run_in(repo, "board", "task", "edit", "TASK-1", "--append-notes", "from the worktree", cwd=worktree)
+        task = next((repo / "backlog" / "tasks").glob("task-1 - *.md"))
+        self.assertIn("from the worktree", task.read_text(), "the board in the main checkout took the change")
+        self.assertEqual(_git(worktree, "rev-parse", "HEAD"), branch_head, "nothing was committed on the task's branch")
+
+    def test_a_repository_with_a_local_board_is_registered_and_its_work_picked(self) -> None:
+        repo = _code_repo(self.root, "acme", "solo", self.root / "solo")
+        self.run_in(repo, "init-board", "--local", str(repo))
+        self.assertFalse(asdlc.open_board(repo).shared)
+        self.assert_work_is_picked_and_the_worktree_uses_the_main_checkouts_board(repo)
+
+    def test_a_repository_with_a_shared_board_is_registered_and_its_work_picked(self) -> None:
+        origin = self.root / "origins" / "acme" / "both.git"
+        origin.parent.mkdir(parents=True)
+        _git(self.root, "init", "--quiet", "--bare", "-b", "main", str(origin))
+        seed = self.root / "seed"
+        self.run_in(self.root, "init-board", str(seed))
+        _git(seed, "remote", "add", "origin", str(origin))
+        _git(seed, "push", "--quiet", "origin", "main")
+        repo = self.root / "both"
+        _git(self.root, "clone", "--quiet", str(origin), str(repo))
+        self.assertTrue(asdlc.open_board(repo).shared)
+        self.assert_work_is_picked_and_the_worktree_uses_the_main_checkouts_board(repo)
+        self.assertIn("from the worktree", _git(origin, "log", "-1", "--format=%s%n%b", "-p", "main"), "a shared board's change reached origin")
 
 
 @needs_backlog

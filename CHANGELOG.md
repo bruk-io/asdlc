@@ -2,9 +2,9 @@
 
 ## Unreleased
 
-### The reviewer cites the policy behind any finding ([plan](plan/reviewer-permissions.md))
+### A repository that holds its own board can take work ([plan](plan/board-in-the-code-repository.md))
 
-- `agents/reviewer.md`: a finding tagged with a pass always rests on a review policy, so the reviewer passes `--policy` whenever it records any finding. `reviewer-full-verdict` went from 2/3 to 6/6.
+- `asdlc register` accepts the repository the board lives in, where it used to refuse it as "a board", so tasks there can carry a project and `asdlc next` and `asdlc review-next` offer them. Its `asdlc.board` names the repository itself, so a task's worktree uses the board in the main checkout and not its own copy of `backlog/`. A board is still not registered for a different board. The rule loader and the board guard don't cover such a repository yet.
 
 ### Two fixes from the first without-hooks run ([plan](plan/close-the-gaps.md))
 

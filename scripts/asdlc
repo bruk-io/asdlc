@@ -2042,17 +2042,23 @@ def register(explicit_board: str | None, cwd: Path, as_json: bool) -> int:
     """Register the code repository the current directory is in: its board, its slug on this
     machine, and its slug in the board's projects.
 
+    A repository that keeps its own board is registered for that board. Its `asdlc.board` then
+    names the repository itself, so a task's worktree, which shares the repository's
+    configuration, finds the board in the main checkout and not in its own copy of `backlog/`.
+
     Raises:
-        AsdlcError: not in a code repository, no origin remote, no board, or the board change failed.
+        AsdlcError: not in a code repository, a board being registered for a different board,
+            no origin remote, no board, or the board change failed.
     """
     common = _git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
     if common.returncode != 0:
         raise AsdlcError("run asdlc register inside a clone of the code repository")
     git_dir = Path(common.stdout.strip())
     root = (git_dir.parent if git_dir.name == ".git" else git_dir).resolve()
-    if (root / "backlog" / "config.yml").exists():
-        raise AsdlcError(f"{root} is a board; asdlc register is for the code repositories its tasks change")
     board_path = resolve_board(explicit_board, root)
+    if (root / "backlog" / "config.yml").exists() and board_path != root:
+        raise AsdlcError(f"{root} holds a board of its own, so it is registered for the work kept on that board, not for the board at "
+                         f"{board_path}: run asdlc register there without --board")
     origin = _git(root, "remote", "get-url", "origin")
     if origin.returncode != 0:
         raise AsdlcError(f"{root} has no origin remote, and its name on the board comes from it: git remote add origin <url>")
