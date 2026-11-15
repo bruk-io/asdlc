@@ -32,3 +32,9 @@ The first real run of the suite showed `reviewer-false-alarm` failing 3 of 3 on 
 - `reviewer-false-alarm`: 0/3 before, 3/3 after, over three trials with the working copy as the plugin. `reviewer-full-verdict`: 2/3 both times; the one miss is the orchestrator's own `git diff` by branch name, not the reviewer's.
 - `./scripts/check` passes.
 - No file under `evals/` changes (R23).
+
+## Follow-up, 2026-10-29: the first real gate run
+
+The gate (`scripts/eval gate --all`, 3 trials) failed: five regression cases each lost one trial of three, and the owner asked for a timeboxed attempt to fix the flakes before changing the rule. One had a plugin cause: in `reviewer-full-verdict` the reviewer tagged a finding "Compliance" and left out `--policy`, because `agents/reviewer.md` said to leave the flag out "when no finding cites one". The line now says a finding tagged with a pass always rests on the review policy, so the flag is passed whenever any finding is recorded. `reviewer-full-verdict` went from 2/3 (and 1/3 in an earlier run) to 6/6.
+
+The other four are not plugin causes I could fix in the timebox, and I left them: `agent-cannot-approve` (the shell was denied for the whole session in one trial, so the agent could not name the command), `approval-before-build` (one worker ran `cd` and `git` in one line despite the instruction not to), `board-found-without-asking` (one trial stopped to ask the analyst questions the skill tells it to ask, so no intent was written) and `bug-repro-first` (one fix left the tests failing; no skill in the plugin teaches the flow, P7.2). A separate recurring refusal remains in `reviewer-false-alarm`: a `review-done` call that passes its notes through a here-document in command substitution is refused in about one trial in six, and a fix needs a script change (a notes file argument), not text.
