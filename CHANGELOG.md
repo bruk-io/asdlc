@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### The orchestrator hears merges, pull requests and comments ([plan](plan/github-channel.md))
+
+- `scripts/github_channel.py` is a Claude Code channel: an MCP server, standard library only, that asks GitHub once a minute through your `gh` login what changed in the repositories registered on this machine and tells a running session, one event per fact: a pull request opened, merged, closed or reopened, a review with its state, a comment, a head commit's checks passed or failed. Facts only: no comment, review or description text reaches the session, and a title is cut short and stripped of anything that could forge a tag. It is one-way, with no tools and no permission relay. A cursor under the XDG state directory means a restart reports what was missed and nothing twice. It is off unless you add the server and start a session with `ASDLC_GITHUB_CHANNEL=1 claude --dangerously-load-development-channels server:asdlc-github`; [`docs/github-channel.md`](docs/github-channel.md) has the commands and the limits. Channels are a research preview, and no event has yet been seen arriving in a real session.
+
 ### A repository that holds its own board can take work ([plan](plan/board-in-the-code-repository.md))
 
 - `asdlc register` accepts the repository the board lives in, where it used to refuse it as "a board", so tasks there can carry a project and `asdlc next` and `asdlc review-next` offer them. Its `asdlc.board` names the repository itself, so a task's worktree uses the board in the main checkout and not its own copy of `backlog/`. A board is still not registered for a different board. The rule loader and the board guard don't cover such a repository yet.
