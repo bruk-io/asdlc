@@ -9,7 +9,10 @@ stats` reports the story's numbers from the board's history and ann's event log.
 The machines' programs are what doctor looks for on PATH. `claude`, `gh` and `uv` are
 small stand-ins, so each machine can have its own installed plugins and sign-in; `claude
 plugin validate` is passed to the real CLI when it is installed. git, backlog, asdlc and
-asdlc-plugin are the real ones.
+asdlc-plugin are the real ones. Each machine has asdlc as a ready machine does: the plugin
+installed where Claude Code keeps it (a copy of this repository's plugin files, with no
+git folder) and the launcher on PATH. `permissions` and `doctor` run from that copy, since
+both report on the copy of asdlc that is running.
 
 Run it with ASDLC_DEMO=1 to print what doctor and stats say; the pull request quotes it.
 """
@@ -17,6 +20,7 @@ Run it with ASDLC_DEMO=1 to print what doctor and stats say; the pull request qu
 import json
 import os
 import shutil
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -51,7 +55,7 @@ case "$1" in
   *) exit 1;;
 esac
 """
-LAUNCH = '#!/bin/sh\nexec "{python}" "{script}" "$@"\n'
+PLUGIN_FILES = ("scripts", "hooks", "templates", ".claude-plugin", "bin")
 TESTING_RULE = """---
 paths:
   - "**/*.py"
@@ -89,8 +93,12 @@ class PilotReadinessTest(review.CrossMachineReviewTest):
         write(self.bin / "claude", CLAUDE.format(python=sys.executable), 0o755)
         write(self.bin / "gh", GH.format(), 0o755)
         write(self.bin / "uv", "#!/bin/sh\necho 'uv 0.9.0 (demo)'\n", 0o755)
+        self.version = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())["version"]
+        self.installed = self.root / "claude-plugins" / "cache" / "asdlc" / "asdlc" / self.version
+        for folder in PLUGIN_FILES:
+            shutil.copytree(ROOT / folder, self.installed / folder, ignore=shutil.ignore_patterns("__pycache__"))
         for name in ("asdlc", "asdlc-plugin"):
-            write(self.bin / name, LAUNCH.format(python=sys.executable, script=ROOT / "scripts" / name), 0o755)
+            write(self.bin / name, (ROOT / "scripts" / "asdlc_launcher.py").read_text(), 0o755)
         system = [str(Path(found).parent) for found in (shutil.which("git"), BACKLOG, shutil.which("node"), shutil.which("python3")) if found]
         path = os.pathsep.join(dict.fromkeys([str(self.bin), *system, "/usr/bin", "/bin"]))
         kit = self.root / "authoring-kit"
@@ -100,10 +108,10 @@ class PilotReadinessTest(review.CrossMachineReviewTest):
         market = json.loads((self.ann.board / ".claude-plugin" / "marketplace.json").read_text())["name"]
         states = {
             "kyle": {"marketplaces": [{"name": "asdlc", "source": "github"}, {"name": market, "source": "git", "autoUpdate": True}],
-                     "plugins": [{"id": f"team@{market}", "enabled": True}, {"id": "asdlc@asdlc", "enabled": True},
+                     "plugins": [{"id": f"team@{market}", "enabled": True}, {"id": "asdlc@asdlc", "enabled": True, "installPath": str(self.installed)},
                                  {"id": "authoring-kit@owner", "version": "0.7.0", "enabled": True, "installPath": str(kit)}]},
             "ann": {"marketplaces": [{"name": "asdlc", "source": "github"}, {"name": market, "source": "git"}],
-                    "plugins": [{"id": "asdlc@asdlc", "enabled": True}]},
+                    "plugins": [{"id": "asdlc@asdlc", "enabled": True, "installPath": str(self.installed)}]},
         }
         for machine in (self.ann, self.kyle):
             state = write(machine.home / "claude-state.json", json.dumps(states[machine.name]))
@@ -132,9 +140,14 @@ class PilotReadinessTest(review.CrossMachineReviewTest):
                      f"{self.onboarded.splitlines()[0]})")
         return super().build(machine, task_id, worktree, text, message)
 
+    def from_the_plugin(self, machine: review.demo.Machine, *args: str) -> subprocess.CompletedProcess[str]:
+        """asdlc as the launcher runs it: the installed plugin's script."""
+        return subprocess.run([sys.executable, str(self.installed / "scripts" / "asdlc"), *args], capture_output=True, text=True, cwd=machine.board,
+                              env={**os.environ, **machine.env})
+
     def doctor(self, machine: review.demo.Machine) -> tuple[int, dict[str, object], str]:
-        done = machine.asdlc("doctor", ok=False)
-        report = machine.asdlc("doctor", "--json", ok=False)
+        done = self.from_the_plugin(machine, "doctor")
+        report = self.from_the_plugin(machine, "doctor", "--json")
         return done.returncode, json.loads(report.stdout), done.stdout
 
     def test_review_across_machines_and_the_fallback(self) -> None:
@@ -142,7 +155,7 @@ class PilotReadinessTest(review.CrossMachineReviewTest):
         self.assertIn("published plugins/acme-api", self.onboarded)
 
         # Each person adds the permission rules normal work needs, once the repository's plugin is published.
-        added = {machine.name: machine.asdlc("permissions", "--write").stdout for machine in (self.kyle, self.ann)}
+        added = {machine.name: self.from_the_plugin(machine, "permissions", "--write").stdout for machine in (self.kyle, self.ann)}
         self.assertIn("Bash(python3 -m py_compile login.py)", added["kyle"])
         self.assertIn("build: `python3 -c \"import ast; ast.parse(open('login.py').read())\"` (it has a ;)", added["kyle"])
         self.assertTrue((self.kyle.board / ".claude" / "settings.local.json").is_file())
@@ -152,6 +165,10 @@ class PilotReadinessTest(review.CrossMachineReviewTest):
         code, report, text = self.doctor(self.kyle)
         self.assertEqual((code, report["failed"], report["warnings"]), (0, 0, 0), text)
         self.assertIn("pass  plugin acme-api: asdlc-plugin check is clean", text)
+        self.assertIn(f"pass  release: asdlc {self.version} from {self.installed}", text)
+        self.assertIn(f"pass  asdlc: {self.bin / 'asdlc'}", text)
+        allowed = (self.kyle.board / ".claude" / "settings.local.json").read_text()
+        self.assertIn(f"Bash({self.installed.parent}/*/scripts/asdlc *)", allowed, "the rule names the installed plugin, with any version")
         self.say(f"\n$ asdlc doctor            # on kyle's machine (exit {code})\n{text.rstrip()}")
 
         # ann's machine has problems.

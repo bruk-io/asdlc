@@ -31,6 +31,8 @@ Usage:
         [--policy <name>]... --plan-matched yes|no --notes <text> [--json]
   asdlc [--board <path>] intent-started <draft-id> [--at <time>]
   asdlc [--board <path>] doctor [--json]
+  asdlc install-command [--to <folder>] [--json]
+  asdlc --version
   asdlc [--board <path>] permissions [--write] [--json]      (--write is a person's command)
   asdlc [--board <path>] stats [--since <date>] [--stage <stage>] [--json]
 
@@ -67,6 +69,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import assert_never
 
+from asdlc_launcher import COMMANDS, RECORDS, Install, installs as plugin_installs, plugins_folder
 from repo_slug import github_repo, origin_url, slug_of
 
 MIN_BACKLOG = (1, 55, 1)  # 1.54 drops frontmatter keys it doesn't know on every edit
@@ -2683,6 +2686,35 @@ class Tool:
     version: str = ""
 
 
+class CommandKind(StrEnum):
+    """What the file PATH finds for `asdlc` or `asdlc-plugin` is."""
+
+    LAUNCHER = "launcher"  # this release's launcher: it finds the installed plugin each time it runs
+    OLD_LAUNCHER = "old launcher"  # another release's launcher
+    CLONE_LINK = "clone link"  # a link to a script in a clone of asdlc's repository: it runs whatever is checked out there
+    PLUGIN_BIN = "plugin bin"  # the plugin's own bin wrapper, which only a Claude Code session has on PATH
+    OTHER = "other"
+
+
+@dataclass(frozen=True)
+class CommandFacts:
+    """One of asdlc's two commands as PATH finds it."""
+
+    name: str
+    kind: CommandKind
+    target: str = ""  # where a link leads
+
+
+@dataclass(frozen=True)
+class Running:
+    """The copy of asdlc that is running."""
+
+    version: str
+    root: Path
+    working_copy: bool  # a git checkout of asdlc's repository, not a plugin Claude Code installed
+    commit: str = ""  # the commit Claude Code installed it from, when its records say
+
+
 @dataclass(frozen=True)
 class RepoFacts:
     """A registered code repository as found on this machine."""
@@ -2748,11 +2780,77 @@ class Facts:
     team_review_policy: bool = True  # the tasks repository has plugins/team/review.md
     claude_settings: tuple[tuple[str, str], ...] = ()  # (path, text) of each Claude Code settings file that applies in the board clone
     mcp_configs: tuple[tuple[str, str], ...] = ()  # (path, text) of each file that configures MCP servers
+    commands: tuple[CommandFacts, ...] = ()  # what `asdlc` and `asdlc-plugin` on PATH are
+    running: Running | None = None
 
 
 AUTHORING_KIT = ("skills/choosing-extension-types/SKILL.md", "skills/authoring-skills/SKILL.md", "skills/authoring-hooks/SKILL.md",
                  "agents/authoring-auditor.md")
 _SIGN_IN = "for HTTPS, gh auth login and then gh auth setup-git store a credential git uses without asking; for SSH, load your key into ssh-agent"
+
+
+LAUNCHER_MARK = "asdlc launcher:"  # in every release's launcher
+BIN_MARK = '"$(dirname "$0")/../scripts/'  # in the plugin's bin wrappers
+INSTALL_COMMAND = "asdlc install-command"
+
+
+def command_kind(text: str, link: Path | None, launcher: str) -> CommandKind:
+    """What a file named `asdlc` or `asdlc-plugin` is, from its text, where it leads when it is a link, and this release's launcher."""
+    if link is not None and link.name in COMMANDS and link.parent.name == "scripts":
+        return CommandKind.CLONE_LINK
+    if text == launcher:
+        return CommandKind.LAUNCHER
+    if LAUNCHER_MARK in text:
+        return CommandKind.OLD_LAUNCHER
+    return CommandKind.PLUGIN_BIN if BIN_MARK in text else CommandKind.OTHER
+
+
+def running(root: Path, manifest: str, installed: Sequence[Install], working_copy: bool) -> Running:
+    """The copy of asdlc at `root`: its version from its manifest's text, and its commit from Claude Code's install records."""
+    try:
+        version = str(json.loads(manifest).get("version") or "")
+    except (ValueError, AttributeError):
+        version = ""
+    return Running(version or "of an unknown version", root, working_copy, next((i.commit for i in installed if i.root == root and i.commit), ""))
+
+
+def version_text(found: Running) -> str:
+    if found.working_copy:
+        return f"asdlc {found.version}, a working copy at {found.root}, not the installed plugin"
+    return f"asdlc {found.version}{f' ({found.commit[:12]})' if found.commit else ''} from {found.root}"
+
+
+def _command_findings(facts: Facts) -> list[Finding]:
+    """The commands come from the installed plugin, so they are the release whose skills, agents and hooks are in use."""
+    found = []
+    if facts.running is not None:
+        found.append(Finding("release", Level.WARN, f"{version_text(facts.running)}: right for working on asdlc itself, and for nothing else. "
+                                                    f"The installed plugin's command is the one on PATH after {INSTALL_COMMAND}")
+                     if facts.running.working_copy else Finding("release", Level.PASS, version_text(facts.running)))
+    kinds = {command.name: command for command in facts.commands}
+    for name, tool in (("asdlc", facts.asdlc), ("asdlc-plugin", facts.asdlc_plugin)):
+        if not tool.path:
+            found.append(Finding(name, Level.FAIL, f"{name} is not on PATH: in a Claude Code session with the asdlc plugin, run ! {INSTALL_COMMAND} "
+                                                   "(docs/guide.md, Install)"))
+            continue
+        command = kinds.get(name)
+        match command.kind if command else CommandKind.LAUNCHER:
+            case CommandKind.LAUNCHER:
+                found.append(Finding(name, Level.PASS, tool.path))
+            case CommandKind.CLONE_LINK:
+                found.append(Finding(name, Level.FAIL, f"{tool.path} is a link to {command.target}, so it runs whatever that clone has checked out and not "
+                                                       f"the installed plugin, and a branch switched there changes the command under every worker: run {INSTALL_COMMAND}"))
+            case CommandKind.OLD_LAUNCHER:
+                found.append(Finding(name, Level.WARN, f"{tool.path} is another release's launcher: run {INSTALL_COMMAND}"))
+            case CommandKind.PLUGIN_BIN:
+                found.append(Finding(name, Level.WARN, f"{tool.path} is the plugin's own, which only a Claude Code session has on PATH, so your terminal "
+                                                       f"has no {name} for accepting and approving: run {INSTALL_COMMAND}"))
+            case CommandKind.OTHER:
+                found.append(Finding(name, Level.WARN, f"{tool.path} is not asdlc's launcher, so asdlc can't tell which release it runs: move it away "
+                                                       f"and run {INSTALL_COMMAND}"))
+            case _ as unreachable:
+                assert_never(unreachable)
+    return found
 
 
 def _tool_findings(facts: Facts) -> list[Finding]:
@@ -2772,9 +2870,7 @@ def _tool_findings(facts: Facts) -> list[Finding]:
                                                     "asdlc's keys from tasks: npm i -g backlog.md@1.55.2"))
     else:
         found.append(Finding("backlog", Level.PASS, f"backlog {'.'.join(map(str, version))}"))
-    for name, tool in (("asdlc", facts.asdlc), ("asdlc-plugin", facts.asdlc_plugin)):
-        found.append(Finding(name, Level.PASS, tool.path) if tool.path else
-                     Finding(name, Level.FAIL, f"{name} is not on PATH: link the plugin's scripts/{name} onto it (docs/guide.md, Install)"))
+    found += _command_findings(facts)
     if not facts.gh.path:
         found.append(Finding("gh", Level.WARN, "gh is not installed, so workers can't open pull requests and reviewers can't comment on them: "
                                                "install it, then gh auth login"))
@@ -3021,14 +3117,20 @@ def unsafe_in_rule(run: str) -> str | None:
     return next((f"it has {why}" for token, why in _UNSAFE_IN_RULE if token in run), None)
 
 
+def any_release(root: Path) -> str:
+    """An installed plugin's folder with its version as a wildcard, so a rule that names it outlives an update; any other folder as it is.
+    Claude Code keeps each installed version at `<plugins>/cache/<marketplace>/<plugin>/<version>`."""
+    return f"{root.parent}/*" if len(root.parts) > 4 and root.parts[-4] == "cache" else str(root)
+
+
 def permission_rules(repos: Sequence[tuple[str, Path]], board: Path | None, commands: Mapping[str, str], roots: Sequence[Path] = ()) -> Rules:
     """The allow rules and folders for normal work: asdlc's own commands (by name, by the plugin's
     absolute path, and through `uv run --script`), backlog's reads, the git subcommands agents use in
     worktrees and registered clones, gh for pull requests, each registered repository's simple
     verified commands, and edits in the worktrees beside each registered clone and the tasks clone."""
     allow = list(BASE_RULES)
-    for root in roots:
-        for script in ("asdlc", "asdlc-plugin"):
+    for root in dict.fromkeys(any_release(root) for root in roots):
+        for script in COMMANDS:
             allow += [f"Bash({root}/scripts/{script} *)", f"Bash(uv run --script {root}/scripts/{script} *)"]
     skipped = []
     for slug, path in repos:
@@ -3310,6 +3412,62 @@ def _claude_files(board: Path | None) -> tuple[tuple[tuple[str, str], ...], tupl
     return read(settings), read(mcp)
 
 
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+LAUNCHER = PLUGIN_ROOT / "scripts" / "asdlc_launcher.py"
+
+
+def _running() -> Running:
+    manifest = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
+    records = plugins_folder(os.environ, Path.home()) / RECORDS
+    return running(PLUGIN_ROOT, manifest.read_text() if manifest.is_file() else "", plugin_installs(records.read_text() if records.is_file() else ""),
+                   (PLUGIN_ROOT / ".git").exists())
+
+
+def _command(path: Path) -> tuple[CommandKind, str]:
+    """What the file at `path` is, and where it leads when it is a link."""
+    link = path.resolve() if path.is_symlink() else None
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    return command_kind(text, link, LAUNCHER.read_text()), str(link or "")
+
+
+def install_command(folder: Path, as_json: bool) -> int:
+    """Put this release's launcher in `folder` as `asdlc` and `asdlc-plugin`, replacing an earlier launcher or a link into a clone and
+    nothing else. The launcher finds the installed plugin each time it runs, so this is done once and again only when doctor says so."""
+    launcher = LAUNCHER.read_text()
+    folder.mkdir(parents=True, exist_ok=True)
+    lines, rows, left = [], [], False
+    for name in COMMANDS:
+        target = folder / name
+        kind, link = _command(target) if target.exists() or target.is_symlink() else (None, "")
+        match kind:
+            case CommandKind.LAUNCHER:
+                did = "already this release's launcher"
+            case None:
+                did = "installed"
+            case CommandKind.OLD_LAUNCHER:
+                did = "replaced another release's launcher"
+            case CommandKind.CLONE_LINK:
+                did = f"replaced the link to {link}, which is left as it was"
+            case CommandKind.PLUGIN_BIN | CommandKind.OTHER:
+                did, left = f"left alone: it is not asdlc's launcher or a link into a clone of asdlc. Move it away and run {INSTALL_COMMAND} again", True
+            case _ as unreachable:
+                assert_never(unreachable)
+        if kind in (None, CommandKind.OLD_LAUNCHER, CommandKind.CLONE_LINK):
+            _write_atomically(target, launcher)  # a rename, so a link is replaced and never written through
+            target.chmod(0o755)
+        lines.append(f"{target}: {did}")
+        rows.append({"command": name, "path": str(target), "was": str(kind) if kind else "missing", "result": did})
+    on_path = str(folder) in os.environ.get("PATH", "").split(os.pathsep)
+    if not on_path:
+        lines.append(f"{folder} is not on your PATH: add it to your shell profile")
+    lines.append(f"the launcher runs the installed asdlc plugin's scripts; this one came from {version_text(_running())}")
+    _emit({"folder": str(folder), "on_path": on_path, "commands": rows}, as_json, lines)
+    return 1 if left else 0
+
+
 def gather(explicit_board: str | None, cwd: Path) -> Facts:
     """Look at this machine without changing anything."""
     engineer = _git(cwd, "config", "--get", "asdlc.engineer").stdout.strip()
@@ -3320,7 +3478,9 @@ def gather(explicit_board: str | None, cwd: Path) -> Facts:
         gh=_tool("gh", "--version"), gh_signed_in=None, claude=Tool(claude), npx=_tool("npx"), engineer=engineer, board=None,
     )
     claude_settings, mcp_configs = _claude_files(None)
-    facts = replace(facts, home=Path.home(), claude_settings=claude_settings, mcp_configs=mcp_configs)
+    facts = replace(facts, home=Path.home(), claude_settings=claude_settings, mcp_configs=mcp_configs, running=_running(),
+                    commands=tuple(CommandFacts(name, *_command(Path(tool.path))) for name, tool in (("asdlc", facts.asdlc), ("asdlc-plugin", facts.asdlc_plugin))
+                                   if tool.path))
     if facts.gh.path:
         try:
             signed = subprocess.run([facts.gh.path, "auth", "status"], capture_output=True, timeout=30, stdin=subprocess.DEVNULL).returncode == 0
@@ -4705,6 +4865,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="asdlc", description="A Backlog.md board: claims, worktrees, routing and orchestration.")
     parser.add_argument("--board", help="the board clone (else $ASDLC_BOARD, else git config asdlc.board, else the board clone you are in)")
     parser.add_argument("--in", dest="folder", metavar="FOLDER", help=IN_HELP)
+    parser.add_argument("--version", action="store_true", help="which copy of asdlc this is: its version, and the folder it runs from")
     after = argparse.ArgumentParser(add_help=False)  # --in is accepted after the subcommand too
     after.add_argument("--in", dest="folder", metavar="FOLDER", default=argparse.SUPPRESS, help=IN_HELP)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -4751,6 +4912,8 @@ def _parser() -> argparse.ArgumentParser:
     reviewing.add_argument("--now", help="the time to judge the wait at, as ISO 8601 (for tests and demonstrations)")
     add("permissions", "the Claude Code allow rules normal work needs on this machine; --write adds them to the tasks clone's local settings (a person's command)",
         json_output=True).add_argument("--write", action="store_true", help="merge them into the tasks clone's .claude/settings.local.json, keeping what is there, after a backup")
+    add("install-command", "put asdlc and asdlc-plugin on your PATH as a launcher that runs the installed plugin's scripts",
+        json_output=True).add_argument("--to", metavar="FOLDER", help="the folder to put them in (else ~/.local/bin)")
     add("doctor", "check that this machine is ready: tools, identity, the board, settings, repositories, plugins and leftovers", json_output=True)
     measuring = add("stats", "the playbook's numbers by stage, from the board's history and this machine's logs", json_output=True)
     measuring.add_argument("--since", help="count from this date or time, as ISO 8601 (else from the board's start)")
@@ -4868,6 +5031,9 @@ def main(argv: Sequence[str]) -> int:
     for stopping in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(stopping, _stopped)
     parser = _parser()
+    if list(argv) == ["--version"]:  # no subcommand, so before the parser asks for one
+        print(version_text(_running()))
+        return 0
     split = command_index(argv)
     if split is not None and argv[split] == "board":  # the rest belongs to backlog, flags included
         arguments, passthrough = parser.parse_args([*argv[:split], "board"]), list(argv[split + 1:])
@@ -4893,6 +5059,8 @@ def main(argv: Sequence[str]) -> int:
                 return register(arguments.register_board or arguments.board, cwd, as_json)
             case "doctor":
                 return doctor(arguments.board, cwd, as_json)
+            case "install-command":
+                return install_command(Path(arguments.to).expanduser().resolve() if arguments.to else Path.home() / ".local" / "bin", as_json)
             case "permissions":
                 return permissions(arguments.board, cwd, arguments.write, as_json, datetime.now())
         board = open_board(resolve_board(arguments.board, cwd))

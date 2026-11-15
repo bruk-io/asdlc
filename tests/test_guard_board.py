@@ -14,6 +14,7 @@ from tests.support import ROOT, git, hook_payload, load, make_repo, run_script
 load("hooks/decision_log.py")
 guard = load("hooks/guard_board.py")
 load("scripts/repo_slug.py")
+load("scripts/asdlc_launcher.py")
 asdlc = load("scripts/asdlc")
 
 CODE = Path("/work/app")

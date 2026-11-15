@@ -6,21 +6,21 @@ Setting up takes about twenty minutes. `asdlc doctor` tells you when you're done
 
 ## Install
 
-`just setup` (install [`just`](https://github.com/casey/just) first) does steps 1, 2 and 5 below and reports step 3 and your handle; it is safe to run again. The steps are what it does, and still work by hand.
+`just setup` (install [`just`](https://github.com/casey/just) first) does steps 1 and 2 below, and step 5 when the plugin is installed, and reports step 3 and your handle; it is safe to run again. The steps are what it does, and still work by hand.
 
 1. **uv.** The plugin's hooks and scripts are Python 3.15 scripts run through uv, which fetches 3.15 the first time: <https://docs.astral.sh/uv/>.
 2. **Backlog.md 1.55.2.** `npm i -g backlog.md@1.55.2`. Older versions drop asdlc's own keys from tasks when they edit them, so asdlc refuses anything before 1.55.1.
 3. **gh, signed in for git too.** Install the GitHub CLI, then `gh auth login` and `gh auth setup-git`. Workers open pull requests with it, reviewers comment on them, and `setup-git` stores a credential git uses without asking, which background plugin updates need.
 4. **The asdlc plugin.** In Claude Code: `/plugin install asdlc --marketplace bruk-io/asdlc`. It brings the skills, the worker and reviewer agents, the board guard and the rule loader.
-5. **The `asdlc` and `asdlc-plugin` commands.** Clone the plugin's repository and link its two scripts onto your `PATH`:
+5. **The `asdlc` and `asdlc-plugin` commands.** They come with the plugin. Inside a Claude Code session they are already there: Claude Code puts the plugin's `bin` folder on the `PATH` of the commands it runs. Your own terminal, where you accept work and approve plans, needs them too. In a session, type:
 
-   ```sh
-   git clone https://github.com/bruk-io/asdlc ~/src/asdlc
-   ln -s ~/src/asdlc/scripts/asdlc ~/.local/bin/asdlc
-   ln -s ~/src/asdlc/scripts/asdlc-plugin ~/.local/bin/asdlc-plugin
+   ```
+   ! asdlc install-command
    ```
 
-   Keep the clone at the release the plugin is on (`git -C ~/src/asdlc pull` when the plugin updates).
+   That puts a small launcher in `~/.local/bin` as `asdlc` and `asdlc-plugin`. It holds no asdlc code: each time it runs it finds the installed plugin and runs the script of the same name there, so the command is always the release whose skills, agents and hooks are in use. You need no clone of asdlc's repository, and if you have one, what is checked out in it changes nothing. `asdlc --version` says which release is running and from where.
+
+   If `~/.local/bin/asdlc` is a link into a clone, from an earlier setup, `asdlc doctor` fails on it and the same command replaces it. A file there that asdlc doesn't recognise is left alone.
 6. **The tasks repository's marketplace.** The tasks repository is also a plugin marketplace holding the team's skills and rules, and one plugin per code repository. Ask the pilot's owner for its `owner/repo`, then in Claude Code:
 
    ```
@@ -69,7 +69,7 @@ You choose. The board is a Backlog.md folder under version control, in one of tw
 
 Workers and reviewers run as background subagents of your orchestrator, and nobody is there to answer a permission prompt: a command that prompts stalls the worker or is refused. The aim is that background workers and reviewers run without prompts; your orchestrator's own foreground work may still ask now and then (onboarding a new repository, for example, may ask for a few reads in your registered clone), and you answer those. `asdlc permissions` prints the Claude Code allow rules for that on this machine, as narrow as the work allows:
 
-- `asdlc` and `asdlc-plugin` by name, by the plugin's absolute path, and through `uv run --script <plugin>/scripts/asdlc` (the board guard still refuses what is a person's, such as `asdlc accept`);
+- `asdlc` and `asdlc-plugin` by name, by the installed plugin's path with its version as a wildcard (so the rule outlives an update), and through `uv run --script <plugin>/scripts/asdlc` (the board guard still refuses what is a person's, such as `asdlc accept`);
 - `backlog`'s read commands only (`task list`, `task view`, `draft list`, `draft view`, `doc list`, `doc view`, `search`), since every change to the board goes through `asdlc board`;
 - the git subcommands agents run in a task's or a review's worktree, written as `git -C <clone>.worktrees/* <subcommand> *` (fetch, status, diff, log, show, add, commit, push, rebase, merge, switch, `checkout -b`, rev-parse, branch, symbolic-ref, mv, rm, restore, stash and reset; each also without arguments), the few a reviewer runs in your registered clone (fetch, worktree, show, rev-parse, symbolic-ref), and in both the read-only ones agents use to find their way around (ls-files, grep, blame, cat-file, ls-tree, merge-base, rev-list, describe, show-ref, `remote get-url`). Agents never `cd`: Claude Code asks you before any line that changes directory and runs git, whatever the rules say, so the agents use `git -C`, `asdlc record-check --in <worktree>` and the file tools instead. The board guard refuses pushes to a default branch and force pushes whatever these allow;
 - `gh pr create`, `gh pr view` and `gh pr comment`;
@@ -144,7 +144,8 @@ Ctrl-C, closing the terminal or killing an agent mid-command is safe. A change t
 ### Known limits
 
 - In a registered clone, every Claude Code session with the asdlc plugin is guarded: it can't edit code outside a claimed task's worktree, and there is no switch to turn that off for one session. To work on a registered clone with Claude outside the board, unset its board for that while (`git -C ~/src/api config --unset asdlc.board`) and run `asdlc register` there again afterwards.
-- The `asdlc` and `asdlc-plugin` on your `PATH` come from your clone of the plugin's repository, and the skills and agents from the installed plugin. If the two are at different releases, a skill can ask for a command the script doesn't have, or the reverse. Keep the clone at the plugin's release (`git -C ~/src/asdlc pull` when the plugin updates); `asdlc doctor` doesn't compare them yet.
+- To update asdlc, update the plugin (`claude plugin update asdlc@asdlc`, or `/plugin` in a session) and reload. The commands follow it: the launcher finds the installed plugin each time it runs. Inside a session that hasn't reloaded yet, the commands stay on the release that session loaded, so its skills and its commands always match; your terminal moves to the new release at once. An install only updates when the plugin's version changes, so a change merged without a release (`just release <version>`) reaches nobody.
+- To run a working copy of asdlc, use its path (`~/src/asdlc/scripts/asdlc`), or load a worktree of it with `claude --plugin-dir`. It is never what plain `asdlc` runs, and `asdlc --version` and `asdlc doctor` say when a working copy is what is running.
 - The guard parses shell commands, so it is a guardrail, not a wall: a determined script can get past it. When it can't tell what a command does (a `cd` to a variable, say), it allows it and says so.
 
 ## What the numbers mean

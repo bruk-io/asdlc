@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.2.0 - 2026-11-15
+
+### The asdlc command comes from the installed plugin ([plan](plan/command-from-a-release.md))
+
+- `asdlc` and `asdlc-plugin` used to be links into a clone of this repository, so they ran whatever that clone had checked out while the skills, agents and hooks came from the installed plugin. They now come from the plugin: `bin/asdlc` and `bin/asdlc-plugin`, which Claude Code puts on the `PATH` of every command a session runs, and for your own terminal a launcher that `asdlc install-command` puts in `~/.local/bin`. The launcher holds no asdlc code. It runs the plugin a session loaded when it is inside one, else the install for the folder you are in, else the one for every project. No clone is needed to use asdlc, and a branch switched in one changes nothing.
+- `asdlc --version` says which copy is running and from where. `asdlc doctor` reports it, fails when the command on `PATH` is still a link into a clone, and warns about another release's launcher or a file it doesn't recognise, each time naming `asdlc install-command`.
+- `asdlc permissions` names the installed plugin's path with the version as a wildcard, so the rules outlive an update. Run `asdlc permissions --write` once after updating to this release.
+- `just setup` no longer links the commands to the clone. It installs the launcher, and reports an old link without removing it.
+- `just release <version>` sets the plugin's version and files the Unreleased entries under it. Claude Code keeps an install on the version its manifest names, so installs had not updated since 0.1.0: every change since then reaches a machine for the first time with this release.
+- To move a machine set up the old way: `claude plugin update asdlc@asdlc`, then `asdlc install-command`, then `asdlc permissions --write`.
+
 ### The orchestrator hears merges, pull requests and comments ([plan](plan/github-channel.md))
 
 - `scripts/github_channel.py` is a Claude Code channel: an MCP server, standard library only, that asks GitHub once a minute through your `gh` login what changed in the repositories registered on this machine and tells a running session, one event per fact: a pull request opened, merged, closed or reopened, a review with its state, a comment, a head commit's checks passed or failed. Facts only: no comment, review or description text reaches the session, and a title is cut short and stripped of anything that could forge a tag. It is one-way, with no tools and no permission relay. A cursor under the XDG state directory means a restart reports what was missed and nothing twice. It is off unless you add the server and start a session with `ASDLC_GITHUB_CHANNEL=1 claude --dangerously-load-development-channels server:asdlc-github`; [`docs/github-channel.md`](docs/github-channel.md) has the commands and the limits. Channels are a research preview, and no event has yet been seen arriving in a real session.

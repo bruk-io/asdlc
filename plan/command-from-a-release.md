@@ -22,7 +22,7 @@ This serves [`intent/command-from-a-release.md`](../intent/command-from-a-releas
 |---|---|
 | Where does the command live? | In the plugin, as `bin/asdlc` and `bin/asdlc-plugin`, which run the scripts beside them. A person's terminal gets a small launcher in `~/.local/bin` that finds the installed plugin and runs its script. It is a copied file, not a link, and holds no asdlc logic |
 | What keeps it pointing at the current release? | The launcher looks each time it runs. Inside a Claude session it uses the asdlc plugin `bin/` entry on `PATH`, which is the release that session loaded. Outside one it reads `~/.claude/plugins/installed_plugins.json` and takes the install for the folder it is in, then a user-wide install, then the newest. The allow rules name the installed path with the version as a wildcard |
-| What is the development copy called? | It has no name. It is run by path, `./scripts/asdlc`, or by loading a worktree with `claude --plugin-dir`, whose `bin/` the launcher then follows. `asdlc --version` and the first line of `asdlc doctor` say which copy is running and where it is |
+| What is the development copy called? | It has no name. It is run by path, `./scripts/asdlc`, or by loading a worktree with `claude --plugin-dir`, whose `bin/` the launcher then follows. `asdlc --version` and the `release` line of `asdlc doctor` say which copy is running and where it is |
 | Do the eval suite and tests change? | No. They run the scripts by path from the working copy and keep doing so. The launcher and `bin/` wrappers get tests of their own |
 | Is a mismatch a doctor failure or a refusal to run? | A `doctor` failure that names the fix. The command does not refuse: with the launcher the mismatch cannot arise by accident, and a refusal would break a machine set up the old way before it has been told what to change |
 
@@ -44,6 +44,7 @@ A bump that is forgotten leaves every install where it was, silently, which is w
 | `tests/test_release.py` | yes | The bump, the changelog move and both refusals | R21 |
 | `justfile` | no | `release <version>` calls `scripts/release.py`. `setup` stops linking to this clone: it installs the launcher, and tells a machine with the old links what they are and that `asdlc install-command` replaces them. Nothing is removed without that command being run | R21 |
 | `tests/test_asdlc_launcher.py` | yes | The resolution order, each refusal's wording, and a run through the launcher that reaches the right script | R21 |
+| `tests/test_demo_pilot.py`, `tests/test_guard_board.py` | no | The pilot demonstration's two machines have asdlc as a ready machine now does: the plugin's files installed in a cache folder with no git folder, and the launcher on `PATH`. `permissions` and `doctor` run from that copy. `test_guard_board.py` loads the launcher module the script now imports | R21 |
 | `tests/test_asdlc.py`, `tests/test_justfile.py` | no | `install-command`, `--version`, the three `doctor` outcomes, the new allow rules, and `setup` no longer linking to the clone | R21 |
 | `docs/guide.md`, `README.md` | no | Install no longer needs a clone: install the plugin, then `! asdlc install-command` in a session. Updating is one step. The "doctor doesn't compare them yet" note goes | - |
 | `CHANGELOG.md` | no | One entry | - |
@@ -62,6 +63,12 @@ No file under `skills/`, `agents/`, `hooks/` or `commands/` changes. Their fallb
 8. The guide, the README and the changelog.
 9. `./scripts/check`.
 10. On this machine, after merge: `git tag v0.2.0`, `claude plugin update asdlc@asdlc`, `asdlc install-command`, `asdlc permissions --write`, then the proof below in steg.
+
+## Departures
+
+- **The pilot demonstration changed**, which the first version of this plan did not list. Its machines ran asdlc from this working copy through a hand-written wrapper, which `doctor` now rightly warns about twice, so its "ready machine has no warnings" assertion failed. The machines were made ready by the new standard; no assertion was loosened, and three were added.
+- **The launcher and its tests were written together**, not test-first as step 2 said. The later steps were test-first.
+- **The `release` line sits beside the command lines in `doctor`**, not first, so the order a person fixes things in is unchanged.
 
 ## Risks
 
