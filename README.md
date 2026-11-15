@@ -95,6 +95,10 @@ The guard only ever denies or allows, never asks, so it adds no permission promp
 
 Nothing frees a claim for you: `asdlc release` hands a task back by hand (and gives up a review claim a reviewer holds), and the orchestrate skill releases the claim of a worker that is gone.
 
+### Hearing GitHub
+
+An orchestrator otherwise learns that a pull request was merged, reviewed or commented on only when you tell it. `scripts/github_channel.py` is a Claude Code channel that tells it: it asks GitHub once a minute through your `gh` login and sends the session one event per fact, never the words of a comment. It is off until you add it and start a session with `ASDLC_GITHUB_CHANNEL=1 claude --dangerously-load-development-channels server:asdlc-github`. Channels are a research preview. [`docs/github-channel.md`](docs/github-channel.md) has the setup, what the session sees, and the limits.
+
 ### Review
 
 A finished task is In Review with its branch and pull request recorded. Any orchestrator whose engineer didn't write it, with `review: true` in their `devs/<name>.yaml` and the repository registered, may claim its review with `asdlc review-next`; the claim is a compare-and-swap push like any other, recorded on the task as `asdlc_reviewer`. The orchestrator launches the `reviewer` agent (sonnet, medium effort, from the routing table), which reads the task, its plan, its acceptance criteria, its intent's contracts and the team's review policy (`plugins/team/review.md` in the tasks repository, plus the repository plugin's own `review.md` when it has one; never this plugin's own `REVIEW.md`, which is for changes to asdlc), reviews the diff in a detached worktree of the registered repository (so the repository's rules reach it), records the verdict with `asdlc review-done`, and posts the same findings on the pull request as a comment when `gh` can reach it. A review never approves on GitHub; a person merges.
