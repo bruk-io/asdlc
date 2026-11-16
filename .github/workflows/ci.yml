@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # Pinned so a move of ubuntu-latest can't change the environment under the checks.
+    runs-on: ubuntu-24.04
+    steps:
+      # The pull request's own branch, with full history: the guard compares the
+      # branch with main, and the tests build git repositories of their own.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Lint the example's documents
+        run: uv run asdlc document check --root examples/claims
+
+      - name: Lint this repository's documents
+        if: hashFiles('intent/**/*.md') != ''
+        run: uv run asdlc document check
+
+      - name: Format and lint the code
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
+
+      - name: Tests
+        run: uv run pytest -q
+
+      # The guard: this branch changes only what its documents on main allow.
+      # It is skipped for v2 itself, the one branch that replaces version 1's
+      # documents wholesale. Remove that condition once v2 is on main.
+      - name: Guard the branch
+        if: github.event_name == 'pull_request' && github.head_ref != 'v2'
+        run: uv run asdlc branch check "$GITHUB_HEAD_REF"
+
+      - name: Plugin and marketplace manifests
+        run: npx --yes @anthropic-ai/claude-code plugin validate .

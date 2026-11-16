@@ -130,7 +130,7 @@ Not built yet:
 
 - **Skills.** Capturing an intent, writing a spec, planning, sizing and cutting tasks are done by hand from the templates.
 - **The measures.** Nothing reads merge commits or pull requests yet.
-- **The required check in CI**, CODEOWNERS and branch protection. `asdlc branch check` is the command a workflow would run.
+- **Making CI required.** `.github/workflows/ci.yml` runs lint, the tests and the guard on every pull request, but branch protection and `CODEOWNERS` are not set up, so nothing yet stops a merge.
 - **Commit order.** The guard judges which files a branch changed, not that a plan was committed before the code.
 - **Evals.** Replaying a saved task under the plugin and scoring the result. Nothing of it exists yet.
 - **Review and releases.** Version 1 had both, and an eval suite. They are on `main` and not carried over.
