@@ -31,17 +31,17 @@ A Claude Code plugin implementing Anthropic's AI-native SDLC playbook. This is v
 
 - An intent, its spec, its plan and its tasks are files under `intent/<slug>/`. Each is added on a branch named for it (`intent/<slug>`, `spec/<slug>`, `plan/<slug>`, `tasks/<slug>`) and accepted by a person merging that branch.
 - A task is built on `task/<slug>/<task>` once its `task.md` is on `main`. A small intent is built on `change/<slug>` with its plan as the first commit.
-- Documents hold what a person declared. State (in force, replaced, built) is worked out by `scripts/documents.py` and never written into a file.
+- Documents hold what a person declared. State (in force, replaced, built; ready, claimed, in review, done) is worked out in `asdlc/domain` from the files and from git, and never written into a file.
 
 ## Layout
 
 `asdlc/` is the package, in three layers. `tests/test_layers.py` fails when one imports what it must not.
 
-- `asdlc/domain/` - decides. Pure functions over data: documents, requirements, lint, the guard. Imports nothing else here, and no files, git or printing.
-- `asdlc/io/` - reads files, git and a hook's stdin. Decides nothing.
+- `asdlc/domain/` - decides. Pure functions over data: documents, requirements, lint, the guard, tasks and their state, scaffolding. Imports nothing else here, and no files, git or printing.
+- `asdlc/io/` - reads files, git, GitHub (through `gh`) and a hook's stdin. Decides nothing.
 - `asdlc/presentation/` - turns what the domain returned into text for a person or JSON for a hook.
 - `asdlc/cli.py` - the click command. The only module that imports all three.
-- `hooks/` - registers two Claude Code hooks: `asdlc hook run lint` after Claude writes a document, and `asdlc hook run guard` before Claude runs `git push`. `bin/` - puts `asdlc` on a session's PATH. `templates/` - the four documents. `examples/claims/` - a worked example the tests read.
+- `hooks/` - registers two Claude Code hooks: `asdlc hook run lint` after Claude writes a document, and `asdlc hook run guard` before Claude runs `git push`. `bin/` - puts `asdlc` on a session's PATH. `asdlc/templates/` - the four documents, shipped in the package. `examples/claims/` - a worked example the tests read.
 - `tests/` - mirrors the layers. Domain tests touch no files; `test_example.py` and `test_cli.py` run on real files and a real git repository.
 
 ## Conventions

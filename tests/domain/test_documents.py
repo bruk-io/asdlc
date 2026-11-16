@@ -168,3 +168,16 @@ def test_state_cannot_be_written_into_a_document():
 def test_a_file_in_the_wrong_place_is_no_document():
     document, findings = documents.parse("intent/claims/notes.md", "anything")
     assert (document, rules(findings)) == (None, ["place"])
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("# Intent: claims status self-service\n", "claims status self-service"),
+        ("\n# Task: the status panel\n## Done when\n", "the status panel"),
+        ("# A heading with no kind\n", "A heading with no kind"),
+        ("## Only a second-level heading\n", ""),
+    ],
+)
+def test_a_documents_title_is_its_first_heading_without_its_kind(body, expected):
+    assert documents.title(body) == expected

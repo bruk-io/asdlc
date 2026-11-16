@@ -59,6 +59,7 @@ class Document:
     kind: Kind
     slug: str
     task: str | None  # the task folder, for a task.md or a task's own plan.md
+    title: str  # the first heading, without its 'Intent:' or 'Task:' prefix
     meta: frozendict[str, str | tuple[str, ...]]
     items: tuple[Item, ...]
 
@@ -104,6 +105,7 @@ _KEY = re.compile(r"([a-z][a-z-]*): (\S.*)")
 _ITEM = re.compile(r"### (Step |[RQC])(\d+): (\S.*)")
 _NEARLY_ITEM = re.compile(r"### (Step |[RQC]) ?\d")
 _PROP = re.compile(r"- ([a-z][a-z-]*): (\S.*)")
+_TITLE = re.compile(r"# (?:(?:Intent|Spec|Plan|Task): )?(\S.*)")
 
 
 def label(item: Item) -> str:
@@ -198,6 +200,14 @@ def items(body: str) -> tuple[tuple[Item, ...], tuple[str, ...]]:
     return tuple(found), tuple(problems)
 
 
+def title(body: str) -> str:
+    """Give a document's first heading without its kind; empty when it has none."""
+    for line in body.split("\n"):
+        if found := _TITLE.fullmatch(line):
+            return found[1].strip()
+    return ""
+
+
 def parse(path: str, text: str) -> tuple[Document | None, tuple[Finding, ...]]:
     """Read one document from its path and text, with everything wrong inside it.
 
@@ -252,7 +262,8 @@ def parse(path: str, text: str) -> tuple[Document | None, tuple[Finding, ...]]:
                     f"{label(item)} has '- {key}:', which is not a property of "
                     f"'{item.mark}'; the properties are {known}",
                 )
-    return Document(path, kind, slug, task, frozendict(meta), found), tuple(findings)
+    document = Document(path, kind, slug, task, title(body), frozendict(meta), found)
+    return document, tuple(findings)
 
 
 def listed(document: Document, key: str) -> tuple[str, ...]:

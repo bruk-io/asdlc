@@ -3,6 +3,7 @@ import json
 from asdlc.domain.documents import Finding
 from asdlc.domain.guard import Ruling, Verdict
 from asdlc.domain.requirements import Progress, Requirement, Standing
+from asdlc.domain.tasks import Intent, Stage, State, Task
 from asdlc.presentation import data, hook, output, text
 
 
@@ -184,3 +185,55 @@ def test_the_git_hook_runs_the_guard_and_is_recognised_as_ours():
     assert "uv tool install" in script
     assert hook.ours(script)
     assert not hook.ours("#!/bin/sh\nnpm test\n")
+
+
+TASK = Task(
+    id="claims/02-panel",
+    slug="claims",
+    name="02-panel",
+    title="the status panel",
+    step="2",
+    size="5",
+    delivers=("R1", "R3"),
+    depends=("claims/01-endpoint",),
+    branch="task/claims/02-panel",
+    has_plan=True,
+    state=State.WAITING,
+)
+INTENT = Intent("claims", "claims status", "J. Ortiz", "", Stage.TASKS, (TASK,))
+
+
+def test_a_task_is_id_state_size_step_title():
+    assert text.task_line(TASK) == "claims/02-panel\twaiting\t5\t2\tthe status panel"
+    assert data.task(TASK)["depends"] == ["claims/01-endpoint"]
+    json.dumps(data.task(TASK))
+
+
+def test_a_task_in_full():
+    assert text.task_record(TASK).split("\n") == [
+        "id\tclaims/02-panel",
+        "title\tthe status panel",
+        "state\twaiting",
+        "step\t2",
+        "size\t5",
+        "branch\ttask/claims/02-panel",
+        "own-plan\tyes",
+        "delivers\tR1",
+        "delivers\tR3",
+        "depends\tclaims/01-endpoint",
+    ]
+
+
+def test_an_intent_is_slug_stage_parent_title():
+    assert text.intent_line(INTENT) == "claims\ttasks\t\tclaims status"
+    assert (
+        text.intent_record(INTENT).split("\n")[-1] == "task\tclaims/02-panel\twaiting"
+    )
+    assert data.intent(INTENT) == {
+        "slug": "claims",
+        "title": "claims status",
+        "author": "J. Ortiz",
+        "parent": None,
+        "stage": "tasks",
+        "tasks": [{"id": "claims/02-panel", "state": "waiting"}],
+    }

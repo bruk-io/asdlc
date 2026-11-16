@@ -43,11 +43,35 @@ def create_branch(root: Path, name: str, ref: str) -> bool:
     return _git(root, "switch", "--quiet", "--create", name, ref) is not None
 
 
+def switch(root: Path, name: str) -> bool:
+    """Switch to a branch that exists; False when git refuses."""
+    return _git(root, "switch", "--quiet", name) is not None
+
+
 def hooks_folder(root: Path) -> Path:
     """Give the folder git runs this repository's hooks from."""
     listed = _git(root, "rev-parse", "--git-path", "hooks") or ".git/hooks"
     folder = Path(listed.strip())
     return folder if folder.is_absolute() else root / folder
+
+
+def branches(root: Path) -> frozenset[str]:
+    """List the branches that exist here or on the remote, without a remote prefix."""
+    listed = _git(
+        root, "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes"
+    )
+    names = (line.strip() for line in (listed or "").split("\n"))
+    return frozenset(name.removeprefix("origin/") for name in names if name)
+
+
+def merge_subjects(root: Path, ref: str) -> tuple[str, ...]:
+    """Give the subject of every merge commit on a ref's first-parent line."""
+    listed = _git(root, "log", "--first-parent", "--merges", "--format=%s", ref) or ""
+    return tuple(line for line in listed.split("\n") if line)
+
+
+def user_name(root: Path) -> str:
+    return (_git(root, "config", "user.name") or "").strip()
 
 
 def has_branch(root: Path, branch: str) -> bool:

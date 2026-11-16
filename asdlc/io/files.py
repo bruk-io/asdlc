@@ -1,5 +1,6 @@
 """Files on disk: the documents' text, and where a path sits in a repository."""
 
+from importlib import resources
 from pathlib import Path
 
 
@@ -9,6 +10,20 @@ def document_texts(root: Path) -> tuple[tuple[str, str], ...]:
     return tuple(
         (file.relative_to(root).as_posix(), file.read_text()) for file in files
     )
+
+
+def template(kind: str) -> str:
+    """Give the template that ships with asdlc for a kind of document."""
+    return resources.files("asdlc").joinpath("templates", f"{kind}.md").read_text()
+
+
+def write_new(path: Path, text: str) -> bool:
+    """Write a file that must not exist yet; False, writing nothing, when it does."""
+    if path.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return True
 
 
 def read_text(path: Path) -> str | None:

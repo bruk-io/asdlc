@@ -57,6 +57,12 @@ The grammar is the one steg's command uses: a singular noun, a verb from a close
 
 | Command | Target | What it does |
 |---|---|---|
+| `asdlc intent new` | The new intent's slug | Starts an intent on its branch from the template. `--author`, `--parent`, `--title` |
+| `asdlc intent list`, `intent show` | none; an intent's slug | The intents and how far each has got: intent, spec, plan, tasks, built |
+| `asdlc spec new` | An intent's slug | Starts its spec on its branch, once the intent is on `main` |
+| `asdlc plan new` | An intent's slug, or `<slug>/<task>` | Starts the intent's plan, or a task's own plan |
+| `asdlc task new` | `<slug>/<task>` | Cuts a task from a plan step. `--step`, `--size`, `--depends`; what it delivers is copied from the step |
+| `asdlc task list`, `task show` | An intent's slug, or none; `<slug>/<task>` | The tasks and their state: waiting, ready, claimed, in review, done |
 | `asdlc document check` | An intent's slug, or none for all | Lint: everything wrong in and between the documents |
 | `asdlc requirement list` | none | The requirements in force. `--all` adds replaced and retired ones |
 | `asdlc requirement show` | A requirement id | One requirement in full, with what it replaced and what replaced it |
@@ -80,6 +86,8 @@ Every command takes `-h`, `--json`, `-q` (identifiers only), `-v` (diagnostics o
 | 3 | The target matched nothing |
 | 4 | No git repository, or no `main` to compare with |
 | 130 | Interrupted |
+
+State is never stored. A task is claimed because its branch `task/<slug>/<task>` exists, in review because that branch has an open pull request (read through `gh`), and done because it was merged. A requirement is built when every task that delivers it is done. This depends on pull requests being merged with a merge commit.
 
 Lint judges the documents and reads only files. The guard judges a change: the branch, the files it touched and what is on `main`. Neither runs a model, and both give the same answer every time. A gate, in this project, is a person's decision recorded as a merge; the guard is what stops work getting ahead of one.
 
@@ -116,13 +124,11 @@ asdlc hook new pre-push
 
 ## What is built, and what is not
 
-Built: the document format and its lint, requirements and lineage, the guard as one function behind `asdlc branch check` and the hook before a push, lint after each document edit, the four templates, a worked example.
+Built: the document format and its lint, scaffold commands for each document, task and intent state read from git, requirements and lineage, the guard as one function behind `asdlc branch check` and the hook before a push, lint after each document edit, four templates, a worked example.
 
 Not built yet:
 
 - **Skills.** Capturing an intent, writing a spec, planning, sizing and cutting tasks are done by hand from the templates.
-- **"Built" from git.** `requirement list` shows a requirement as built only when told which tasks have merged. Nothing reads that from git yet, so the command never shows it.
-- **Task state.** Claimed, in review and done are meant to be read from branches and pull requests. There is no `asdlc task list`.
 - **The measures.** Nothing reads merge commits or pull requests yet.
 - **The required check in CI**, CODEOWNERS and branch protection. `asdlc branch check` is the command a workflow would run.
 - **Commit order.** The guard judges which files a branch changed, not that a plan was committed before the code.

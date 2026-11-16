@@ -20,6 +20,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["asdlc", "asdlc.domain", "asdlc.io", "asdlc.presentation"]
 
+[tool.setuptools.package-data]
+asdlc = ["templates/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

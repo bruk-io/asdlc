@@ -1,4 +1,7 @@
-from asdlc.io import files, git
+import pytest
+
+from asdlc.domain.documents import Kind, parse
+from asdlc.io import files, git, github
 from tests.conftest import git as run_git
 
 
@@ -58,3 +61,64 @@ def test_a_program_is_written_where_git_runs_hooks_from(repository):
     files.write_program(hook, "#!/bin/sh\n")
     assert files.read_text(hook) == "#!/bin/sh\n"
     assert hook.stat().st_mode & 0o111
+
+
+def test_branches_and_merges_are_read_from_git(repository):
+    run_git(repository, "switch", "-q", "-c", "task/claims/01-a")
+    (repository / "app.py").write_text("x = 1\n")
+    run_git(repository, "add", "-A")
+    run_git(repository, "commit", "-q", "-m", "code")
+    run_git(repository, "switch", "-q", "main")
+    assert git.branches(repository) == {"main", "task/claims/01-a"}
+    assert git.merge_subjects(repository, "main") == ()
+    subject = "Merge pull request #4 from o/task/claims/01-a"
+    run_git(repository, "merge", "-q", "--no-ff", "-m", subject, "task/claims/01-a")
+    assert git.merge_subjects(repository, "main") == (subject,)
+
+
+def test_switching_to_a_branch_that_exists(repository):
+    git.create_branch(repository, "spec/claims", "main")
+    assert git.switch(repository, "main") is True
+    assert git.current_branch(repository) == "main"
+    assert git.switch(repository, "nothing") is False
+
+
+@pytest.mark.parametrize("kind", list(Kind))
+def test_every_kind_has_a_template_that_ships_with_the_package(kind):
+    text = files.template(kind)
+    assert text.startswith(f"---\nkind: {kind}\n")
+
+
+def test_a_template_is_a_document_once_its_frontmatter_is_filled(repository):
+    document, _ = parse("intent/claims/intent.md", files.template(Kind.INTENT))
+    assert document.kind is Kind.INTENT
+
+
+def test_a_new_file_is_written_once(repository):
+    path = repository / "intent" / "new" / "intent.md"
+    assert files.write_new(path, "first") is True
+    assert files.write_new(path, "second") is False
+    assert path.read_text() == "first"
+
+
+def fake_gh(folder, monkeypatch, script: str) -> None:
+    files.write_program(folder / "gh", f"#!/bin/sh\n{script}\n")
+    monkeypatch.setenv("PATH", f"{folder}:/usr/bin:/bin")
+
+
+def test_open_pull_requests_are_read_through_gh(
+    repository, tmp_path_factory, monkeypatch
+):
+    rows = '[{"headRefName": "task/claims/01-a"}, {"headRefName": "spec/x"}]'
+    fake_gh(tmp_path_factory.mktemp("bin"), monkeypatch, f"echo '{rows}'")
+    assert github.open_pull_branches(repository) == {"task/claims/01-a", "spec/x"}
+
+
+def test_gh_failing_or_missing_is_no_answer_not_an_empty_one(
+    repository, tmp_path_factory, monkeypatch
+):
+    folder = tmp_path_factory.mktemp("bin")
+    fake_gh(folder, monkeypatch, "exit 1")
+    assert github.open_pull_branches(repository) is None
+    monkeypatch.setenv("PATH", str(tmp_path_factory.mktemp("empty")))
+    assert github.open_pull_branches(repository) is None

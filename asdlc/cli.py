@@ -18,12 +18,14 @@ from pathlib import Path
 
 import click
 
-from asdlc.domain.documents import Document, Finding
+from asdlc.domain import scaffold
+from asdlc.domain.documents import Document, Finding, Kind, Mark, step_delivers
 from asdlc.domain.guard import Verdict, guard, waiting
 from asdlc.domain.lint import library
 from asdlc.domain.requirements import Requirement, Standing, lineage, requirements
 from asdlc.domain.shell import push_folder
-from asdlc.io import files, git
+from asdlc.domain.tasks import Task, done, intents, merged_branches, tasks
+from asdlc.io import files, git, github
 from asdlc.io.hook import read_file_write, read_shell_command
 from asdlc.presentation import data, output, text
 from asdlc.presentation import hook as hook_text
@@ -93,15 +95,114 @@ def _library(options: Options) -> tuple[tuple[Document, ...], tuple[Finding, ...
     return documents, found
 
 
-def _requirements(options: Options) -> tuple[Requirement, ...]:
-    documents, found = _library(options)
+def _warn_of(found: tuple[Finding, ...]) -> None:
     if found:
         click.echo(
             f"Warning: {len(found)} finding(s) in the documents, so this may be "
             "wrong. Run: asdlc document check",
             err=True,
         )
-    return requirements(documents)
+
+
+def _main(options: Options) -> tuple[Path, str] | None:
+    """Give the repository and the ref that stands for main; None without them."""
+    root = git.repository(options.root)
+    ref = git.base(root) if root else None
+    return (root, ref) if root and ref else None
+
+
+def _repository(options: Options) -> tuple[Path, str]:
+    found = _main(options)
+    if found is None:
+        raise _fail(
+            f"{options.root} is not a git repository with a main branch",
+            NO_REPOSITORY,
+        )
+    return found
+
+
+def _merged(options: Options) -> frozenset[str]:
+    found = _main(options)
+    if found is None:
+        _note(options, "no git repository with a main branch, so nothing reads as done")
+        return frozenset()
+    return merged_branches(git.merge_subjects(*found))
+
+
+def _tasks(options: Options, documents: tuple[Document, ...]) -> tuple[Task, ...]:
+    """Every task with its state, from the branches, pull requests and merges."""
+    found = _main(options)
+    if found is None:
+        return tasks(documents, merged=_merged(options))
+    pulls = github.open_pull_branches(found[0])
+    if pulls is None:
+        _note(options, "gh listed no pull requests, so no task reads as in review")
+    return tasks(
+        documents,
+        branches=git.branches(found[0]),
+        open_pulls=pulls or frozenset(),
+        merged=_merged(options),
+    )
+
+
+def _requirements(options: Options) -> tuple[Requirement, ...]:
+    documents, found = _library(options)
+    _warn_of(found)
+    return requirements(documents, done(tasks(documents, merged=_merged(options))))
+
+
+def _split(target: str) -> tuple[str, str | None]:
+    """Read a target as an intent's slug, or as <slug>/<task>."""
+    parts = target.split("/")
+    if len(parts) > 2 or not all(scaffold.well_named(part) for part in parts):
+        raise click.UsageError(
+            f"'{target}' is not <slug> or <slug>/<task>: lowercase words, digits "
+            "and hyphens"
+        )
+    return parts[0], parts[1] if len(parts) == 2 else None
+
+
+def _start(
+    options: Options,
+    kind: Kind,
+    slug: str,
+    task: str | None,
+    branch: str,
+    fields: dict[str, str | tuple[str, ...]],
+    title: str,
+) -> None:
+    """Get onto the document's branch, write the document, and print its path."""
+    root, ref = _repository(options)
+    _on_branch(root, ref, branch)
+    relative = scaffold.path(kind, slug, task)
+    text_ = scaffold.document(kind, files.template(kind), fields, title)
+    if not files.write_new(root / relative, text_):
+        raise _fail(f"{relative} already exists", FAILED)
+    _note(options, f"wrote {relative} on '{branch}'")
+    click.echo(json.dumps(relative) if options.json else relative)
+
+
+def _on_branch(root: Path, ref: str, branch: str) -> None:
+    """Switch to a branch, making it from main once what it builds on is merged."""
+    if git.current_branch(root) == branch:
+        return
+    if git.has_branch(root, branch):
+        if not git.switch(root, branch):
+            raise _fail(f"git would not switch to '{branch}'", FAILED)
+        return
+    reason = waiting(branch, git.documents_on(root, ref))
+    if reason is not None:
+        raise _fail(f"cannot start '{branch}': {reason}", FAILED)
+    if not git.create_branch(root, branch, ref):
+        raise _fail(f"git would not create '{branch}'", FAILED)
+
+
+def _title_of(root: Path, slug: str) -> str:
+    """Give the title of an intent in the working tree; empty when it has none."""
+    documents, _ = library(files.document_texts(root))
+    return next(
+        (d.title for d in documents if d.slug == slug and d.kind is Kind.INTENT), ""
+    )
 
 
 @click.group(context_settings=_SETTINGS)
@@ -149,6 +250,237 @@ def document_check(options: Options, intent: str | None) -> None:
     )
     if found:
         raise click.exceptions.Exit(FAILED)
+
+
+@cli.group(context_settings=_SETTINGS)
+def intent() -> None:
+    """What someone wants, in their words: the first document of a change."""
+
+
+@intent.command("list", context_settings=_SETTINGS)
+@universal
+def intent_list(options: Options) -> None:
+    """List the intents: slug, stage, parent, title."""
+    documents, found = _library(options)
+    _warn_of(found)
+    _emit(
+        output.listing(
+            intents(documents, _tasks(options, documents)),
+            line=text.intent_line,
+            identifier=lambda i: i.slug,
+            document=data.intent,
+            as_json=options.json,
+            quiet=options.quiet,
+        )
+    )
+
+
+@intent.command("show", context_settings=_SETTINGS)
+@click.argument("slug")
+@universal
+def intent_show(options: Options, slug: str) -> None:
+    """Show one intent in full, with the tasks under it and their states."""
+    documents, found = _library(options)
+    _warn_of(found)
+    known = intents(documents, _tasks(options, documents))
+    match = next((i for i in known if i.slug == slug), None)
+    if match is None:
+        slugs = ", ".join(i.slug for i in known)
+        raise _fail(f"no intent '{slug}'. The intents are: {slugs}", NO_TARGET)
+    _emit(
+        output.single(
+            text=text.intent_record(match),
+            identifier=match.slug,
+            document=data.intent(match),
+            as_json=options.json,
+            quiet=options.quiet,
+        )
+    )
+
+
+@intent.command("new", context_settings=_SETTINGS)
+@click.argument("slug")
+@click.option("--author", help="Who asked for this. Defaults to git's user.name.")
+@click.option("--parent", help="The intent this one was handed over from.")
+@click.option("--title", default="", help="What is wanted, in a few words.")
+@universal
+def intent_new(
+    options: Options, slug: str, author: str | None, parent: str | None, title: str
+) -> None:
+    """Start an intent on its own branch. Prints the file it wrote.
+
+    The target is the new intent's slug: lowercase words joined by hyphens.
+    """
+    slug, task = _split(slug)
+    if task is not None:
+        raise click.UsageError("an intent is named by a slug alone")
+    root, _ = _repository(options)
+    author = author or git.user_name(root)
+    if not author:
+        raise click.UsageError("no --author given, and git has no user.name")
+    fields: dict[str, str | tuple[str, ...]] = {"author": author}
+    if parent:
+        fields["parent"] = parent
+    _start(options, Kind.INTENT, slug, None, f"intent/{slug}", fields, title)
+
+
+@cli.group(context_settings=_SETTINGS)
+def spec() -> None:
+    """An intent's requirements and design."""
+
+
+@spec.command("new", context_settings=_SETTINGS)
+@click.argument("slug")
+@click.option("--title", default="", help="Defaults to the intent's title.")
+@universal
+def spec_new(options: Options, slug: str, title: str) -> None:
+    """Start an intent's spec on its own branch. Prints the file it wrote.
+
+    The target is the intent's slug. Its intent must be on main.
+    """
+    slug, task = _split(slug)
+    if task is not None:
+        raise click.UsageError("a spec belongs to an intent: give its slug alone")
+    root, ref = _repository(options)
+    _on_branch(root, ref, f"spec/{slug}")
+    title = title or _title_of(root, slug)
+    _start(options, Kind.SPEC, slug, None, f"spec/{slug}", {}, title)
+
+
+@cli.group(context_settings=_SETTINGS)
+def plan() -> None:
+    """How an intent, or one of its tasks, gets built."""
+
+
+@plan.command("new", context_settings=_SETTINGS)
+@click.argument("target")
+@click.option("--title", default="", help="Defaults to the intent's title.")
+@universal
+def plan_new(options: Options, target: str, title: str) -> None:
+    """Start a plan. Prints the file it wrote.
+
+    The target is an intent's slug, for the intent's plan on its own branch; or
+    <slug>/<task>, for a task's own plan on that task's branch.
+    """
+    slug, task = _split(target)
+    branch = f"plan/{slug}" if task is None else f"task/{slug}/{task}"
+    root, ref = _repository(options)
+    _on_branch(root, ref, branch)
+    if not title and task is None:
+        title = _title_of(root, slug)
+    _start(options, Kind.PLAN, slug, task, branch, {}, title)
+
+
+@cli.group(context_settings=_SETTINGS)
+def task() -> None:
+    """One piece of an intent's plan, built on its own branch."""
+
+
+@task.command("list", context_settings=_SETTINGS)
+@click.argument("intent", required=False)
+@universal
+def task_list(options: Options, intent: str | None) -> None:
+    """List the tasks: id, state, size, step, title.
+
+    The target is one intent's slug. Without it, every intent's tasks are listed.
+    """
+    documents, found = _library(options)
+    _warn_of(found)
+    rows = _tasks(options, documents)
+    if intent is not None:
+        slugs = sorted({d.slug for d in documents})
+        if intent not in slugs:
+            raise _fail(
+                f"no intent '{intent}'. The intents are: {', '.join(slugs)}", NO_TARGET
+            )
+        rows = tuple(row for row in rows if row.slug == intent)
+    _emit(
+        output.listing(
+            rows,
+            line=text.task_line,
+            identifier=lambda t: t.id,
+            document=data.task,
+            as_json=options.json,
+            quiet=options.quiet,
+        )
+    )
+
+
+@task.command("show", context_settings=_SETTINGS)
+@click.argument("id")
+@universal
+def task_show(options: Options, id: str) -> None:
+    """Show one task in full. The target is <slug>/<task>."""
+    documents, found = _library(options)
+    _warn_of(found)
+    match = next((row for row in _tasks(options, documents) if row.id == id), None)
+    if match is None:
+        raise _fail(
+            f"no task '{id}'. Ids look like <slug>/<task>. List them: asdlc task list",
+            NO_TARGET,
+        )
+    _emit(
+        output.single(
+            text=text.task_record(match),
+            identifier=match.id,
+            document=data.task(match),
+            as_json=options.json,
+            quiet=options.quiet,
+        )
+    )
+
+
+@task.command("new", context_settings=_SETTINGS)
+@click.argument("id")
+@click.option(
+    "--step", required=True, help="The number of the plan step it is cut from."
+)
+@click.option("--size", help="By complexity, unknowns and risk: 1, 2, 3, 5 or 8.")
+@click.option(
+    "--depends", multiple=True, help="Another task of this intent. Repeatable."
+)
+@click.option("--title", default="", help="What gets built.")
+@universal
+def task_new(
+    options: Options,
+    id: str,
+    step: str,
+    size: str | None,
+    depends: tuple[str, ...],
+    title: str,
+) -> None:
+    """Cut a task from a plan step, on the intent's tasks branch. Prints the file.
+
+    The target is <slug>/<task>. What the task delivers is copied from the step.
+    """
+    slug, name = _split(id)
+    if name is None:
+        raise click.UsageError("a task is named <slug>/<task>")
+    root, ref = _repository(options)
+    branch = f"tasks/{slug}"
+    _on_branch(root, ref, branch)
+    documents, _ = library(files.document_texts(root))
+    cut_from = next(
+        (
+            (document, item)
+            for document in documents
+            if document.slug == slug
+            and document.kind is Kind.PLAN
+            and not document.task
+            for item in document.items
+            if item.mark is Mark.STEP and str(item.number) == step
+        ),
+        None,
+    )
+    if cut_from is None:
+        raise click.UsageError(f"--step {step} is not a step of intent/{slug}/plan.md")
+    delivers = tuple(ref_.removeprefix(f"{slug}.") for ref_ in step_delivers(*cut_from))
+    fields: dict[str, str | tuple[str, ...]] = {"step": step, "delivers": delivers}
+    if depends:
+        fields["depends"] = depends
+    if size:
+        fields["size"] = size
+    _start(options, Kind.TASK, slug, name, branch, fields, title or cut_from[1].title)
 
 
 @cli.group(context_settings=_SETTINGS)
