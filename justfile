@@ -49,7 +49,7 @@ setup:
         fi
     done
     # The launcher runs the installed plugin's scripts, whatever this clone has checked out. An old link is left until you replace it.
-    [ "$linked" = 1 ] || "$root/scripts/asdlc" install-command | sed 's/^/  info  /'
+    [ "$linked" = 1 ] || "$root/scripts/asdlc" install-command | sed 's/^/  info  /' || warn "asdlc install-command left a file alone; see the line above"
     command -v claude >/dev/null 2>&1 && ok "claude: $(command -v claude)" || warn "claude is missing: the commands run the asdlc plugin Claude Code installed (/plugin install asdlc@asdlc)"
     case ":$PATH:" in *":$HOME/.local/bin:"*) ok "$HOME/.local/bin is on your PATH" ;; *) warn "$HOME/.local/bin is not on your PATH; add it to your shell profile" ;; esac
 

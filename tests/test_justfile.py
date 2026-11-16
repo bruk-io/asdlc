@@ -42,6 +42,7 @@ class JustfileTest(unittest.TestCase):
         self.assertNotRegex(setup, r"(?m)^\s*ln\b")
         self.assertIn('"$root/scripts/asdlc" install-command', setup)
         self.assertIn('[ "$linked" = 1 ] ||', setup, "an old link is reported, and replaced only when the person runs install-command")
+        self.assertRegex(setup, r"install-command \| sed [^\n]* \|\| warn ", "a file install-command leaves alone is a warning; the rest of setup still runs")
 
     @unittest.skipUnless(shutil.which("just"), "just is not installed")
     def test_just_reads_the_file_and_lists_every_recipe(self) -> None:
