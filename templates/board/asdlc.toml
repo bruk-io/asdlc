@@ -1,9 +1,0 @@
-# Settings for this board, read by `asdlc` wherever it is used.
-# Durations are a number and a unit: s, m, h or d, such as "90m" or "2h".
-
-# How long a finished task waits In Review for another engineer's orchestrator to claim its
-# review before the author's own orchestrator may review it with a fresh reviewer agent (a
-# same-machine review, marked as one on the task). "0m": the author's orchestrator reviews at
-# once, which is what one orchestrator working alone wants. Raise it if other engineers review
-# first.
-review_fallback_after = "0m"

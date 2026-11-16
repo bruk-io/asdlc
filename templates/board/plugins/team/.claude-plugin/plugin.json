@@ -1,8 +1,0 @@
-{
-  "name": "team",
-  "version": "0.1.0",
-  "description": "The team's own skills and rules: how we test and verify work, and the contract written for a large feature. Rules reach agents through the asdlc plugin's rule loader.",
-  "author": {
-    "name": "The team"
-  }
-}
