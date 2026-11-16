@@ -38,11 +38,8 @@ jobs:
         run: uv run pytest -q
 
       # The guard: this branch changes only what its documents on main allow.
-      # It is skipped for pull request 64 alone, the one that replaces version 1's
-      # documents wholesale. The exemption is by number, so no other pull request
-      # can use it, whatever its branch is called. Remove it once 64 is merged.
       - name: Guard the branch
-        if: github.event_name == 'pull_request' && github.event.pull_request.number != 64
+        if: github.event_name == 'pull_request'
         run: uv run asdlc branch check "$GITHUB_HEAD_REF"
 
       - name: Plugin and marketplace manifests
