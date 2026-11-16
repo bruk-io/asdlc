@@ -207,6 +207,53 @@ class StatsByStageTest(unittest.TestCase):
         if SAY:
             print(f"\n$ asdlc stats   # on ann's machine, Tuesday at noon; kyle's clock runs two minutes fast\n{text.rstrip()}", flush=True)
 
+    def test_a_control_a_review_that_counts_and_a_fix_round_that_states(self) -> None:
+        """Controls by the numbers (spec/negative-control.md R19), apart from the two days above so that their numbers stay as they are:
+        ann's worker writes the test first and records it failing as a control, then the code, then the same command passing.
+        kyle's review finds one test that could not fail; the fix round changes no test and says so; the second review does not say."""
+        ann, kyle = self.ann, self.kyle
+        proof = ("python3", "-B", "-c", "import login, sys; sys.exit(0 if login.limited(11) else 'AssertionError: the eleventh failed login is not limited')")
+        created = self.on(ann, at(9), "board", "task", "create", "Limit failed logins", "--type", "task", "--project", "acme-api", "-l", "size-2")
+        self.assertIn("TASK-1", created.stdout)
+        tree = Path(json.loads(self.on(ann, at(9, 5), "claim", "TASK-1", "--as", "ann.w1", "--json").stdout)["worktree"])
+        self.on(ann, at(9, 10), "board", "task", "edit", "TASK-1", "--plan", "Files: login.py. Proof: limited(11), failing without the comparison.")
+        self.on(ann, at(9, 15), "approve", "TASK-1")
+        (tree / "login.py").write_text("def limited(failures):\n    return False\n")
+        failed = self.on(ann, at(9, 20), "record-check", "TASK-1", "--as", "ann.w1", "--control", "eleventh_is_limited",
+                         "--without", "the comparison in limited(), not written yet", "--", *proof, cwd=tree, ok=False)
+        self.assertEqual(failed.returncode, 1, failed.stderr)
+        self.commit(ann, tree, "def limited(failures):\n    return failures > 10\n", "Limit failed logins", "ann.w1")
+        self.assertIn("completes the control for eleventh_is_limited", self.on(ann, at(9, 30), "record-check", "TASK-1", "--as", "ann.w1", "--", *proof, cwd=tree).stderr)
+        ann.git(tree, "push", "--quiet", "-u", "origin", "HEAD")
+        self.on(ann, at(9, 40), "finish", "TASK-1", "--as", "ann.w1", "--notes", "Limited; the control is recorded above.")
+        claimed = json.loads(self.on(kyle, at(10), "review-next", "--as", "kyle.r1", "--json").stdout)
+        self.assertEqual([(c["name"], c["state"]) for c in claimed["controls"]], [("eleventh_is_limited", "complete")])
+        self.on(kyle, at(10, 20), "review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "changes", "--findings", "important=1,nit=0", "--plan-matched", "yes",
+                "--cannot-fail", "1", "--notes", "[Evidence, Important] the README's example is not what the test checks.")
+        self.on(ann, at(10, 40), "finish", "TASK-1", "--as", "ann.w1", "--notes", "Fixed the README's example.",
+                "--no-control", "this round changed no test: the README's example only")
+        self.assertEqual(json.loads(self.on(kyle, at(11), "review-next", "--as", "kyle.r1", "--json").stdout)["no_control"],
+                         "this round changed no test: the README's example only")
+        self.on(kyle, at(11, 10), "review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "clean", "--findings", "important=0,nit=0", "--plan-matched", "yes",
+                "--notes", "No findings.")
+
+        report = json.loads(self.on(ann, at(12), "stats", "--stage", "test", "--json").stdout)
+        text = self.on(ann, at(12), "stats", "--stage", "test").stdout
+        controls = report["stages"]["test"]["metrics"]["controls"]
+        self.assertEqual([(r["task"], r["handover"], r["first"], r["recorded"], r["controls"], r["not_proof"], r["no_control"], r["cannot_fail"]) for r in controls["handovers"]],
+                         [("TASK-1", 1, True, True, 1, 0, None, 1),
+                          ("TASK-1", 2, False, True, 0, 0, "this round changed no test: the README's example only", "did not say")])
+        share = lambda group, key: (controls[group][key]["count"], controls[group][key]["of"])  # noqa: E731
+        self.assertEqual((share("all", "with_control"), share("all", "no_control"), share("all", "before")), ((1, 2), (1, 2), (0, 2)))
+        self.assertEqual((share("first", "with_control"), share("fix_rounds", "with_control"), share("fix_rounds", "no_control")), ((1, 1), (0, 1), (1, 1)))
+        self.assertEqual(controls["cannot_fail"], {"tests": 1, "verdicts": 1, "did_not_say": 1})
+        self.assertIn("  controls at hand-over: 1 of 2 (50%) hand-overs offered a complete control, 1 of 2 (50%) a no-control statement", text)
+        self.assertIn("reviews found 1 test(s) that could not fail over 1 verdict(s) that said, and 1 verdict(s) did not say [play 07: Controls offered at hand-over]", text)
+        failures = report["stages"]["test"]["metrics"]["failed_checks"]
+        self.assertEqual((failures["count"], failures["of"]), (1, 2), "a control's two runs are recorded checks like any other")
+        if SAY:
+            print(f"\n$ asdlc stats --stage test   # one task, a control at its first hand-over and a statement at its second\n{text.rstrip()}", flush=True)
+
 
 if __name__ == "__main__":
     unittest.main()

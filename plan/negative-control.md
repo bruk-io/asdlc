@@ -1,7 +1,7 @@
 # Plan: the floor of one recorded control before review
 
 - Spec: [`spec/negative-control.md`](../spec/negative-control.md), draft 2026-11-15; this plan is approved with it or after it
-- Status: draft. The owner approves it in session before anything is built; merging it with the first change is the gate.
+- Status: approved by the owner in session on 2026-11-15; merging it with the first change is the gate. Change A is built, and "What changed while building A" says where it departs from the plan as approved.
 - Delivers: R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, R13, R14, R15, R16, R17, R18, R19, R20, R21, R22, R23, R24, R25
 
 This serves [`intent/negative-control.md`](../intent/negative-control.md). It teaches `asdlc record-check` to record a marked control, keeps controls where only `asdlc` writes them, hands them to the reviewer, counts them, and then makes `asdlc finish` refuse a task larger than size 1 without one. It is three pull requests, not one, for a reason found while reading the code and set out next.
@@ -33,12 +33,12 @@ The spec and this plan merge with A. B and C cite them.
 | `scripts/asdlc` | A | no | `record_check_arguments` reads `--control` and `--without`; `Where` gains a digest of the uncommitted change; pure functions over the controls (below); `record_check` writes them in its transaction; the `not-proof` subcommand; `finish --no-control`, and `finish` marking what was handed over; `_review_report` and its text; `review-done --cannot-fail`; `mine_report`; a `controls` metric in `test_stage`; `Task` gains two fields and `STATS_CACHE_VERSION` becomes 2 | R1 to R8, R11, R12, R15 to R19 |
 | `tests/test_asdlc.py` | A | no | The tests in "What each test proves". No existing test is edited | R1 to R8, R11, R12, R15 to R19, R25 |
 | `tests/test_guard_board.py` | A | no | Three tests: a refused command after `record-check --control ... --` is still refused, an allowed one still allowed, `not-proof` allowed | R20 |
-| `tests/test_demo_stats.py` | A | no | The demonstration's size-2 task records a control and its numbers are asserted; existing assertions stay | R19 |
+| `tests/test_demo_stats.py` | A | no | A second demonstration, one task with a control at its first hand-over and a no-control statement at its second, with its numbers asserted. The existing demonstration is not edited (see "What changed while building A") | R19 |
 | `README.md`, `docs/guide.md`, `CHANGELOG.md` | A | no | The command table, the metric, one entry | - |
 | `evals/fixtures.py`, `evals/cases/approval-before-build/case.py`, `evals/cases/sent-back-resumes-branch/case.py` | B | no | Each reference run writes the test first, records it failing with `--control`, then the code, then the same command passing. Checks are not touched | R25 |
 | `evals/cases/control-before-review/` | B | yes | A worker builds a size-2 task. Passing: the task reaches In Review with a complete control whose failing run ended in an assertion. The null run hands over nothing | R21 |
 | `evals/cases/reviewer-names-a-test-that-cannot-fail/` | B | yes | A review scene whose test passes with the counting line removed, and whose recorded control failed at an import. Passing: `changes`, a finding that names the test, `--cannot-fail` of at least 1 | R22 |
-| `scripts/asdlc` | C | no | `control_refusal` called in `finish` beside `approval_refusal`; `apply` added to `WORKTREE_GIT` if the owner agrees | R9, R10, R13, R14 |
+| `scripts/asdlc` | C | no | `control_refusal`, built on A's `handover_state`, called in `finish` beside `approval_refusal`; `apply` added to `WORKTREE_GIT` (the owner agreed on 2026-11-15) | R9, R10, R13, R14 |
 | `tests/support.py`, `tests/test_asdlc.py`, `tests/test_demo_review.py`, `tests/test_demo_stats.py`, `tests/test_demo_pilot.py` | C | no | One shared helper records a control; every test that hands over a size-2 task calls it before `finish`. No assertion is removed or loosened. The new refusal tests | R9 to R15, R25 |
 | `agents/worker.md` | C | no | The text in "The words" | R21 |
 | `agents/reviewer.md` | C | no | A section "The controls" between the diff and the findings | R22 |
@@ -64,9 +64,9 @@ One frontmatter key, `asdlc_controls`, written by `_write_key` as a single-quote
 
 `handed` is the number of hand-overs so far; a run or statement gets `round = handed + 1`; a successful `finish` adds one. "This hand-over" in the spec is the entries whose round is `handed + 1`. `tree` is empty for a clean worktree, else a digest of `git diff HEAD` and the object ids of untracked files.
 
-The logic is pure functions over that value, tested without git or Backlog: `parse_controls`, `controls_text`, `with_run` (what one recorded run does: starts a control, leaves it unresolved, completes one, or completes nothing, with the sentence `record-check` prints), `control_state`, `with_not_proof` and its refusal, `control_refusal` (R9, R10, R13), `handed_over`, and `control_report` (R16, R18). The shell around them is the three lines that read the key, call one, and write it.
+The logic is pure functions over that value, tested without git or Backlog: `parse_controls`, `controls_text`, `with_run` (what one recorded run does: starts a control, leaves it unresolved, completes one, or completes nothing, with the sentence `record-check` prints), `control_state`, `with_not_proof` and its refusal, `no_control_refusal`, `handed_over`, `handover_state` (R18: not needed, missing, unresolved, ready), `control_report` (R16) and, in change C, `control_refusal` (R9, R10, R13), which turns `handover_state` into the refusal. The shell around them is the three lines that read the key, call one, and write it.
 
-A control's note keeps `check_note`'s first line as it is, so `parse_checks`, and an older `asdlc` reading the same board, still count it. The line naming the control and the `--without` text go above it, and the uncommitted change (file list and patch, cut to 40 lines) below.
+A control's note keeps `check_note`'s first line as it is, so `parse_checks`, and an older `asdlc` reading the same board, still count it. The line naming the control and the `--without` text go above it, and the uncommitted change (file list and patch, cut to 40 lines) below. The patch has no context lines (`git diff HEAD --unified=0`, then the text of up to ten new files), so that no line of it can read as another check's first line.
 
 ## Order of work
 
@@ -169,9 +169,27 @@ Reading it: the floor is working when the share with a control is high, the no-c
 - **Two recorded runs race.** Two `record-check` calls for one task from one worker are rare; the transaction replays the step on the new state, so neither run's entry is lost.
 - **The tree digest is slow or wrong in a large worktree.** It is `git diff HEAD` and one `git ls-files --others --exclude-standard`, which `record-check` nearly runs already for "with uncommitted changes". An ignored file is not seen: a mechanism removed only in an ignored file completes nothing, and `record-check` says that nothing differed, which is true of what git tracks.
 - **The same words differ by a path.** A worker who records one run by a relative path and the other by an absolute one completes nothing. The sentence `record-check` prints quotes both commands when a marked control is waiting and a passing run did not match it.
-- **Allowing `git apply` in worktrees.** It changes files only where the edit rules already allow edits, and runs no program. If the owner refuses it, the reviewer repeats only controls whose failing run was on a commit, and says so for the rest.
+- **Allowing `git apply` in worktrees.** It changes files only where the edit rules already allow edits, and runs no program. The owner agreed to it on 2026-11-15; it arrives in change C with the reviewer's words. A recorded change has no context lines and is cut to 40 lines, so it is put back with `git apply --unidiff-zero` and only when the note shows all of it; for a longer one the reviewer makes the removal by reading the note, and says so.
 - **Fix rounds fill with no-control statements.** Seen in the numbers (first hand-overs and fix rounds apart), and named in the spec's areas of concern.
 - **The floor is met by a control on the wrong test.** By design: it is a floor. R16 and R22 put the reviewer on it, and `--cannot-fail` shows whether it is happening.
+
+## What changed while building A
+
+Change A was built on 2026-11-15. Where it departs from the plan as approved, and why:
+
+- **The demonstration is a second test, not an edit to the first.** `tests/test_demo_stats.py` asserts that one of six recorded checks failed. A control is a recorded failing run, so adding one to that demonstration's size-2 task would change an existing assertion, and A changes none. The new demonstration is its own test method in the same file.
+- **`review-next` names a fourth reason for nothing offered.** Between A and C `finish` refuses nothing, so a task larger than size 1 can be handed over with no control and no statement. `review-next` says so (`nothing_offered: "none"`), beside the three reasons R16 names, rather than calling it one of them. C makes it unreachable for a hand-over made under C and decides whether to keep the word for hand-overs made between the two.
+- **`mine` has two states beside R18's four.** A task In Review is past `finish`, so it says "handed over" with what its hand-over offered; a key that cannot be read says "unreadable" with how to clear it. Until C, the reasons for "missing" and "unresolved" end by saying that `finish` does not refuse for it yet.
+- **`control_refusal` is not built in A.** The plan listed it among the pure functions and put its call in C. A builds `handover_state`, which `mine` reads; C writes the refusal's words on top of it, where they can be tested with the refusal.
+- **A marked run acts only on the control it names.** A passing run recorded with `--control x` is x's control that did not fail; it does not also complete another control awaiting the same words. The plan did not say either way.
+- **A passing run that completes a control says so in its note** ("Completes the control for ..."), so a person reading the notes in order sees it without the key.
+- **New files are shown in a control's note.** The test written first is usually an untracked file, which `git diff HEAD` does not show. The note lists it as new and shows its text within the same 40 lines.
+- **`not-proof` takes `--json`,** as `finish` and `review-done` do.
+- **The text of `--without`, `--why` and `--no-control` is kept on one line.** Each goes into the task's notes, where a line break could start a line that reads back as a recorded check. Nothing counts toward the floor from the notes, but `stats` counts checks there.
+- **The stats metric counts "neither" as its own share,** a hand-over made under this release with no control and no statement, apart from one made before controls were recorded.
+- **`finish` reads the key on every hand-over,** so a key edited by hand into something unreadable is refused there, in `record-check` (before the command runs) and in `not-proof`, as the risk above says. No task has the key before this change, so no invocation that works today meets it.
+
+The tests of "What each test proves" for change A are `ControlRunsTest`, `ControlsKeptTest`, `ControlNumbersTest` and `ControlCommandTest` in `tests/test_asdlc.py`, `ControlCommandsTest` in `tests/test_guard_board.py`, and the second demonstration in `tests/test_demo_stats.py`. Each row's control was run as a scratch edit and its failing output is in the pull request. Two rows are regression tests and not offered as proof, as the table says: the note that copies a control's text, and the task In Review with no key.
 
 ## Proof
 

@@ -102,16 +102,16 @@ The notes still get a note for each run and statement, so a person reading the t
 
 Several tests on the evidence day could not be made to fail without their mechanism at all: the kernel throttled the condition away, or the ordering could not be reached end to end. The honest outcome was to keep them as regression tests and name another test as the proof. `not-proof` records that. It is not a way past the floor: it does not count toward R9, and it must name a complete control as the proof, so it cannot be recorded until a real control exists.
 
-### The exemption (answers intent question 3; one part carries forward intent question 3)
+### The exemption (answers intent question 3)
 
 It is called a no-control statement, given as `asdlc finish --no-control "<why>"`. It is for a change with nothing to control for: documentation only, a pure rename, a move with no behaviour change. The worker holding the task gives it. It is never silent: it is a note on the task, it is in `finish`'s output, `review-next` hands it to the reviewer by name, `mine` shows it, and `stats` counts it and prints its text.
 
-Whether it also needs the engineer's word is carried forward to the owner, with a recommendation: no.
+Whether it also needs the engineer's word was carried forward to the owner with a recommendation of no. The owner decided on 2026-11-15: it does not. The worker states it and the reviewer judges it. The two answers as they were put:
 
 | Answer | What it costs |
 |---|---|
-| The worker states it and the reviewer judges it (recommended) | A worker can state something false. The reviewer has the diff beside the statement and the policy makes a false one Important, so it costs a review round. Nothing waits on a person. |
-| The engineer records it, as they record a plan's approval | Every documentation task and every fix round with no test change stops until the engineer runs a command in their own terminal, since a worker cannot ask mid-task. It adds a fourth gate for a person, on the least risky work. |
+| The worker states it and the reviewer judges it (decided) | A worker can state something false. The reviewer has the diff beside the statement and the policy makes a false one Important, so it costs a review round. Nothing waits on a person. |
+| The engineer records it, as they record a plan's approval (not taken) | Every documentation task and every fix round with no test change stops until the engineer runs a command in their own terminal, since a worker cannot ask mid-task. It adds a fourth gate for a person, on the least risky work. |
 
 If the numbers in R19 show the statement used on changes that had behaviour to control for, the second answer can be added later without changing what is recorded.
 
@@ -156,7 +156,7 @@ For each requirement a worker meets, how it could be satisfied without the real 
 | R7 | - | Shape a note like a control | Closed: notes never count. Editing the task file by hand is refused by the guard, which is a guardrail and not a wall. |
 | R8 | State it once another control is complete | Declare every awkward test not-proof | Yes. It never counts toward the floor, each one is listed for the reviewer, and R19 counts them. |
 | R9 | One control | One easy control on a trivial test, none on the test that matters | Yes, by the intent's own terms: the floor is that one exists. R22 makes the reviewer look for the rest. |
-| R11 | One sentence on a documentation change | The same sentence on a behaviour change | Yes, pending the owner's answer to intent question 3. It is visible in four places and judged. |
+| R11 | One sentence on a documentation change | The same sentence on a behaviour change | Yes: the owner decided on 2026-11-15 that the worker states it and the reviewer judges it. It is visible in four places and judged. |
 | R12 | A control on the fix's test, or one sentence | "This round changed no test" when it did | Yes. The round's diff is small and the reviewer has it. |
 | R17 | - | A reviewer that never passes `--cannot-fail` | Yes. R19 counts verdicts that did not say, so silence shows. |
 
@@ -166,10 +166,10 @@ Nothing here asks a worker to break something that works in order to pass: the m
 
 ## Areas of concern
 
-- **The engineer's word on the exemption.** Carried forward above with both costs. It is the owner's to decide because it sets what a person must do.
+- **The engineer's word on the exemption.** Decided by the owner on 2026-11-15: the statement does not need it. Both costs are set out above, and R19's numbers show whether that should change.
 - **The no-control statement may become routine in fix rounds.** A round that fixes a comment or a note has nothing to control for, and says so every time. If most fix rounds carry one, readers will stop reading them. R19 keeps first hand-overs and fix rounds apart so this shows. The alternative, asking only at the first hand-over, leaves open the place the evidence says the problem is.
-- **The eval suite's reference runs hand over size-2 tasks with one passing check.** They are under the protected path, so the change that adds the refusal cannot edit them, and `./scripts/check` runs them. The floor therefore cannot arrive in one pull request; the plan proposes the order.
-- **The reviewer has no edit tool.** Repeating a control means putting a tree back as the failing run had it. With the permissions a reviewer has today that is possible when the failing run was on an earlier commit (`git restore --source`), and awkward when the removal was an uncommitted edit. The plan proposes allowing `git apply` in worktrees so the recorded change can be put back; that widens what agents may run and is the owner's to accept or refuse.
+- **The eval suite's reference runs hand over size-2 tasks with one passing check.** They are under the protected path, so the change that adds the refusal cannot edit them, and `./scripts/check` runs them. The floor therefore cannot arrive in one pull request; the plan sets the order in three. Decided by the owner on 2026-11-15: the two new eval cases the plan proposes are accepted, in the pull request that changes only the suite, and the owner runs the eval gate for the pull request that adds the refusal and the agents' words.
+- **The reviewer has no edit tool.** Repeating a control means putting a tree back as the failing run had it. With the permissions a reviewer has today that is possible when the failing run was on an earlier commit (`git restore --source`), and awkward when the removal was an uncommitted edit. The plan proposes allowing `git apply` in worktrees so the recorded change can be put back; that widens what agents may run and was the owner's to accept or refuse. Decided by the owner on 2026-11-15: it is allowed. The permission arrives with the reviewer's instructions that use it, in the plan's last change.
 - **Notes can still be replaced.** A worker can erase the output of its recorded checks with `--notes`. The controls survive, since they are kept apart, but their output would not. This is true of every recorded check today and is left as it is.
 - **A worker running on older instructions.** A session keeps the plugin version it loaded. Its worker will meet the refusal at `finish` without having been told about controls, which is why R13 makes the refusal sufficient alone.
 

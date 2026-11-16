@@ -825,5 +825,33 @@ class HookCommandTest(unittest.TestCase):
         self.assertIn("uv is not installed, so the board guard did not run", done.stderr)
 
 
+class ControlCommandsTest(unittest.TestCase):
+    """spec/negative-control.md R20: the flags that mark a control change nothing the guard decides. The command after
+    the `--` is judged exactly as it is without them, and `not-proof` passes as `record-check` does. No guard code changed."""
+
+    MARKED = "asdlc record-check TASK-1 --as kyle.w1 --control focus::never_changes_focus --without 'the guard in set_focus()' --"
+
+    def test_a_refused_command_after_a_marked_record_check_is_still_refused(self) -> None:
+        for command, cwd in ((f"{self.MARKED} backlog task edit 1 -s Done", PLAIN),
+                             (f"{self.MARKED} sh -c 'asdlc accept DRAFT-1'", PLAIN),
+                             ("asdlc record-check TASK-1 --control=focus --without='the guard' --as kyle.w1 -- asdlc approve TASK-1", PLAIN),
+                             (f"{self.MARKED} git push origin main", CODE)):
+            with self.subTest(command=command):
+                self.assertIs(verdict(command, cwd), guard.Verdict.DENY)
+
+    def test_an_allowed_command_after_a_marked_record_check_is_still_allowed(self) -> None:
+        for command in (f"{self.MARKED} ./scripts/check", f"{self.MARKED} cargo test never_changes_focus",
+                        "asdlc record-check TASK-1 --in /work/app.worktrees/task-1 --as kyle.w1 --control focus --without 'the guard' -- git status"):
+            with self.subTest(command=command):
+                self.assertIs(verdict(command), guard.Verdict.ALLOW)
+
+    def test_not_proof_and_the_other_new_flags_pass_as_record_check_does(self) -> None:
+        for command in ("asdlc not-proof TASK-1 --as kyle.w1 --test survives_a_burst --proof never_changes_focus --why 'the kernel throttles it away'",
+                        "asdlc finish TASK-1 --as kyle.w1 --notes built --no-control 'documentation only'",
+                        "asdlc review-done TASK-1 --as kyle.r1 --verdict clean --findings important=0,nit=0 --plan-matched yes --cannot-fail 0 --notes 'No findings.'"):
+            with self.subTest(command=command):
+                self.assertIs(verdict(command), guard.Verdict.ALLOW)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2870,3 +2870,641 @@ class InitBoardBehindTest(unittest.TestCase):
     def test_the_foreign_commit_refusal_says_to_rebase_before_pushing(self) -> None:
         refusal = asdlc.foreign_refusal(Path("/b"), [asdlc.Unpushed("a" * 40, "Our edit", False)])
         self.assertIn("git -C /b pull --rebase origin main", refusal)
+
+
+# --- controls: a test recorded failing without the mechanism it proves (spec/negative-control.md) ---
+
+
+def ran(m: float, commit: str = "aaa", tree: str = "", code: int = 0) -> object:
+    return asdlc.Run(minute(m).isoformat(), commit, tree, code)
+
+
+NARROW = ("cargo", "test", "never_changes_focus")
+WHOLE = ("cargo", "test")
+WITHOUT = "the guard in set_focus()"
+
+
+def recorded(*runs: tuple, start: object | None = None) -> tuple[object, list[str]]:
+    """Each (control name or None, --without text, command, run) recorded in order: the controls left, and what record-check said."""
+    controls = start or asdlc.Controls()
+    said = []
+    for name, without, command, found in runs:
+        controls, says = asdlc.with_run(controls, name, without, command, found)
+        said.append(says)
+    return controls, said
+
+
+def states(controls: object) -> list[tuple[str, str]]:
+    return [(c.name, str(asdlc.control_state(c))) for c in controls.controls]
+
+
+FAILED = ("focus", WITHOUT, NARROW, ran(1, code=101))
+COMPLETE = recorded(FAILED, (None, "", NARROW, ran(2, "bbb")))[0]
+
+
+class ControlRunsTest(unittest.TestCase):
+    """What one recorded run does to a task's controls (R2 to R6), without git or Backlog."""
+
+    def test_an_unmarked_failing_run_then_the_same_command_passing_starts_nothing(self) -> None:
+        controls, said = recorded((None, "", NARROW, ran(1, code=101)), (None, "", NARROW, ran(2, "bbb")))
+        self.assertEqual(controls, asdlc.Controls(), "R2: a failing run that was not marked never starts a control")
+        self.assertEqual(said, ["", ""])
+
+    def test_a_marked_failure_then_the_same_words_passing_is_complete(self) -> None:
+        waiting, said = recorded(FAILED)
+        self.assertEqual(states(waiting), [("focus", "awaiting its passing run")])
+        self.assertIn("record the same command again", said[0])
+        self.assertIn("cargo test never_changes_focus", said[0])
+        done, said = recorded((None, "", NARROW, ran(2, "bbb")), start=waiting)
+        self.assertEqual(states(done), [("focus", "complete")], "R5: the same words, exiting zero on another commit")
+        self.assertIn("completes the control for focus", said[0])
+        control = done.controls[0]
+        self.assertEqual((control.round, control.without, control.command, control.failed.code, control.failed.commit, control.passed.commit),
+                         (1, WITHOUT, NARROW, 101, "aaa", "bbb"))
+
+    def test_uncommitted_changes_alone_make_a_different_tree(self) -> None:
+        controls, _ = recorded(("focus", WITHOUT, NARROW, ran(1, "aaa", "9f1c", code=1)), (None, "", NARROW, ran(2, "aaa", "")))
+        self.assertEqual(states(controls), [("focus", "complete")], "the mechanism was taken out in the worktree and restored")
+
+    def test_a_marked_failure_of_one_test_then_the_whole_check_passing_completes_nothing(self) -> None:
+        controls, said = recorded(FAILED, (None, "", WHOLE, ran(2, "bbb")))
+        self.assertEqual(states(controls), [("focus", "awaiting its passing run")], "R5: the same words in the same order, not a shared first word")
+        self.assertIn("`cargo test never_changes_focus`", said[1])
+        self.assertIn("`cargo test`", said[1])
+
+    def test_a_pass_on_the_same_commit_and_tree_completes_nothing_and_says_nothing_differed(self) -> None:
+        for tree in ("", "9f1c"):
+            with self.subTest(tree=tree):
+                controls, said = recorded(("focus", WITHOUT, NARROW, ran(1, "aaa", tree, code=1)), (None, "", NARROW, ran(2, "aaa", tree)))
+                self.assertEqual(states(controls), [("focus", "awaiting its passing run")])
+                self.assertIn("nothing differed between", said[1])
+
+    def test_a_marked_run_that_passes_is_unresolved_and_says_the_test_passed_without_the_mechanism(self) -> None:
+        controls, said = recorded(("focus", WITHOUT, NARROW, ran(1)))
+        self.assertEqual(states(controls), [("focus", "did not fail")])
+        self.assertEqual([c.name for c in asdlc.unresolved(controls, 1)], ["focus"])
+        self.assertIn("passed without the mechanism", said[0])
+        self.assertIn("either the wrong thing was removed or the test cannot prove it", said[0])
+        self.assertIn("--control focus", said[0])
+        self.assertIn("asdlc not-proof", said[0])
+        later, _ = recorded((None, "", NARROW, ran(2, "bbb")), start=controls)
+        self.assertEqual(states(later), [("focus", "did not fail")], "a pass after a control that did not fail completes nothing")
+
+    def test_recording_a_name_again_starts_it_afresh(self) -> None:
+        again, _ = recorded(FAILED, start=COMPLETE)
+        self.assertEqual(states(again), [("focus", "awaiting its passing run")], "R6: the earlier passing run no longer completes it")
+        self.assertIsNone(again.controls[0].passed)
+        fixed, _ = recorded(("focus", WITHOUT, NARROW, ran(1)), ("focus", WITHOUT, NARROW, ran(2, code=1)), (None, "", NARROW, ran(3, "bbb")))
+        self.assertEqual(states(fixed), [("focus", "complete")], "a control that did not fail, recorded again failing, then passing")
+
+    def test_two_controls_are_kept_apart_by_name(self) -> None:
+        other = ("cargo", "test", "survives_a_burst")
+        controls, _ = recorded(FAILED, ("burst", "the throttle", other, ran(1, code=1)), (None, "", other, ran(2, "bbb")))
+        self.assertEqual(states(controls), [("focus", "awaiting its passing run"), ("burst", "complete")])
+
+    def test_the_flags_come_as_a_pair_with_a_one_word_name(self) -> None:
+        self.assertIsNone(asdlc.control_flags_refusal(None, None))
+        self.assertIsNone(asdlc.control_flags_refusal("focus::never_changes_focus", WITHOUT))
+        for control, without, says in (("focus", None, "--without is missing"), (None, WITHOUT, "--control is missing"),
+                                       ("focus", "  ", "--without is empty"), ("two words", WITHOUT, "one word"), ("it's", WITHOUT, "one word"),
+                                       ("", WITHOUT, "one word")):
+            with self.subTest(control=control, without=without):
+                refusal = asdlc.control_flags_refusal(control, without)
+                self.assertIn(says, refusal)
+                self.assertIn("The check was not run", refusal)
+
+    def test_record_check_reads_the_two_flags_before_the_dashes(self) -> None:
+        plain = asdlc.record_check_arguments(["TASK-1", "--as", "kyle.w1", "--", "./check", "--control", "x"])
+        self.assertEqual((plain.control, plain.without, plain.command), (None, None, ("./check", "--control", "x")), "after the -- they are the check's own words")
+        for words in (["TASK-1", "--as", "kyle.w1", "--control", "focus", "--without", WITHOUT], ["--without=" + WITHOUT, "TASK-1", "--control=focus", "--as=kyle.w1"]):
+            with self.subTest(words=words):
+                found = asdlc.record_check_arguments([*words, "--", "./check"])
+                self.assertEqual((found.task, found.worker, found.control, found.without, found.command), ("TASK-1", "kyle.w1", "focus", WITHOUT, ("./check",)))
+        self.assertIsNone(asdlc.record_check_arguments(["TASK-1", "--as", "kyle.w1", "--control", "--", "./check"]))
+
+
+class ControlsKeptTest(unittest.TestCase):
+    """The frontmatter key (R7), the statements (R8, R11), the rounds (R12) and what is read back (R15, R16, R18)."""
+
+    def test_the_key_round_trips_and_nothing_recorded_reads_as_nothing(self) -> None:
+        self.assertEqual(asdlc.parse_controls(""), asdlc.Controls())
+        full = asdlc.handed_over(asdlc.with_not_proof(recorded(("burst", "the throttle", WHOLE, ran(3)), start=COMPLETE)[0], "burst", "focus", "the kernel throttles it away"), None)
+        full = asdlc.handed_over(full, "this round changed no test: it's a 'reworded' refusal")
+        text = asdlc.controls_text(full)
+        self.assertEqual(asdlc.parse_controls(text), full)
+        self.assertEqual(json.loads(text)["handed"], 2)
+        task_text = asdlc.with_key("---\nid: TASK-1\n---\n", asdlc.CONTROLS_KEY, asdlc.yaml_quoted(text))
+        self.assertEqual(asdlc.parse_controls(asdlc.task_from("x", task_text).controls), full, "through the frontmatter, quotes and all")
+
+    def test_an_unreadable_key_says_so_and_how_to_clear_it(self) -> None:
+        for broken in ("{not json", "[]", '{"handed": "one"}', '{"handed": 0, "controls": [{"name": "x"}]}'):
+            with self.subTest(broken=broken):
+                with self.assertRaises(asdlc.AsdlcError) as refused:
+                    asdlc.parse_controls(broken)
+                self.assertIn("asdlc_controls", str(refused.exception))
+                self.assertIn("remove", str(refused.exception))
+
+    def test_a_note_that_copies_a_controls_text_counts_for_nothing(self) -> None:
+        """R7, a regression test and not offered as proof: nothing reads the notes for controls, so there is nothing to remove.
+        The proof of R7 is ControlCommandTest's key and review-next tests."""
+        where = asdlc.Where("/w/app.worktrees/task-1", "task-1-x", "0123456789abcdef", True, "9f1c", ("src/focus.rs",), "-    guard()\n")
+        notes = "\n\n".join([asdlc.control_note("focus", WITHOUT, False, asdlc.check_note(NARROW, 101, "assertion failed\n", T0, where=where), where),
+                             asdlc.check_note(NARROW, 0, "ok\n", T0), "This completes the control for focus.", asdlc.not_proof_note("a", "focus", "why"),
+                             "No control offered: documentation only"])
+        task = asdlc.task_from("x", f"---\nid: TASK-1\nlabels:\n  - size-2\n---\n<!-- SECTION:NOTES:BEGIN -->\n{notes}\n<!-- SECTION:NOTES:END -->\n")
+        self.assertEqual(asdlc.parse_controls(task.controls), asdlc.Controls())
+        self.assertEqual(asdlc.handover_state("size-2", asdlc.parse_controls(task.controls))[0], "missing")
+
+    def test_a_controls_note_still_reads_back_as_one_check(self) -> None:
+        where = asdlc.Where("/w/app.worktrees/task-1", "task-1-x", "0123456789abcdef", True, "9f1c", ("src/focus.rs", "notes.txt"),
+                            "diff --git a/src/focus.rs b/src/focus.rs\n@@ -3 +2,0 @@\n-    guard()\n")
+        for passed, code in ((False, 101), (True, 0)):
+            with self.subTest(passed=passed):
+                note = asdlc.control_note("focus::never_changes_focus", WITHOUT, passed, asdlc.check_note(NARROW, code, "out\n", T0, where=where, since_review=(1, 1)), where)
+                first = note.splitlines()[0]
+                self.assertIn("focus::never_changes_focus", first)
+                self.assertIn("control", first)
+                self.assertIn(WITHOUT, note)
+                self.assertIn("src/focus.rs, notes.txt", note)
+                self.assertIn("-    guard()", note)
+                found = asdlc.parse_checks(f"---\nid: TASK-1\n---\n<!-- SECTION:NOTES:BEGIN -->\n{note}\n\nA note.\n<!-- SECTION:NOTES:END -->\n")
+                self.assertEqual([(c.passed, c.code, c.commit, c.dirty, c.since_review) for c in found], [(passed, code, "0123456789ab", True, (1, 1))],
+                                 "R15: stats, and an older asdlc, still count it as one recorded check")
+        self.assertIn("did NOT fail", asdlc.control_note("focus", WITHOUT, True, asdlc.check_note(NARROW, 0, "", T0), where).splitlines()[0])
+        clean = asdlc.control_note("focus", WITHOUT, False, asdlc.check_note(NARROW, 1, "", T0), asdlc.Where("/w", "b", "0123456789abcdef", False))
+        self.assertIn("no uncommitted changes", clean)
+
+    def test_the_recorded_change_is_cut_to_a_fixed_length(self) -> None:
+        patch = "".join(f"-line {n}\n" for n in range(100))
+        note = asdlc.control_note("focus", WITHOUT, False, asdlc.check_note(NARROW, 1, "", T0), asdlc.Where("/w", "b", "0123456789abcdef", True, "9f1c", ("a",), patch))
+        self.assertIn("-line 39", note)
+        self.assertNotIn("-line 40", note)
+        self.assertIn("first 40 of 100 lines", note)
+
+    def test_not_proof_needs_a_complete_control_other_than_the_test_and_resolves_an_unresolved_one(self) -> None:
+        stuck, _ = recorded(("burst", "the throttle", WHOLE, ran(3)), start=COMPLETE)
+        self.assertEqual([c.name for c in asdlc.unresolved(stuck, 1)], ["burst"])
+        for controls, test, proof, why, says in (
+            (stuck, "burst", "focus", " ", "--why is empty"),
+            (stuck, "burst", "burst", "why", "other than"),
+            (stuck, "burst", "nothing", "why", "is not a complete control"),
+            (recorded(FAILED)[0], "burst", "focus", "why", "is not a complete control"),
+            (stuck, "two words", "focus", "why", "one word"),
+        ):
+            with self.subTest(test=test, proof=proof, why=why):
+                self.assertIn(says, asdlc.not_proof_refusal(controls, test, proof, why))
+        self.assertIsNone(asdlc.not_proof_refusal(stuck, "burst", "focus", "the kernel throttles it away"))
+        stated = asdlc.with_not_proof(stuck, "burst", "focus", "the kernel throttles it away")
+        self.assertEqual(asdlc.unresolved(stated, 1), (), "R8: it resolves the unresolved control of that name")
+        self.assertEqual([c.name for c in asdlc.counting(stated, 1)], ["focus"], "and never counts toward the floor")
+        self.assertEqual([(s.test, s.proof, s.round) for s in asdlc.with_not_proof(stated, "burst", "focus", "again").not_proof], [("burst", "focus", 1)],
+                         "stated again, it replaces the earlier statement")
+        both = asdlc.with_not_proof(COMPLETE, "focus", "focus2", "x")
+        self.assertEqual(asdlc.counting(both, 1), (), "R9: a complete control a not-proof statement names as its test does not count")
+
+    def test_a_no_control_statement_is_not_empty_and_not_beside_a_complete_control(self) -> None:
+        self.assertIn("--no-control is empty", asdlc.no_control_refusal(asdlc.Controls(), "  "))
+        self.assertIn("already has a complete control (focus)", asdlc.no_control_refusal(COMPLETE, "documentation only"))
+        self.assertIsNone(asdlc.no_control_refusal(asdlc.Controls(), "documentation only"))
+        self.assertIsNone(asdlc.no_control_refusal(recorded(FAILED)[0], "documentation only"), "an unresolved control is C's refusal, not this one")
+        handed = asdlc.handed_over(asdlc.Controls(), "documentation only")
+        self.assertEqual((handed.handed, [(s.round, s.why) for s in handed.no_control]), (1, [(1, "documentation only")]))
+        self.assertEqual(asdlc.handed_over(COMPLETE, None).handed, 1)
+
+    def test_a_control_counts_for_the_hand_over_it_was_offered_in_and_no_later_one(self) -> None:
+        second = asdlc.handed_over(COMPLETE, None)
+        self.assertEqual([c.name for c in asdlc.counting(second, 1)], ["focus"])
+        self.assertEqual(asdlc.counting(second, 2), (), "R12: the first hand-over's control is not in the second")
+        self.assertEqual(asdlc.handover_state("size-2", second), ("missing", ()))
+        self.assertIsNone(asdlc.no_control_refusal(second, "this round changed no test"), "so the round may state there is none")
+        again, _ = recorded(FAILED, (None, "", NARROW, ran(2, "bbb")), start=second)
+        self.assertEqual([(c.name, c.round) for c in again.controls], [("focus", 1), ("focus", 2)], "the earlier round's control is kept")
+        self.assertEqual(asdlc.handover_state("size-2", again), ("ready", ()))
+        self.assertIn("is not a complete control", asdlc.not_proof_refusal(second, "burst", "focus", "why"), "nor is it a proof in the second")
+
+    def test_whether_a_hand_over_has_what_the_floor_asks(self) -> None:
+        stuck, _ = recorded(("burst", "the throttle", WHOLE, ran(3)), FAILED)
+        for size, controls, expected in (
+            ("size-1", asdlc.Controls(), ("not needed", ())),
+            ("size-1", stuck, ("not needed", ())),
+            ("size-2", asdlc.Controls(), ("missing", ())),
+            ("", asdlc.Controls(), ("missing", ())),
+            ("size-3", stuck, ("unresolved", ("burst", "focus"))),
+            ("size-2", recorded(("burst", "the throttle", WHOLE, ran(3)), start=COMPLETE)[0], ("unresolved", ("burst",))),
+            ("size-2", COMPLETE, ("ready", ())),
+        ):
+            with self.subTest(size=size, expected=expected):
+                self.assertEqual(asdlc.handover_state(size, controls), expected)
+
+    def test_what_the_reviewer_is_handed(self) -> None:
+        stated = asdlc.with_not_proof(recorded(("burst", "the throttle", WHOLE, ran(3, "aaa", "9f1c")), start=COMPLETE)[0], "burst", "focus", "the kernel throttles it away")
+        report = asdlc.control_report("size-2", asdlc.handed_over(stated, None))
+        self.assertEqual(report["earlier_handovers"], 0)
+        self.assertIsNone(report["nothing_offered"])
+        self.assertIsNone(report["no_control"])
+        self.assertEqual(report["controls"][0], {
+            "name": "focus", "without": WITHOUT, "command": list(NARROW), "state": "complete", "counts": True,
+            "failed": {"at": minute(1).isoformat(), "commit": "aaa", "uncommitted": False, "code": 101},
+            "passed": {"at": minute(2).isoformat(), "commit": "bbb", "uncommitted": False, "code": 0}, "did_not_fail": None})
+        self.assertEqual((report["controls"][1]["name"], report["controls"][1]["state"], report["controls"][1]["counts"], report["controls"][1]["did_not_fail"]["uncommitted"]),
+                         ("burst", "did not fail", False, True))
+        self.assertEqual(report["not_proof"], [{"test": "burst", "proof": "focus", "why": "the kernel throttles it away"}])
+        lines = "\n".join(asdlc.control_lines(report))
+        for says in ("focus", WITHOUT, "cargo test never_changes_focus", "failed at", "aaa", "passed at", "bbb", "burst is not offered as proof", "the kernel throttles it away"):
+            with self.subTest(says=says):
+                self.assertIn(says, lines)
+
+    def test_when_nothing_is_offered_the_reviewer_is_told_which_of_the_reasons_it_is(self) -> None:
+        second = asdlc.handed_over(asdlc.handed_over(COMPLETE, None), "this round changed no test")
+        for size, controls, reason, says in (
+            ("size-1", asdlc.handed_over(asdlc.Controls(), None), "size-1", "a size-1 task"),
+            ("size-2", asdlc.Controls(), "before-controls", "before controls were recorded"),
+            ("size-2", second, "no-control", "No control offered: this round changed no test"),
+            ("size-2", asdlc.handed_over(asdlc.Controls(), None), "none", "no control and no statement"),
+        ):
+            with self.subTest(reason=reason):
+                report = asdlc.control_report(size, controls)
+                self.assertEqual((report["nothing_offered"], report["controls"], report["not_proof"]), (reason, [], []))
+                self.assertIn(says, "\n".join(asdlc.control_lines(report)))
+        self.assertEqual((asdlc.control_report("size-2", second)["earlier_handovers"], asdlc.control_report("size-2", second)["no_control"]), (1, "this round changed no test"))
+        self.assertIsNone(asdlc.control_report("size-1", asdlc.handed_over(COMPLETE, None))["nothing_offered"], "a size-1 task may still offer one")
+
+    def test_mine_says_where_each_held_task_stands(self) -> None:
+        key = lambda controls: asdlc.controls_text(controls)  # noqa: E731
+        items = (
+            task("TASK-1", status="In Progress", assignees=("@kyle.w1",), labels=("size-1",)),
+            task("TASK-2", status="In Progress", assignees=("@kyle.w2",)),
+            task("TASK-3", status="In Progress", assignees=("@kyle.w3",), controls=key(recorded(("burst", "the throttle", WHOLE, ran(3)), FAILED)[0])),
+            task("TASK-4", status="In Progress", assignees=("@kyle.w4",), controls=key(COMPLETE)),
+            task("TASK-5", status="In Review", assignees=("@kyle.w5",), controls=key(asdlc.handed_over(asdlc.Controls(), "documentation only"))),
+            task("TASK-6", status="In Progress", assignees=("@kyle.w6",), controls="{broken"),
+            task("TASK-7", status="In Review", assignees=("@kyle.w7",)),
+        )
+        found = {r["id"]: r["control"] for r in asdlc.mine_report(items, "kyle", asdlc.Prefs("kyle", workers=9))["tasks"]}
+        self.assertEqual({k: v["state"] for k, v in found.items()},
+                         {"TASK-1": "not needed", "TASK-2": "missing", "TASK-3": "unresolved", "TASK-4": "ready", "TASK-5": "handed over",
+                          "TASK-6": "unreadable", "TASK-7": "handed over"})
+        self.assertEqual(found["TASK-3"]["unresolved"], ["burst", "focus"])
+        self.assertEqual((found["TASK-5"]["no_control"], found["TASK-5"]["controls"]), ("documentation only", 0))
+        self.assertEqual(found["TASK-7"]["nothing_offered"], "before-controls")
+        self.assertIn("asdlc_controls", found["TASK-6"]["why"])
+        for row in found.values():
+            self.assertTrue(row["why"])
+
+
+def handed(m: float, task_id: str, controls: object | None, **fields: object) -> object:
+    """A board commit that left the task In Review with these controls (None: no key at all)."""
+    extra = {} if controls is None else {"controls": asdlc.controls_text(controls)}
+    return commit(m, seen("tasks", task_id, status="In Review", assignees=("@ann.w1",), **extra, **fields))
+
+
+def verdict_on(m: float, task_id: str, controls: object | None, clean: bool, cannot_fail: str = "", **fields: object) -> tuple[object, object]:
+    """Two board commits: a reviewer claims the review, then records its verdict."""
+    extra = {} if controls is None else {"controls": asdlc.controls_text(controls)}
+    labels = (*fields.pop("labels", ("size-2",)), "review-passed" if clean else "changes-requested")
+    return (commit(m, seen("tasks", task_id, status="In Review", assignees=("@ann.w1",), reviewer="kyle.r1", **extra, **fields)),
+            commit(m + 1, seen("tasks", task_id, status="In Review" if clean else "In Progress", assignees=("@ann.w1",), labels=labels,
+                               review_findings="important=0,nit=0" if clean else "important=1,nit=0", cannot_fail=cannot_fail, **extra, **fields)))
+
+
+ONE = asdlc.handed_over(COMPLETE, None)  # a first hand-over with one complete control
+TWO = asdlc.handed_over(ONE, "this round changed no test")  # then a fix round with a no-control statement
+STATED = asdlc.handed_over(asdlc.with_not_proof(recorded(("burst", "the throttle", WHOLE, ran(3)), start=COMPLETE)[0], "burst", "focus", "throttled away"), None)
+CONTROL_HISTORY = (
+    handed(10, "TASK-1", ONE), *verdict_on(11, "TASK-1", ONE, False, "2"), handed(20, "TASK-1", TWO), *verdict_on(21, "TASK-1", TWO, True),
+    handed(30, "TASK-2", None), *verdict_on(31, "TASK-2", None, False),  # handed over before controls were recorded
+    handed(40, "TASK-2", asdlc.handed_over(asdlc.Controls(), None)),  # then under this release, with nothing offered
+    handed(50, "TASK-3", STATED), *verdict_on(51, "TASK-3", STATED, True, "0"),
+    handed(60, "TASK-4", asdlc.handed_over(asdlc.Controls(), None), labels=("size-1",)),  # size-1: not counted
+)
+
+
+class ControlNumbersTest(unittest.TestCase):
+    """R17 and R19: what stats reads of controls, per hand-over, from the key on each task and --cannot-fail on each verdict."""
+
+    def found(self, window: object = ALL) -> dict[str, object]:
+        return metrics(asdlc.test_stage(asdlc.replay(CONTROL_HISTORY), window))["controls"]
+
+    def test_cannot_fail_is_in_the_replay_and_left_out_it_is_not_saying(self) -> None:
+        verdicts = asdlc.replay(CONTROL_HISTORY).stories["TASK-1"].verdicts
+        self.assertEqual([v.cannot_fail for v in verdicts], [2, None])
+        self.assertEqual([v.cannot_fail for v in LEDGER.stories["TASK-2"].verdicts], [None, None], "verdicts recorded before the flag existed")
+
+    def test_each_hand_over_of_a_task_larger_than_size_1(self) -> None:
+        rows = self.found()["handovers"]
+        self.assertEqual([(r["task"], r["handover"], r["first"], r["recorded"], r["controls"], r["not_proof"], r["no_control"], r["cannot_fail"]) for r in rows], [
+            ("TASK-1", 1, True, True, 1, 0, None, 2),
+            ("TASK-1", 2, False, True, 0, 0, "this round changed no test", "did not say"),
+            ("TASK-2", 1, True, False, 0, 0, None, "did not say"),
+            ("TASK-2", 2, False, True, 0, 0, None, None),
+            ("TASK-3", 1, True, True, 1, 1, None, 0),
+        ])
+
+    def test_totals_as_shares_with_first_hand_overs_and_fix_rounds_apart(self) -> None:
+        found = self.found()
+        share = lambda group, key: (found[group][key]["count"], found[group][key]["of"])  # noqa: E731
+        self.assertEqual([share("all", k) for k in ("with_control", "no_control", "neither", "before")], [(2, 5), (1, 5), (1, 5), (1, 5)])
+        self.assertEqual([share("first", k) for k in ("with_control", "no_control", "neither", "before")], [(2, 3), (0, 3), (0, 3), (1, 3)],
+                         "R19: a hand-over made before controls were recorded is counted apart from one without a control")
+        self.assertEqual([share("fix_rounds", k) for k in ("with_control", "no_control", "neither", "before")], [(0, 2), (1, 2), (1, 2), (0, 2)])
+        self.assertEqual(found["not_proof"], 1)
+        self.assertEqual(found["cannot_fail"], {"tests": 2, "verdicts": 2, "did_not_say": 2})
+        self.assertEqual(found["no_control_statements"], [{"task": "TASK-1", "handover": 2, "why": "this round changed no test"}])
+        for says in ("2 of 5 (40%) hand-overs offered a complete control", "1 of 5 (20%) a no-control statement", "1 of 5 (20%) made before controls were recorded",
+                     "fix rounds alone: 0 of 2 (0%)", "1 not-proof statement", "2 test(s) that could not fail over 2 verdict(s) that said", "2 verdict(s) did not say"):
+            with self.subTest(says=says):
+                self.assertIn(says, found["text"])
+        self.assertEqual((found["play"], found["measured"]), ("07", True))
+
+    def test_since_leaves_out_earlier_hand_overs(self) -> None:
+        self.assertEqual([(r["task"], r["handover"]) for r in self.found(asdlc.Window(minute(35), minute(100)))["handovers"]], [("TASK-2", 2), ("TASK-3", 1)])
+
+    def test_a_board_with_no_controls_reads_as_before_them_and_never_as_an_error(self) -> None:
+        found = metrics(asdlc.test_stage(LEDGER, ALL))["controls"]
+        self.assertEqual((found["all"]["before"]["count"], found["all"]["before"]["of"], found["all"]["with_control"]["count"]), (2, 2, 0))
+
+    def test_an_unreadable_key_is_counted_and_said(self) -> None:
+        history = (commit(10, seen("tasks", "TASK-1", status="In Review", assignees=("@ann.w1",), controls="{broken")),)
+        found = metrics(asdlc.test_stage(asdlc.replay(history), ALL))["controls"]
+        self.assertEqual(found["unreadable"], ["TASK-1"])
+        self.assertIn("could not be read on TASK-1", found["text"])
+
+    def test_the_cache_round_trips_the_two_fields(self) -> None:
+        for found in CONTROL_HISTORY:
+            for change in found.changes:
+                self.assertEqual(asdlc.change_from_json(json.loads(json.dumps(asdlc.change_json(change)))), change)
+        self.assertEqual(asdlc.STATS_CACHE_VERSION, 2)
+        self.assertIn("controls,cannot_fail", asdlc.cache_key())
+
+    def test_a_verdict_carries_cannot_fail_or_says_nothing_of_it(self) -> None:
+        said = asdlc.ReviewRecord(1, 0, (), True, 2)
+        self.assertIn("Tests that could not fail: 2.", asdlc.review_comment("kyle.r1", "cross-machine", asdlc.ReviewVerdict.CHANGES, "x", said))
+        silent = asdlc.review_comment("kyle.r1", "cross-machine", asdlc.ReviewVerdict.CHANGES, "x", asdlc.ReviewRecord(1, 0, (), True))
+        self.assertNotIn("could not fail", silent)
+
+
+@needs_backlog
+class ControlCommandTest(unittest.TestCase):
+    """Controls through the commands, against real repositories and the backlog CLI: recorded by record-check, kept in the
+    key, handed to the reviewer, and shown by mine. Nothing is refused for want of one yet (plan/negative-control.md, change A)."""
+
+    TEST = "import sys, limiter\nsys.exit(0 if limiter.limit(11) else 'AssertionError: the eleventh failure is not limited')\n"
+    NARROWED = ("python3", "test_limiter.py")
+
+    def setUp(self) -> None:
+        self.team = Team(self, [_sized("Rate limit", "size-2", "--project", "acme-api"), _sized("Typo", "size-1", "--project", "acme-api")])
+        self.tree = Path(json.loads(self.team.ok("claim", "1", "--as", "ann.w1", "--json", engineer="ann").stdout)["worktree"])
+        self.team.ok("board", "task", "edit", "TASK-1", "--plan", "1. Limit it. Proof: test_limiter.py, failing without limiter.limit.", engineer="ann")
+        self.team.ok("approve", "TASK-1", engineer="ann")
+
+    def record(self, *words: str, task: str = "TASK-1", worker: str = "ann.w1", tree: Path | None = None) -> subprocess.CompletedProcess[str]:
+        return _asdlc("record-check", task, "--as", worker, *words, cwd=tree or self.tree, env=self.team.machine, engineer=asdlc.owner_of(worker))
+
+    def write(self, limit: str) -> None:
+        (self.tree / "limiter.py").write_text(f"def limit(failures):\n    return {limit}\n")
+        (self.tree / "test_limiter.py").write_text(self.TEST)
+
+    def controls(self, task_id: str = "TASK-1") -> object:
+        return asdlc.parse_controls(self.team.task(task_id).controls)
+
+    def control(self, name: str = "eleventh_is_limited") -> None:
+        """The cheap way: the test written first and recorded failing, then the code, then the same command passing."""
+        self.write("False")
+        failed = self.record("--control", name, "--without", "the comparison in limiter.limit", "--", *self.NARROWED)
+        self.assertEqual(failed.returncode, 1, failed.stderr)
+        self.write("failures > 10")
+        passed = self.record("--", *self.NARROWED)
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+
+    def finish(self, *extra: str, task: str = "TASK-1", worker: str = "ann.w1") -> subprocess.CompletedProcess[str]:
+        return self.team.run("finish", task, "--as", worker, "--notes", "Built.", *extra, engineer=asdlc.owner_of(worker))
+
+    def review(self, reviewer: str = "kyle.r1") -> dict[str, object]:
+        return json.loads(self.team.ok("review-next", "--as", reviewer, "--json", engineer=asdlc.owner_of(reviewer)).stdout)
+
+    def test_one_flag_without_the_other_is_refused_before_the_command_runs(self) -> None:
+        marker = self.team.boards.root / "ran"
+        for words, says in ((("--control", "focus"), "--without is missing"), (("--without", "the guard"), "--control is missing"),
+                            (("--control", "focus", "--without", ""), "--without is empty")):
+            with self.subTest(words=words):
+                done = self.record(*words, "--", "touch", str(marker))
+                self.assertEqual(done.returncode, 1)
+                self.assertIn(says, done.stderr)
+                self.assertIn("both", done.stderr)
+                self.assertFalse(marker.exists(), "R1: refused before the command runs")
+        self.assertEqual(self.controls(), asdlc.Controls())
+        self.assertNotIn("Check", self.team.text("TASK-1"))
+
+    def test_the_key_survives_backlogs_own_edits(self) -> None:
+        self.control()
+        self.write("False")
+        self.record("--control", "focus::never_changes_focus,[x]", "--without",
+                    "a long text: it's got 'quotes', \"double quotes\", `backticks`, [brackets], {braces}, commas, a # and a colon: " + "x" * 300,
+                    "--", *self.NARROWED)
+        before = self.controls()
+        self.assertEqual([str(asdlc.control_state(c)) for c in before.controls], ["complete", "awaiting its passing run"])
+        self.team.ok("board", "task", "edit", "TASK-1", "--append-notes", "A worker's note.", engineer="ann")
+        self.team.ok("board", "task", "edit", "TASK-1", "--add-label", "area-login", engineer="ann")
+        self.team.ok("board", "task", "edit", "TASK-1", "--plan", "1. Limit it. Proof: test_limiter.py, failing without limiter.limit.", engineer="ann")
+        self.assertEqual(self.controls(), before, "R7: Backlog's own edits keep the key as asdlc wrote it")
+        self.assertIn("area-login", self.team.task("TASK-1").labels)
+
+    def test_a_control_recorded_through_record_check_reaches_the_reviewer_and_no_other_does(self) -> None:
+        self.write("False")
+        failed = self.record("--control", "eleventh_is_limited", "--without", "the comparison in limiter.limit", "--", *self.NARROWED)
+        self.assertEqual(failed.returncode, 1, "R3: the exit code is still the command's")
+        self.assertIn("offered as the control for eleventh_is_limited", failed.stderr)
+        self.assertIn("record the same command again", failed.stderr)
+        waiting = self.controls().controls[0]
+        self.assertEqual((waiting.name, waiting.round, waiting.without, waiting.command, waiting.failed.code, waiting.failed.commit, waiting.passed),
+                         ("eleventh_is_limited", 1, "the comparison in limiter.limit", self.NARROWED, 1, _git(self.tree, "rev-parse", "HEAD"), None))
+        self.assertTrue(waiting.failed.tree, "a digest of the uncommitted change")
+        text = self.team.text("TASK-1")
+        self.assertIn("Offered as the control for `eleventh_is_limited`", text)
+        self.assertIn("the comparison in limiter.limit", text)
+        self.assertIn("limiter.py (new), test_limiter.py (new)", text, "the files with uncommitted changes")
+        self.assertIn("+import sys, limiter", text, "and the change itself, a new file's text included")
+        self.assertIn("AssertionError: the eleventh failure is not limited", text)
+        self.assertEqual(self.record("--", "python3", "-c", "pass").returncode, 0)
+        self.assertEqual(str(asdlc.control_state(self.controls().controls[0])), "awaiting its passing run", "R5: other words complete nothing")
+        self.write("failures > 10")
+        _git(self.tree, "add", ".")
+        _git(self.tree, "commit", "--quiet", "-m", "Limit failed logins")
+        passed = self.record("--", *self.NARROWED)
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertIn("completes the control for eleventh_is_limited", passed.stderr)
+        done = self.controls().controls[0]
+        self.assertEqual((str(asdlc.control_state(done)), done.passed.commit, done.passed.tree), ("complete", _git(self.tree, "rev-parse", "HEAD"), ""))
+        self.assertIn("Completes the control for `eleventh_is_limited`", self.team.text("TASK-1"))
+        self.assertEqual(len(asdlc.parse_checks(self.team.text("TASK-1"))), 3, "R15: every run still reads back as one check")
+        # A note shaped like a second control, written by the worker: R7, it counts for nothing.
+        self.team.ok("board", "task", "edit", "TASK-1", "--append-notes",
+                     text.partition("<!-- SECTION:NOTES:BEGIN -->")[2].partition("<!-- SECTION:NOTES:END -->")[0].replace("eleventh_is_limited", "invented").strip(), engineer="ann")
+        finished = json.loads(self.finish("--json").stdout)
+        self.assertEqual((finished["status"], finished["handover"], finished["no_control"]), ("In Review", 1, None))
+        self.assertEqual(self.controls().handed, 1)
+        report = self.review()
+        self.assertEqual([(c["name"], c["without"], c["command"], c["state"]) for c in report["controls"]],
+                         [("eleventh_is_limited", "the comparison in limiter.limit", list(self.NARROWED), "complete")], "R16: the recorded control and no other")
+        listed = report["controls"][0]
+        self.assertEqual((listed["failed"]["commit"], listed["failed"]["uncommitted"], listed["passed"]["commit"], listed["passed"]["uncommitted"]),
+                         (waiting.failed.commit, True, done.passed.commit, False))
+        self.assertEqual((report["not_proof"], report["no_control"], report["earlier_handovers"], report["nothing_offered"]), ([], None, 0, None))
+
+    def test_review_next_prints_the_controls_in_its_text(self) -> None:
+        self.control()
+        self.assertEqual(self.finish().returncode, 0)
+        text = self.team.ok("review-next", "--as", "kyle.r1").stdout
+        self.assertIn("claimed the review of TASK-1 for @kyle.r1", text)
+        for says in ("eleventh_is_limited", "the comparison in limiter.limit", "python3 test_limiter.py", "failed at", "passed at", "with uncommitted changes"):
+            with self.subTest(says=says):
+                self.assertIn(says, text)
+
+    def test_a_control_that_does_not_fail_is_unresolved_and_a_pass_on_the_same_tree_completes_nothing(self) -> None:
+        self.write("True")
+        passed = self.record("--control", "eleventh_is_limited", "--without", "the comparison in limiter.limit", "--", *self.NARROWED)
+        self.assertEqual(passed.returncode, 0, "R4: the exit code is still the command's")
+        self.assertIn("did NOT fail", passed.stderr)
+        self.assertIn("passed without the mechanism", passed.stderr)
+        self.assertIn("did NOT fail", self.team.text("TASK-1"))
+        self.assertEqual([c.name for c in asdlc.unresolved(self.controls(), 1)], ["eleventh_is_limited"])
+        flaky = self.team.boards.root / "flaky"
+        command = ("sh", "-c", f"test -e {flaky} || {{ touch {flaky}; exit 1; }}")
+        self.assertEqual(self.record("--control", "flaky", "--without", "nothing: it fails once", "--", *command).returncode, 1)
+        again = self.record("--", *command)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("nothing differed between", again.stderr)
+        self.assertEqual([str(asdlc.control_state(c)) for c in self.controls().controls], ["did not fail", "awaiting its passing run"],
+                         "R5: a pass on the same commit with the same uncommitted changes completes nothing")
+        mine = json.loads(self.team.ok("mine", "--as", "ann", "--json", engineer="ann").stdout)["tasks"][0]["control"]
+        self.assertEqual((mine["state"], mine["unresolved"]), ("unresolved", ["eleventh_is_limited", "flaky"]))
+        self.assertEqual(self.finish().returncode, 0, "change A refuses nothing for want of a control")
+        report = self.review()
+        self.assertEqual([(c["name"], c["state"]) for c in report["controls"]], [("eleventh_is_limited", "did not fail"), ("flaky", "awaiting its passing run")])
+
+    def test_not_proof_is_the_holders_names_a_complete_control_and_resolves_an_unresolved_one(self) -> None:
+        stated = ("--test", "survives_a_burst", "--proof", "eleventh_is_limited", "--why", "the kernel throttles the burst away")
+        early = self.team.run("not-proof", "TASK-1", "--as", "ann.w1", *stated, engineer="ann")
+        self.assertEqual(early.returncode, 1)
+        self.assertIn("eleventh_is_limited is not a complete control", early.stderr)
+        self.control()
+        self.assertEqual(self.record("--control", "survives_a_burst", "--without", "the throttle", "--", "true").returncode, 0)
+        self.assertEqual([c.name for c in asdlc.unresolved(self.controls(), 1)], ["survives_a_burst"])
+        other = self.team.run("not-proof", "TASK-1", "--as", "ann.w2", *stated, engineer="ann")
+        self.assertEqual(other.returncode, 1)
+        self.assertIn("held by @ann.w1, not @ann.w2", other.stderr)
+        self.assertEqual(self.controls().not_proof, (), "a refused statement changes nothing")
+        done = self.team.ok("not-proof", "TASK-1", "--as", "ann.w1", *stated, engineer="ann")
+        self.assertIn("survives_a_burst is kept and not offered as proof", done.stdout)
+        self.assertEqual(asdlc.unresolved(self.controls(), 1), ())
+        self.assertEqual([(s.test, s.proof, s.why, s.round) for s in self.controls().not_proof],
+                         [("survives_a_burst", "eleventh_is_limited", "the kernel throttles the burst away", 1)])
+        self.assertIn("Not offered as proof: `survives_a_burst`", self.team.text("TASK-1"))
+        self.assertIn("the kernel throttles the burst away", self.team.text("TASK-1"))
+        self.assertEqual(json.loads(self.team.ok("mine", "--as", "ann", "--json", engineer="ann").stdout)["tasks"][0]["control"]["state"], "ready")
+        self.assertEqual(self.finish().returncode, 0)
+        report = self.review()
+        self.assertEqual(report["not_proof"], [{"test": "survives_a_burst", "proof": "eleventh_is_limited", "why": "the kernel throttles the burst away"}])
+        late = self.team.run("not-proof", "TASK-1", "--as", "ann.w1", *stated, engineer="ann")
+        self.assertEqual(late.returncode, 1)
+        self.assertIn("TASK-1 is In Review, not In Progress", late.stderr)
+
+    def test_finish_with_a_no_control_statement(self) -> None:
+        empty = self.finish("--no-control", "  ")
+        self.assertEqual(empty.returncode, 1)
+        self.assertIn("--no-control is empty", empty.stderr)
+        self.assertEqual(self.team.task("TASK-1").status, "In Progress")
+        done = self.finish("--no-control", "documentation only: the README's limits table")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("TASK-1 is In Review", done.stdout)
+        self.assertIn("No control offered: documentation only: the README's limits table", done.stdout)
+        self.assertRegex(self.team.text("TASK-1"), r"(?m)^No control offered: documentation only: the README's limits table$")
+        kept = self.controls()
+        self.assertEqual((kept.handed, [(s.round, s.why) for s in kept.no_control]), (1, [(1, "documentation only: the README's limits table")]))
+        report = self.review()
+        self.assertEqual((report["no_control"], report["nothing_offered"], report["controls"]), ("documentation only: the README's limits table", "no-control", []))
+
+    def test_a_no_control_statement_beside_a_complete_control_is_refused(self) -> None:
+        self.control()
+        done = self.finish("--no-control", "documentation only")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("already has a complete control (eleventh_is_limited)", done.stderr)
+        self.assertEqual((self.team.task("TASK-1").status, self.controls().handed), ("In Progress", 0))
+        self.assertNotIn("No control offered", self.team.text("TASK-1"))
+
+    def test_after_a_review_asks_for_changes_the_first_hand_overs_control_is_not_in_the_next(self) -> None:
+        self.control()
+        self.assertEqual(self.finish().returncode, 0)
+        self.review()
+        changes = json.loads(self.team.ok("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "changes", *CHANGES, "--cannot-fail", "2", "--json",
+                                          "--notes", "[Bugs, Important] two tests pass with the comparison removed").stdout)
+        self.assertEqual(changes["cannot_fail"], 2)
+        self.assertEqual(self.team.task("TASK-1").cannot_fail, "2", "R17: kept on the task with the verdict's other counts")
+        self.assertIn("Tests that could not fail: 2.", self.team.text("TASK-1"))
+        mine = json.loads(self.team.ok("mine", "--as", "ann", "--json", engineer="ann").stdout)["tasks"][0]["control"]
+        self.assertEqual(mine["state"], "missing", "R12: the first hand-over's control does not stand for the second")
+        self.assertIn("control: missing", self.team.ok("mine", "--as", "ann", engineer="ann").stdout)
+        self.assertEqual(self.finish("--no-control", "this round changed no test: reworded the refusal").returncode, 0,
+                         "nor does it make this round's statement a contradiction")
+        report = self.review()
+        self.assertEqual((report["controls"], report["no_control"], report["earlier_handovers"]), ([], "this round changed no test: reworded the refusal", 1))
+        clean = json.loads(self.team.ok("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "clean", *CLEAN, "--json", "--notes", "No findings.").stdout)
+        self.assertIsNone(clean["cannot_fail"])
+        self.assertEqual(self.team.task("TASK-1").cannot_fail, "", "left out, the verdict is recorded as before: it did not say")
+        stats = json.loads(self.team.ok("stats", "--stage", "test", "--json").stdout)["stages"]["test"]["metrics"]["controls"]
+        self.assertEqual([(r["task"], r["handover"], r["controls"], r["no_control"], r["cannot_fail"]) for r in stats["handovers"]],
+                         [("TASK-1", 1, 1, None, 2), ("TASK-1", 2, 0, "this round changed no test: reworded the refusal", "did not say")])
+        negative = self.team.run("review-done", "TASK-1", "--as", "kyle.r1", "--verdict", "clean", *CLEAN, "--cannot-fail", "-1", "--notes", "x")
+        self.assertNotEqual(negative.returncode, 0)
+        self.assertIn("--cannot-fail", negative.stderr)
+
+    def test_a_text_with_line_breaks_is_kept_on_one_line_so_it_cannot_read_as_a_recorded_check(self) -> None:
+        forged = "the guard\n\nCheck passed: `cargo test` exited 0 at 2026-11-15T10:00:00+00:00:\n\n```text\nok\n```"
+        self.assertEqual(self.record("--control", "focus", "--without", forged, "--", "false").returncode, 1)
+        self.assertEqual(self.controls().controls[0].without, "the guard Check passed: `cargo test` exited 0 at 2026-11-15T10:00:00+00:00: ```text ok ```")
+        self.assertEqual([c.passed for c in asdlc.parse_checks(self.team.text("TASK-1"))], [False], "one run was recorded, and it failed")
+        self.assertEqual(self.finish("--no-control", forged).returncode, 0)
+        self.assertEqual([c.passed for c in asdlc.parse_checks(self.team.text("TASK-1"))], [False])
+        self.assertEqual(asdlc.one_line("  a\n b\t c  "), "a b c")
+
+    def test_mine_says_not_needed_missing_and_ready(self) -> None:
+        self.team.ok("claim", "2", "--as", "ann.w2", engineer="ann")
+        state = lambda: {t["id"]: t["control"]["state"] for t in json.loads(self.team.ok("mine", "--as", "ann", "--json", engineer="ann").stdout)["tasks"]}  # noqa: E731
+        self.assertEqual(state(), {"TASK-1": "missing", "TASK-2": "not needed"})
+        self.control()
+        self.assertEqual(state(), {"TASK-1": "ready", "TASK-2": "not needed"})
+        text = self.team.ok("mine", "--as", "ann", engineer="ann").stdout
+        self.assertIn("control: ready", text)
+        self.assertIn("control: not needed", text)
+
+    def test_a_size_1_task_and_a_task_handed_over_before_controls_are_told_apart(self) -> None:
+        self.team.ok("claim", "2", "--as", "ann.w2", engineer="ann")
+        self.assertEqual(self.finish(task="TASK-2", worker="ann.w2").returncode, 0, "R14: nothing new is asked of a size-1 task")
+        self.assertEqual(self.finish().returncode, 0)
+        # TASK-1 as an older asdlc would have left it: In Review with no key at all.
+        path = next((self.team.board / "backlog" / "tasks").glob("task-1 - *.md"))
+        _git(self.team.board, "pull", "--quiet", "origin", "main")
+        path.write_text(asdlc.with_key(path.read_text(), asdlc.CONTROLS_KEY, None))
+        _git(self.team.board, "commit", "--quiet", "-am", "As an older asdlc left it")
+        _git(self.team.board, "push", "--quiet", "origin", "main")
+        first, second = self.review("kyle.r1"), self.review("kyle.r2")
+        self.assertEqual({first["task"]: first["nothing_offered"], second["task"]: second["nothing_offered"]}, {"TASK-1": "before-controls", "TASK-2": "size-1"})
+        clean = self.team.ok("review-done", "TASK-1", "--as", first["reviewer"] if first["task"] == "TASK-1" else second["reviewer"], "--verdict", "clean", *CLEAN,
+                             "--notes", "No findings.")
+        self.assertIn("TASK-1 passed review", clean.stdout)
+        left = self.team.task("TASK-1")
+        self.assertEqual((left.status, left.controls, left.cannot_fail, "review-passed" in left.labels), ("In Review", "", "", True),
+                         "R15, a regression test and not offered as proof: a task In Review with no key is reviewed and left where it is")
+
+    def test_an_unreadable_key_is_refused_with_how_to_clear_it_and_never_silently(self) -> None:
+        path = next((self.team.board / "backlog" / "tasks").glob("task-1 - *.md"))
+        _git(self.team.board, "pull", "--quiet", "origin", "main")
+        path.write_text(asdlc.with_key(path.read_text(), asdlc.CONTROLS_KEY, "'{broken'"))
+        _git(self.team.board, "commit", "--quiet", "-am", "A hand edit")
+        _git(self.team.board, "push", "--quiet", "origin", "main")
+        marker = self.team.boards.root / "ran"
+        for done in (self.record("--", "touch", str(marker)), self.finish(), self.team.run("not-proof", "TASK-1", "--as", "ann.w1", "--test", "a", "--proof", "b", "--why", "c", engineer="ann")):
+            self.assertEqual(done.returncode, 1)
+            self.assertIn("asdlc_controls on TASK-1 cannot be read", done.stderr)
+        self.assertFalse(marker.exists())
+        self.assertEqual(json.loads(self.team.ok("mine", "--as", "ann", "--json", engineer="ann").stdout)["tasks"][0]["control"]["state"], "unreadable")

@@ -24,11 +24,12 @@ Usage:
   asdlc [--board <path>] accept <intent-id> [--json]         (a person's command)
   asdlc [--board <path>] approve <id>...                     (a person's command)
   asdlc [--board <path>] mine --as <engineer> [--json]
-  asdlc [--board <path>] record-check <id> --as <worker> -- <command...>   (in the task's worktree)
-  asdlc [--board <path>] finish <id> --as <worker> [--branch <b>] [--pr <url>] --notes <text> [--json]
+  asdlc [--board <path>] record-check <id> --as <worker> [--control <name> --without <text>] -- <command...>   (in the task's worktree)
+  asdlc [--board <path>] not-proof <id> --as <worker> --test <name> --proof <control> --why <text> [--json]
+  asdlc [--board <path>] finish <id> --as <worker> [--branch <b>] [--pr <url>] --notes <text> [--no-control <why>] [--json]
   asdlc [--board <path>] review-next --as <reviewer> [--fallback] [--json]
   asdlc [--board <path>] review-done <id> --as <reviewer> --verdict clean|changes --findings important=<n>,nit=<n>
-        [--policy <name>]... --plan-matched yes|no --notes <text> [--json]
+        [--policy <name>]... --plan-matched yes|no [--cannot-fail <n>] --notes <text> [--json]
   asdlc [--board <path>] intent-started <draft-id> [--at <time>]
   asdlc [--board <path>] doctor [--json]
   asdlc install-command [--to <folder>] [--json]
@@ -110,12 +111,16 @@ INTENT_STARTED_KEY = "asdlc_intent_started"  # when the conversation that became
 FINDINGS_KEY = "asdlc_review_findings"  # the last verdict's counts, important=N,nit=M, from asdlc review-done
 POLICIES_KEY = "asdlc_review_policies"  # the policies or rules the last verdict's findings cite
 PLAN_MATCHED_KEY = "asdlc_plan_matched"  # yes or no: whether the last reviewed diff still matched the plan
+CONTROLS_KEY = "asdlc_controls"  # the task's controls and statements, as JSON; written only by record-check, not-proof and finish
+CANNOT_FAIL_KEY = "asdlc_review_cannot_fail"  # the last verdict's count of tests offered as proof that pass without their mechanism
 PENDING = "asdlc-transaction.json"  # in the board clone's git folder while a change is being made
 _REVIEWER_LABEL = re.compile(r"^r\d+$")
 DRAFTS = "backlog/drafts/"
 DEFAULT_WORKERS = 3
 DEFAULT_REVIEW_FALLBACK_AFTER = timedelta(0)  # the one orchestrator reviews its own engineer's work at once, with a reviewer it launches
 CHECK_TAIL_LINES = 40
+CONTROL_PATCH_LINES = 40  # how much of the uncommitted change a control's note shows
+NEW_FILES_SHOWN = 10  # how many untracked files' contents are read for it; the rest are named
 
 
 # --- the logic: data in, data out ------------------------------------------------------
@@ -184,6 +189,8 @@ class Task:
     review_findings: str = ""  # from FINDINGS_KEY
     review_policies: tuple[str, ...] = ()  # from POLICIES_KEY
     plan_matched: str = ""  # from PLAN_MATCHED_KEY
+    controls: str = ""  # from CONTROLS_KEY, as written; parse_controls reads it
+    cannot_fail: str = ""  # from CANNOT_FAIL_KEY
 
 
 def is_draft(task: Task) -> bool:
@@ -325,6 +332,8 @@ def task_from(path: str, text: str) -> Task | None:
         review_findings=text_field(FINDINGS_KEY),
         review_policies=_as_tuple(fields.get(POLICIES_KEY)),
         plan_matched=text_field(PLAN_MATCHED_KEY).lower(),
+        controls=text_field(CONTROLS_KEY),
+        cannot_fail=text_field(CANNOT_FAIL_KEY),
     )
 
 
@@ -527,6 +536,343 @@ def finish_edit(task: Task, branch: str, pull: str | None, notes: str) -> list[s
     refs = [r for r in dict.fromkeys((branch, pull or "")) if r and r not in task.references]
     edit = ["task", "edit", task.id, "-s", IN_REVIEW, *[word for ref in refs for word in ("--add-ref", ref)], "--append-notes", notes.strip()]
     return edit + (["--remove-label", CHANGES_REQUESTED] if CHANGES_REQUESTED in task.labels else [])
+
+
+# --- controls: a test recorded failing without the mechanism it proves ----------------------
+#
+# A control is a named pair of recorded runs on one task: the run a worker marked with --control, which must
+# fail, and the same command recorded passing afterwards on a different tree. Controls, not-proof statements
+# and no-control statements are kept in one frontmatter key that only asdlc writes; nothing here reads a
+# task's notes (spec/negative-control.md R7). A hand-over is one successful asdlc finish, counted from 1:
+# what a worker records while it holds the task belongs to hand-over `handed + 1`.
+
+_CONTROL_NAME = re.compile(r"^[^\s'\"`]+$")
+
+
+@dataclass(frozen=True)
+class Run:
+    """One recorded run of a control's command: when, the commit it ran on, a digest of the uncommitted
+    change ("" for a clean worktree), and its exit code."""
+
+    at: str
+    commit: str
+    tree: str
+    code: int
+
+
+@dataclass(frozen=True)
+class Control:
+    name: str  # what is being proven, usually the test's own name
+    round: int  # the hand-over it is offered in
+    without: str  # what was removed, disabled or not yet written for the marked run
+    command: tuple[str, ...]
+    failed: Run | None = None  # the marked run, when it exited non-zero
+    passed: Run | None = None  # the same command exiting zero afterwards on a different tree
+    did_not_fail: Run | None = None  # the marked run, when it exited zero
+
+
+@dataclass(frozen=True)
+class NotProof:
+    """A test that is kept but not offered as proof, and the control that is the proof instead (R8)."""
+
+    test: str
+    proof: str
+    why: str
+    round: int
+
+
+@dataclass(frozen=True)
+class NoControl:
+    """A hand-over's statement that it has nothing to control for (R11)."""
+
+    round: int
+    why: str
+
+
+@dataclass(frozen=True)
+class Controls:
+    """What CONTROLS_KEY holds. A task without the key reads as this with nothing in it, never as an error (R15)."""
+
+    handed: int = 0  # the hand-overs made so far
+    controls: tuple[Control, ...] = ()
+    not_proof: tuple[NotProof, ...] = ()
+    no_control: tuple[NoControl, ...] = ()
+
+
+class ControlState(StrEnum):
+    COMPLETE = "complete"
+    AWAITING = "awaiting its passing run"
+    DID_NOT_FAIL = "did not fail"
+
+
+def _run_from(raw: object) -> Run | None:
+    return None if raw is None else Run(str(raw["at"]), str(raw["commit"]), str(raw["tree"]), int(raw["code"]))
+
+
+def parse_controls(text: str, where: str = "the task") -> Controls:
+    """The controls kept on a task, from CONTROLS_KEY's value; nothing when the task has no such key.
+
+    Raises:
+        AsdlcError: the value is not what asdlc writes, so someone edited it by hand.
+    """
+    if not text.strip():
+        return Controls()
+    try:
+        raw = json.loads(text)
+        if not isinstance(raw, dict) or not isinstance(raw.get("handed", 0), int):
+            raise ValueError("it is not an object with a number of hand-overs")
+        return Controls(
+            handed=raw.get("handed", 0),
+            controls=tuple(Control(str(c["name"]), int(c["round"]), str(c["without"]), tuple(str(word) for word in c["command"]),
+                                   _run_from(c.get("failed")), _run_from(c.get("passed")), _run_from(c.get("did_not_fail")))
+                           for c in raw.get("controls", ())),
+            not_proof=tuple(NotProof(str(s["test"]), str(s["proof"]), str(s["why"]), int(s["round"])) for s in raw.get("not_proof", ())),
+            no_control=tuple(NoControl(int(s["round"]), str(s["why"])) for s in raw.get("no_control", ())),
+        )
+    except (ValueError, KeyError, TypeError, AttributeError) as error:
+        raise AsdlcError(f"{CONTROLS_KEY} on {where} cannot be read ({type(error).__name__}: {error}), so its controls are unknown and nothing was changed. "
+                         f"Only asdlc writes that key, so it was edited by hand: a person removes the {CONTROLS_KEY} line from the task's file in the "
+                         "tasks clone, commits and pushes, and the worker records this hand-over's controls again") from None
+
+
+def controls_text(controls: Controls) -> str:
+    """CONTROLS_KEY's value: one line of JSON."""
+    return json.dumps(asdict(controls))
+
+
+def control_state(control: Control) -> ControlState:
+    if control.did_not_fail is not None:
+        return ControlState.DID_NOT_FAIL
+    return ControlState.COMPLETE if control.passed is not None else ControlState.AWAITING
+
+
+def _stated(controls: Controls, round: int) -> frozenset[str]:
+    """The tests that hand-over's not-proof statements name."""
+    return frozenset(s.test for s in controls.not_proof if s.round == round)
+
+
+def unresolved(controls: Controls, round: int) -> tuple[Control, ...]:
+    """That hand-over's controls that did not fail, or failed and have no passing run, and that no not-proof statement resolves (R10)."""
+    stated = _stated(controls, round)
+    return tuple(c for c in controls.controls if c.round == round and control_state(c) is not ControlState.COMPLETE and c.name not in stated)
+
+
+def counting(controls: Controls, round: int) -> tuple[Control, ...]:
+    """That hand-over's complete controls that no not-proof statement names as its test: what the floor counts (R9)."""
+    stated = _stated(controls, round)
+    return tuple(c for c in controls.controls if c.round == round and control_state(c) is ControlState.COMPLETE and c.name not in stated)
+
+
+def one_line(text: str) -> str:
+    """A flag's free text on one line. It goes into a task's notes, where a line break could start a line that reads as a recorded check."""
+    return " ".join(text.split())
+
+
+def control_flags_refusal(control: str | None, without: str | None) -> str | None:
+    """Why record-check can't take these --control and --without values, or None: they come as a pair (R1)."""
+    if control is None and without is None:
+        return None
+    if control is None:
+        wrong = "--control is missing"
+    elif without is None:
+        wrong = "--without is missing"
+    elif not _CONTROL_NAME.match(control):
+        wrong = f"--control '{control}' must be one word with no spaces or quote characters, usually the test's own name"
+    elif not without.strip():
+        wrong = "--without is empty"
+    else:
+        return None
+    return (f"{wrong}. A control is a run of one test without the mechanism it proves, which must fail: --control names what is being proven and "
+            "--without says what was removed, disabled or not yet written for this run, so both are asked for. The check was not run")
+
+
+def with_run(controls: Controls, name: str | None, without: str, command: Sequence[str], run: Run) -> tuple[Controls, str]:
+    """What one recorded run does to the task's controls, and the sentence record-check prints ("" for nothing).
+
+    A run marked with `name` starts that control afresh in this hand-over (R6): failing, it is the control's failing
+    run (R3); passing, the control did not fail (R4). A run that was not marked never starts one (R2); passing, it
+    completes each control awaiting the same words on a different tree (R5).
+    """
+    words, shown, this = tuple(command), shlex.join(command), controls.handed + 1
+    if name is not None:
+        kept = tuple(c for c in controls.controls if not (c.round == this and c.name == name))
+        if run.code != 0:
+            started = Control(name, this, without, words, failed=run)
+            says = (f"offered as the control for {name}: it failed (exit {run.code}) without {without}. To complete it, restore the mechanism and "
+                    f"record the same command again, passing, with no --control: {shown}")
+        else:
+            started = Control(name, this, without, words, did_not_fail=run)
+            says = (f"the control for {name} did NOT fail: `{shown}` passed without the mechanism ({without}), so either the wrong thing was removed or "
+                    f"the test cannot prove it. The control is unresolved. Fix the test, or what you removed, and record it again with --control {name} "
+                    "until it fails; or, when the test cannot be made to fail at all, keep it and say so: asdlc not-proof <task> --as <worker> "
+                    f"--test {name} --proof <a complete control> --why \"<why>\"")
+        return replace(controls, controls=(*kept, started)), says
+    if run.code != 0:
+        return controls, ""
+    said: list[str] = []
+    after: list[Control] = []
+    for control in controls.controls:
+        if control.round == this and control_state(control) is ControlState.AWAITING and control.failed is not None:
+            if control.command != words:
+                said.append(f"the control for {control.name} is still awaiting its passing run: it failed as `{shlex.join(control.command)}` and this run "
+                            f"was `{shown}`. Only the same words in the same order complete it, so narrow both runs to the one test")
+            elif (control.failed.commit, control.failed.tree) == (run.commit, run.tree):
+                said.append(f"this run completes nothing: nothing differed between it and the failing run of the control for {control.name} (the same "
+                            f"commit, {run.commit[:12]}, and the same uncommitted changes), so nothing was removed between them. Restore the mechanism, "
+                            "then record the same command again")
+            else:
+                control = replace(control, passed=run)
+                said.append(f"this run completes the control for {control.name}: `{shown}` failed without {control.without} and passes now")
+        after.append(control)
+    return replace(controls, controls=tuple(after)), "\n".join(said)
+
+
+def not_proof_refusal(controls: Controls, test: str, proof: str, why: str) -> str | None:
+    """Why this not-proof statement can't be recorded, or None: it names a complete control of this hand-over, other than the test, as the proof (R8)."""
+    this = controls.handed + 1
+    if not _CONTROL_NAME.match(test):
+        return f"--test '{test}' must be one word with no spaces or quote characters, the test's own name"
+    if not why.strip():
+        return "--why is empty: say why the test cannot be made to fail without the mechanism"
+    if proof == test:
+        return f"--proof must name a complete control other than {test}: a test that is not the proof cannot be its own proof"
+    if not any(c.name == proof and c.round == this and control_state(c) is ControlState.COMPLETE for c in controls.controls):
+        return (f"{proof} is not a complete control in this hand-over, and a not-proof statement names the control that is the proof instead. Record that "
+                f"control first: asdlc record-check <task> --as <worker> --control {proof} --without \"<what was removed>\" -- <command>, failing, then "
+                "the same command passing")
+    return None
+
+
+def with_not_proof(controls: Controls, test: str, proof: str, why: str) -> Controls:
+    """The controls with this hand-over's not-proof statement for `test`, replacing an earlier one for the same test."""
+    this = controls.handed + 1
+    kept = tuple(s for s in controls.not_proof if not (s.round == this and s.test == test))
+    return replace(controls, not_proof=(*kept, NotProof(test, proof, why.strip(), this)))
+
+
+def not_proof_note(test: str, proof: str, why: str) -> str:
+    return (f"Not offered as proof: `{test}` is kept and is not offered as proof of this change. The proof is the control `{proof}`. "
+            f"Why it cannot be made to fail without the mechanism: {why.strip()}")
+
+
+NO_CONTROL_NOTE = "No control offered:"
+
+
+def no_control_refusal(controls: Controls, why: str) -> str | None:
+    """Why this hand-over can't carry a no-control statement, or None (R11)."""
+    if not why.strip():
+        return ("--no-control is empty: say why this hand-over has nothing to control for (documentation only, a pure rename, a move with no "
+                "behaviour change, a round that changed no test, or a proof no command can show)")
+    if offered := counting(controls, controls.handed + 1):
+        return (f"this hand-over already has a complete control ({', '.join(c.name for c in offered)}), so there is nothing to state: "
+                "finish without --no-control")
+    return None
+
+
+def handed_over(controls: Controls, no_control: str | None) -> Controls:
+    """The controls after one more hand-over, with its no-control statement when it gave one. What was recorded for it stays, under its round (R12)."""
+    this = controls.handed + 1
+    stated = controls.no_control if no_control is None else (*controls.no_control, NoControl(this, no_control.strip()))
+    return replace(controls, handed=this, no_control=stated)
+
+
+def handover_state(size: str, controls: Controls) -> tuple[str, tuple[str, ...]]:
+    """Where the hand-over being prepared stands with the floor of one control (R18): not needed (size-1), unresolved
+    (with the controls' names), ready, or missing."""
+    if size == "size-1":
+        return "not needed", ()
+    this = controls.handed + 1
+    if stuck := unresolved(controls, this):
+        return "unresolved", tuple(c.name for c in stuck)
+    return ("ready" if counting(controls, this) else "missing"), ()
+
+
+def _run_report(run: Run | None) -> dict[str, object] | None:
+    return None if run is None else {"at": run.at, "commit": run.commit, "uncommitted": bool(run.tree), "code": run.code}
+
+
+def control_report(size: str, controls: Controls) -> dict[str, object]:
+    """What the hand-over last made offers, for its reviewer (R16): each control with its two runs, each not-proof
+    statement, the no-control statement, the number of earlier hand-overs and, when there is nothing, which reason that is."""
+    made = controls.handed
+    stated = _stated(controls, made)
+    listed = [{"name": c.name, "without": c.without, "command": list(c.command), "state": str(control_state(c)),
+               "counts": control_state(c) is ControlState.COMPLETE and c.name not in stated,
+               "failed": _run_report(c.failed), "passed": _run_report(c.passed), "did_not_fail": _run_report(c.did_not_fail)}
+              for c in controls.controls if c.round == made]
+    statements = [{"test": s.test, "proof": s.proof, "why": s.why} for s in controls.not_proof if s.round == made]
+    no_control = next((s.why for s in controls.no_control if s.round == made), None)
+    if listed or statements:
+        nothing = None
+    elif no_control is not None:
+        nothing = "no-control"
+    elif size == "size-1":
+        nothing = "size-1"
+    elif not made:
+        nothing = "before-controls"
+    else:
+        nothing = "none"
+    return {"controls": listed, "not_proof": statements, "no_control": no_control, "earlier_handovers": max(made - 1, 0), "nothing_offered": nothing}
+
+
+NOTHING_OFFERED = frozendict({
+    "size-1": "no control: a size-1 task, which is not asked for one",
+    "before-controls": "no control: it was handed over before controls were recorded",
+    "none": "no control and no statement: asdlc finish does not ask for one yet",
+    "unreadable": f"no control could be read: {CONTROLS_KEY} on the task was edited by hand",
+})
+
+
+def control_lines(report: Mapping[str, object]) -> list[str]:
+    """control_report as text, for asdlc review-next."""
+    lines: list[str] = []
+    for control in report["controls"]:
+        named = "" if control["counts"] or control["state"] != ControlState.COMPLETE else ", named by a not-proof statement"
+        lines.append(f"control {control['name']} ({control['state']}{named}): without {control['without']}; `{shlex.join(control['command'])}`")
+        for label in ("failed", "passed", "did_not_fail"):
+            if run := control[label]:
+                lines.append(f"  {label.replace('_', ' ')} at {run['at']} on {run['commit'][:12]}{' with uncommitted changes' if run['uncommitted'] else ''} "
+                             f"(exit {run['code']})")
+    lines += [f"{s['test']} is not offered as proof; the proof is the control {s['proof']}: {s['why']}" for s in report["not_proof"]]
+    if report["no_control"] is not None:
+        lines.append(f"{NO_CONTROL_NOTE} {report['no_control']}")
+    elif report["nothing_offered"]:
+        lines.append(NOTHING_OFFERED[str(report["nothing_offered"])])
+    return [*lines, f"earlier hand-overs: {report['earlier_handovers']}"]
+
+
+def control_standing(task: Task) -> dict[str, object]:
+    """Where a held task stands with the floor of one control, for asdlc mine (R18): its state and why. A task In Review
+    says what its hand-over offered. asdlc finish refuses nothing for want of a control yet."""
+    try:
+        controls = parse_controls(task.controls, task.id)
+    except AsdlcError as error:
+        return {"state": "unreadable", "unresolved": [], "why": str(error)}
+    size = size_of(task)
+    if is_status(task, IN_REVIEW):
+        report = control_report(size, controls)
+        offered = sum(bool(c["counts"]) for c in report["controls"])
+        why = (f"{NO_CONTROL_NOTE} {report['no_control']}" if report["no_control"] is not None
+               else NOTHING_OFFERED[str(report["nothing_offered"])] if report["nothing_offered"] else f"its hand-over offered {offered} complete control(s)")
+        return {"state": "handed over", "unresolved": [], "controls": offered, "no_control": report["no_control"],
+                "nothing_offered": report["nothing_offered"], "why": why}
+    state, names = handover_state(size, controls)
+    not_yet = "asdlc finish does not refuse for this yet"
+    why = {
+        "not needed": "a size-1 task is not asked for a control",
+        "ready": "this hand-over has a complete control",
+        "unresolved": ("each did not fail, or failed and has no passing run after it: record the same command passing once the mechanism is back, record "
+                       f"it again with --control until it fails, or say the test is not the proof with asdlc not-proof; {not_yet}"),
+        "missing": (f"this hand-over has no complete control: record one (asdlc record-check {task.id} --as <worker> --control <name> --without "
+                    "\"<what was removed>\" -- <command>, failing, then the same command passing), or hand over with finish --no-control \"<why>\" when "
+                    f"there is nothing to control for; {not_yet}"),
+    }[state]
+    return {"state": state, "unresolved": list(names), "why": why}
+
+
+def control_standing_line(control: Mapping[str, object]) -> str:
+    names = f" ({', '.join(control['unresolved'])})" if control["unresolved"] else ""
+    return f"    control: {control['state']}{names}: {control['why']}"
 
 
 class Race(StrEnum):
@@ -779,6 +1125,7 @@ class ReviewRecord:
     nit: int
     policies: tuple[str, ...]
     plan_matched: bool
+    cannot_fail: int | None = None  # tests offered as proof that pass without their mechanism; None: the review did not say (R17)
 
 
 def parse_findings(raw: str) -> tuple[int, int]:
@@ -812,8 +1159,9 @@ def review_comment(reviewer: str, kind: str, verdict: ReviewVerdict, notes: str,
     counted = ""
     if record is not None:
         cites = f" Cites: {', '.join(record.policies)}." if record.policies else ""
+        could_not_fail = f" Tests that could not fail: {record.cannot_fail}." if record.cannot_fail is not None else ""
         counted = (f"\n\nFindings: {record.important} Important, {record.nit} nit.{cites} "
-                   f"The diff {'matches' if record.plan_matched else 'does not match'} the plan.")
+                   f"The diff {'matches' if record.plan_matched else 'does not match'} the plan.{could_not_fail}")
     return f"Review by @{reviewer} ({kind or ReviewKind.CROSS_MACHINE}): {what}.{then}{counted}\n\n{notes.strip()}"
 
 
@@ -1041,7 +1389,7 @@ def mine_report(items: Sequence[Task], engineer: str, prefs: Prefs, waiting: Seq
         row(t, workers=[w.removeprefix("@") for w in workers(t.assignees) if owner_of(w) == engineer],
             changes_requested=CHANGES_REQUESTED in t.labels and is_status(t, IN_PROGRESS), branch=t.branch or None,
             size=size_of(t) or None, plan_hash=t.plan_hash or None, plan_approved_by=t.plan_approved_by or None,
-            approval_holds=approval_refusal(t) is None)
+            approval_holds=approval_refusal(t) is None, control=control_standing(t))
         for t in items if any(owner_of(w) == engineer for w in workers(t.assignees)) and not is_status(t, DONE)
     ]
     reviews = review_claims(items, engineer)
@@ -1062,12 +1410,25 @@ def mine_report(items: Sequence[Task], engineer: str, prefs: Prefs, waiting: Seq
 
 @dataclass(frozen=True)
 class Where:
-    """Where a check ran: the task's worktree, its branch and commit, and whether it had uncommitted changes."""
+    """Where a check ran: the task's worktree, its branch and commit, whether it had uncommitted changes and, when it
+    had, a digest of them (so two such trees can be told apart), the files changed and the change itself."""
 
     worktree: str
     branch: str
     commit: str
     dirty: bool
+    tree: str = ""  # tree_digest of the uncommitted change; "" for a clean worktree
+    files: tuple[str, ...] = ()  # the files with uncommitted changes, new ones marked
+    patch: str = ""  # git diff HEAD, without context lines
+
+
+def tree_digest(diff: str, untracked: Iterable[tuple[str, str]]) -> str:
+    """A digest of a worktree's uncommitted change: its diff against HEAD and each untracked file's path and object id.
+    Empty when there is neither."""
+    others = sorted(untracked)
+    if not diff and not others:
+        return ""
+    return hashlib.sha256("\x00".join([diff, *(f"{path}\x00{oid}" for path, oid in others)]).encode()).hexdigest()[:12]
 
 
 def check_note(command: Sequence[str], code: int, output: str, now: datetime, tail: int = CHECK_TAIL_LINES, where: Where | None = None,
@@ -1086,6 +1447,26 @@ def check_note(command: Sequence[str], code: int, output: str, now: datetime, ta
              if where else "")
     after = f"\n\n{since_review_line(*since_review)}" if since_review is not None else ""
     return f"Check {verdict}: `{shlex.join(command)}` exited {code} at {stamp}{place}{cut}:\n\n{fence}text\n" + "\n".join(shown) + f"\n{fence}{after}"
+
+
+def control_note(name: str, without: str, passed: bool, check: str, where: Where | None, lines: int = CONTROL_PATCH_LINES) -> str:
+    """The note for a run recorded with --control (R3, R4): a first line naming the control and what the run is without,
+    the check's own note unchanged (so it still reads back as one check, here and in an older asdlc), then what differed
+    from the commit it ran on, cut to `lines`."""
+    head = (f"Offered as the control for `{name}`, and it did NOT fail: it passed without {without}. The control is unresolved." if passed
+            else f"Offered as the control for `{name}`: this run is without {without}, and must fail.")
+    if where is None or not where.dirty:
+        return f"{head}\n\n{check}\n\nThe worktree had no uncommitted changes when it ran: what it is without is not in the commit it ran on."
+    files = ", ".join(where.files) or "not listed"
+    change = where.patch.rstrip("\n").splitlines()
+    if not change:
+        return f"{head}\n\n{check}\n\nUncommitted changes when it ran ({files}): named and not shown, since git gave no text for them."
+    shown = change[:lines]
+    cut = f", first {len(shown)} of {len(change)} lines" if len(change) > len(shown) else ""
+    fence = "```"
+    while fence in where.patch:
+        fence += "`"
+    return f"{head}\n\n{check}\n\nUncommitted changes when it ran ({files}){cut}:\n\n{fence}diff\n" + "\n".join(shown) + f"\n{fence}"
 
 
 def draft_parent(arguments: Sequence[str]) -> tuple[tuple[str, ...], str] | None:
@@ -2138,9 +2519,10 @@ def mine(board: Board, engineer: str, as_json: bool) -> int:
     waiting = _waiting_reviews(board, origin, [t for t in items if not is_draft(t)], engineer, datetime.now(UTC)) if prefs.review else ()
     report = mine_report(items, engineer, prefs, waiting)
     lines = [f"{engineer}: {report['active']} of {report['workers_cap']} workers busy building, {report['reviewing']} reviewing (the cap counts both)"]
-    lines += [f"  {r['id']}\t{r['status']}{' (changes requested)' if r['changes_requested'] else ''}"
-              f"{(' (plan approved by @' + r['plan_approved_by'] + ')' if r['approval_holds'] else ' (plan changed since approval)') if r['plan_approved_by'] else ''}\t@{', @'.join(r['workers'])}\t{r['project'] or '-'}\t{r['title']}"
-              for r in report["tasks"]]
+    for r in report["tasks"]:
+        lines += [f"  {r['id']}\t{r['status']}{' (changes requested)' if r['changes_requested'] else ''}"
+                  f"{(' (plan approved by @' + r['plan_approved_by'] + ')' if r['approval_holds'] else ' (plan changed since approval)') if r['plan_approved_by'] else ''}\t@{', @'.join(r['workers'])}\t{r['project'] or '-'}\t{r['title']}",
+                  control_standing_line(r["control"])]
     lines += [f"  review {r['id']}\t@{r['reviewer']}\t{r['kind']}\t{r['project'] or '-'}\t{r['title']}" for r in report["reviews"]]
     lines += [f"  reserved {r['id']}\t{r['project'] or '-'}\t{r['title']}" for r in report["reserved"]]
     if report["reviews_waiting"]:
@@ -2168,8 +2550,21 @@ def _where(cwd: Path, task_id: str) -> Where:
         recorded = ""
     if recorded.upper() != task_id:
         raise AsdlcError(f"{root} is the worktree of {recorded or 'an unknown task'}, not {task_id}, so the check was not run")
-    return Where(str(root), _git(root, "branch", "--show-current").stdout.strip() or "a detached HEAD",
-                 _git(root, "rev-parse", "HEAD").stdout.strip(), bool(_git(root, "status", "--porcelain").stdout.strip()))
+    branch = _git(root, "branch", "--show-current").stdout.strip() or "a detached HEAD"
+    commit = _git(root, "rev-parse", "HEAD").stdout.strip()
+    if not _git(root, "status", "--porcelain").stdout.strip():
+        return Where(str(root), branch, commit, False)
+    others = [path for path in _git(root, "ls-files", "--others", "--exclude-standard", "-z").stdout.split("\0") if path]
+    hashed = _git(root, "hash-object", "--", *others) if others else None
+    oids = hashed.stdout.split() if hashed is not None and hashed.returncode == 0 else []
+    untracked = [(path, oids[n] if n < len(oids) else "unreadable") for n, path in enumerate(others)]
+    changed = [path for path in _git(root, "diff", "HEAD", "--name-only", "-z").stdout.split("\0") if path]
+    # The change itself, for a control's note: no context lines, so no line of it can read as another check's first line.
+    patch = _git(root, "diff", "HEAD", "--unified=0").stdout
+    for path in others[:NEW_FILES_SHOWN]:
+        patch += _git(root, "diff", "--no-index", "--unified=0", "--", os.devnull, path).stdout
+    return Where(str(root), branch, commit, True, tree_digest(_git(root, "diff", "HEAD", "--binary").stdout, untracked),
+                 (*changed, *(f"{path} (new)" for path in others)), patch)
 
 
 def _since_review(worktree: Path, branch: str) -> tuple[int, int] | None:
@@ -2181,13 +2576,15 @@ def _since_review(worktree: Path, branch: str) -> tuple[int, int] | None:
     return worker_commits(log.stdout) if log.returncode == 0 else None
 
 
-def record_check(board: Board, raw_id: str, worker: str, command: Sequence[str], cwd: Path) -> int:
+def record_check(board: Board, raw_id: str, worker: str, command: Sequence[str], cwd: Path, control: str | None = None, without: str = "") -> int:
     """Run a check in the task's worktree, append its command, exit code, where it ran and its output
     tail to the task's notes, and return its exit code, so the evidence on the board comes from the
-    toolchain. Only the worker holding the task In Progress records checks on it.
+    toolchain. Only the worker holding the task In Progress records checks on it. A run marked with
+    `control` is offered as that control's failing run, and a passing run completes the controls awaiting
+    the same command: both are written to CONTROLS_KEY in the transaction that records the run.
 
     Raises:
-        AsdlcError: not in the task's worktree, the worker doesn't hold the task, or the note could not be pushed.
+        AsdlcError: not in the task's worktree, the worker doesn't hold the task, its controls can't be read, or the note could not be pushed.
     """
     task_id = normalise_id(raw_id, _prefix(board))
     where = _where(cwd, task_id)
@@ -2195,34 +2592,89 @@ def record_check(board: Board, raw_id: str, worker: str, command: Sequence[str],
     if refusal := holder_refusal(task, task_id, worker, "record checks on it") or approval_refusal(task):
         raise AsdlcError(f"{refusal}. The check was not run")
     try:
+        parse_controls(task.controls, task_id)
+    except AsdlcError as error:
+        raise AsdlcError(f"{error}. The check was not run") from None
+    try:
         done = subprocess.run(list(command), cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         code, output = done.returncode, done.stdout
     except OSError as error:
         code, output = 127, f"could not run {command[0]}: {error}\n"
     print(output, end="", flush=True)
-    note = check_note(command, code, output, datetime.now(UTC), where=where,
+    now = datetime.now(UTC)
+    note = check_note(command, code, output, now, where=where,
                       since_review=_since_review(Path(where.worktree), task.branch or where.branch) if CHANGES_REQUESTED in task.labels else None)
+    if control is not None:
+        note = control_note(control, without, code == 0, note, where)
+    run = Run(now.isoformat(timespec="seconds"), where.commit, where.tree, code)
 
-    def step(attempt: int) -> tuple[str | None, None]:
-        if refusal := holder_refusal(_find(_tasks(board), task_id), task_id, worker, "record checks on it"):
+    def step(attempt: int) -> tuple[str | None, str]:
+        current = _find(_tasks(board), task_id)
+        if refusal := holder_refusal(current, task_id, worker, "record checks on it"):
             raise AsdlcError(f"{refusal}. The check ran but was not recorded")
-        recorded = _board_backlog(board, ["task", "edit", task_id, "--append-notes", note])
+        assert current is not None
+        try:
+            before = parse_controls(current.controls, task_id)
+        except AsdlcError as error:
+            raise AsdlcError(f"{error}. The check ran but was not recorded") from None
+        after, says = with_run(before, control, without, command, run)
+        completed = [c.name for c, was in zip(after.controls, before.controls) if c.passed is not None and was.passed is None] if control is None else []
+        noted = note + "".join(f"\n\nCompletes the control for `{name}`: the same command, passing on a different tree." for name in completed)
+        recorded = _board_backlog(board, ["task", "edit", task_id, "--append-notes", noted])
         if recorded.returncode != 0:
             raise AsdlcError(f"backlog could not record the check on {task_id}: {(recorded.stderr or recorded.stdout).strip()}")
-        return f"Record a check on {task_id} by @{worker}: exit {code}", None
+        if after != before:
+            _write_key(board, _find(_tasks(board), task_id) or current, CONTROLS_KEY, yaml_quoted(controls_text(after)))
+        return f"Record a check on {task_id} by @{worker}: exit {code}", says
 
-    _transact(board, step)
+    says = _transact(board, step)
     _say(f"recorded on {task_id}: {shlex.join(command)} exited {code}")
+    for line in says.splitlines():
+        _say(line)
     return code
 
 
-def finish(board: Board, raw_id: str, worker: str, branch: str | None, pull: str | None, notes: str) -> dict[str, object]:
-    """Hand the worker's task to review: In Review with its branch and pull request recorded and the
-    worker's notes appended, or, after a review asked for changes, back to review without the label.
+def not_proof(board: Board, raw_id: str, worker: str, test: str, proof: str, why: str) -> dict[str, object]:
+    """Record that a test is kept but is not offered as proof of the change, why it cannot be made to fail without the
+    mechanism, and which complete control is the proof instead (R8): in CONTROLS_KEY and as a note. It resolves an
+    unresolved control of that name and never counts toward the floor.
 
     Raises:
-        AsdlcError: no notes, the worker doesn't hold the task In Progress, the branch isn't the
-            task's, backlog failed, or the change could not be pushed.
+        AsdlcError: the worker doesn't hold the task In Progress, the proof is not a complete control of this
+            hand-over other than the test, backlog failed, or the change could not be pushed.
+    """
+    task_id = normalise_id(raw_id, _prefix(board))
+
+    def step(attempt: int) -> tuple[str | None, dict[str, object]]:
+        task = _find(_tasks(board), task_id)
+        if refusal := holder_refusal(task, task_id, worker, "say a test is not the proof on it"):
+            raise AsdlcError(refusal)
+        assert task is not None
+        before = parse_controls(task.controls, task_id)
+        if refusal := not_proof_refusal(before, test, proof, why):
+            raise AsdlcError(f"{refusal}. Nothing was recorded")
+        after = with_not_proof(before, test, proof, why)
+        noted = _board_backlog(board, ["task", "edit", task_id, "--append-notes", not_proof_note(test, proof, why)])
+        if noted.returncode != 0:
+            raise AsdlcError(f"backlog could not record the statement on {task_id}: {(noted.stderr or noted.stdout).strip()}")
+        _write_key(board, _find(_tasks(board), task_id) or task, CONTROLS_KEY, yaml_quoted(controls_text(after)))
+        return f"Not proof on {task_id} by @{worker}: {test}", {"task": task_id, "worker": worker, "test": test, "proof": proof, "why": why.strip(),
+                                                              "unresolved": [c.name for c in unresolved(after, after.handed + 1)]}
+
+    return _transact(board, step)
+
+
+def finish(board: Board, raw_id: str, worker: str, branch: str | None, pull: str | None, notes: str, no_control: str | None = None) -> dict[str, object]:
+    """Hand the worker's task to review: In Review with its branch and pull request recorded and the
+    worker's notes appended, or, after a review asked for changes, back to review without the label.
+    The hand-over is counted in CONTROLS_KEY, with its no-control statement (R11) when `no_control` gives
+    one, so what was recorded for it is known as this hand-over's and no later one's (R12). Nothing is
+    refused for want of a control.
+
+    Raises:
+        AsdlcError: no notes, an empty or contradicted no-control statement, the worker doesn't hold the task
+            In Progress, the branch isn't the task's, its controls can't be read, backlog failed, or the change
+            could not be pushed.
     """
     if not notes.strip():
         raise AsdlcError("say in --notes what was built, the checks recorded, and anything the reviewer should look at")
@@ -2238,14 +2690,21 @@ def finish(board: Board, raw_id: str, worker: str, branch: str | None, pull: str
         if branch and task.branch and branch != task.branch:
             raise AsdlcError(f"{task_id}'s branch is {task.branch}, recorded when it was first claimed, not {branch}: push {task.branch} and finish with it")
         chosen = task.branch or branch or branch_name(task)
-        done = _board_backlog(board, finish_edit(task, chosen, pull, notes))
+        controls = parse_controls(task.controls, task_id)
+        if no_control is not None and (refusal := no_control_refusal(controls, no_control)):
+            raise AsdlcError(f"{task_id}: {refusal}")
+        stated = notes if no_control is None else f"{notes.strip()}\n\n{NO_CONTROL_NOTE} {no_control.strip()}"
+        done = _board_backlog(board, finish_edit(task, chosen, pull, stated))
         if done.returncode != 0:
             raise AsdlcError(f"backlog could not hand {task_id} to review: {(done.stderr or done.stdout).strip()}")
         if not task.branch:
             _write_key(board, task, BRANCH_KEY, chosen)
+        after = handed_over(controls, no_control)
+        _write_key(board, task, CONTROLS_KEY, yaml_quoted(controls_text(after)))
         again = CHANGES_REQUESTED in task.labels
         return f"Finish {task_id}: @{worker}, In Review", {"task": task_id, "worker": worker, "branch": chosen, "pull_request": pull,
-                                                           "status": IN_REVIEW, "resubmitted": again}
+                                                           "status": IN_REVIEW, "resubmitted": again, "handover": after.handed,
+                                                           "no_control": None if no_control is None else no_control.strip()}
 
     return _transact(board, step)
 
@@ -2504,6 +2963,11 @@ def _review_report(board: Board, claimed: ReviewClaimed, registry: Mapping[str, 
     task = claimed.task
     branch, pull = review_refs(task.references)
     entry = registry.get(task.project)
+    try:
+        offered = control_report(size_of(task), parse_controls(task.controls, task.id))
+    except AsdlcError as error:
+        _say(str(error))
+        offered = control_report(size_of(task), Controls()) | {"nothing_offered": "unreadable"}
     return {
         "claimed": True, "task": task.id, "title": task.title, "reviewer": task.reviewer, "kind": task.review_kind,
         "authors": sorted(authors(task)), "project": task.project, "parent": task.parent or None,
@@ -2511,6 +2975,7 @@ def _review_report(board: Board, claimed: ReviewClaimed, registry: Mapping[str, 
         "branch": branch, "pull_request": pull, "github": _github(entry.path) if entry else None,
         "references": list(task.references), "waited": human(claimed.waited),
         "model": REVIEW.model, "effort": REVIEW.effort, "route": REVIEW.reason, "policies": review_policies(board.path, task.project),
+        **offered,
     }
 
 
@@ -2553,6 +3018,7 @@ def review_next(board: Board, reviewer: str, engineer: str, now: datetime, fallb
                     f"claimed the review of {report['task']} for @{reviewer} ({report['kind']}; {REVIEW.model}, {REVIEW.effort})",
                     f"branch {report['branch'] or '-'}, pull request {report['pull_request'] or '-'}",
                     str(report["repo"]),
+                    *control_lines(report),
                 ])
                 return 0
             case Taken(reason=reason):
@@ -2608,9 +3074,11 @@ def review_done(board: Board, raw_id: str, reviewer: str, verdict: ReviewVerdict
         _write_key(board, after, FINDINGS_KEY, yaml_quoted(f"important={record.important},nit={record.nit}"))
         _write_key(board, after, POLICIES_KEY, json.dumps(list(record.policies)) if record.policies else None)
         _write_key(board, after, PLAN_MATCHED_KEY, "yes" if record.plan_matched else "no")
+        _write_key(board, after, CANNOT_FAIL_KEY, None if record.cannot_fail is None else str(record.cannot_fail))
         repeats = earlier_citations(_tasks(board, folders=("tasks", "completed")), task_id, record.policies)
         result = {"task": task_id, "verdict": str(verdict), "reviewer": reviewer, "kind": task.review_kind,
                   "findings": {"important": record.important, "nit": record.nit}, "policies": list(record.policies), "plan_matched": record.plan_matched,
+                  "cannot_fail": record.cannot_fail,
                   "repeats": {policy: list(ids) for policy, ids in repeats.items()},
                   "status": IN_PROGRESS if verdict is ReviewVerdict.CHANGES else IN_REVIEW,
                   "workers": [w.removeprefix("@") for w in workers(task.assignees)]}
@@ -3610,7 +4078,7 @@ def doctor(explicit_board: str | None, cwd: Path, as_json: bool) -> int:
 # beside the playbook's own name for it. The shell reads git, the event log, the hook decision
 # logs and gh, and caches the parsed history by commit in the board clone's ignored .asdlc/.
 
-STATS_CACHE_VERSION = 1  # with Task's fields, the history cache's format; any other cache is rebuilt
+STATS_CACHE_VERSION = 2  # with Task's fields, the history cache's format; any other cache is rebuilt
 STAGES = frozendict({
     "plan": ("Plan", ("01", "10")),
     "design": ("Design", ("02",)),
@@ -3826,6 +4294,20 @@ class Reviewed:
     policies: tuple[str, ...]
     plan_matched: bool | None
     checks: int  # how many checks the task had then
+    cannot_fail: int | None = None  # None: the verdict did not say how many tests could not fail (R17)
+
+
+@dataclass(frozen=True)
+class Handover:
+    """One move of a task to In Review, with what it offered as controls, read from CONTROLS_KEY as that commit left it."""
+
+    when: datetime
+    index: int
+    recorded: bool  # False: made before controls were recorded (no key, or a move that asdlc finish did not count)
+    controls: int = 0  # complete controls no not-proof statement names as its test
+    not_proof: int = 0
+    no_control: str | None = None
+    unreadable: bool = False
 
 
 @dataclass(frozen=True)
@@ -3854,6 +4336,7 @@ class Story:
     first_done_index: int | None
     checks: tuple[Check, ...]
     skip_noted: bool
+    handovers: tuple[Handover, ...] = ()  # one per entry in entered_review
 
     @property
     def pull(self) -> str | None:
@@ -3867,6 +4350,20 @@ class Ledger:
     stories: frozendict[str, Story]
 
 
+def handover_from(when: datetime, index: int, now: str, before: str) -> Handover:
+    """One move to In Review, from CONTROLS_KEY's value as that commit left it and as it was before. asdlc finish counts
+    each hand-over there, so a move that raised no count was made before controls were recorded."""
+    try:
+        after, earlier = parse_controls(now), parse_controls(before)
+    except AsdlcError:
+        return Handover(when, index, False, unreadable=True)
+    if after.handed <= earlier.handed:
+        return Handover(when, index, False)
+    made = after.handed
+    return Handover(when, index, True, len(counting(after, made)), sum(s.round == made for s in after.not_proof),
+                    next((s.why for s in after.no_control if s.round == made), None))
+
+
 def _story(key: str, seen: Sequence[Seen], began: Seen) -> Story:
     claims: list[datetime] = []
     entered: list[tuple[datetime, int, int]] = []
@@ -3876,6 +4373,7 @@ def _story(key: str, seen: Sequence[Seen], began: Seen) -> Story:
     held: list[tuple[str, datetime, datetime | None]] = []
     holding: dict[str, datetime] = {}
     authors: frozenset[str] = frozenset()
+    handovers: list[Handover] = []
     plan_written = done = None
     first_done = None
     previous: Task | None = None
@@ -3885,6 +4383,7 @@ def _story(key: str, seen: Sequence[Seen], began: Seen) -> Story:
             claims.append(when)
         if is_status(task, IN_REVIEW) and (previous is None or not is_status(previous, IN_REVIEW)):
             entered.append((when, snapshot.index, len(snapshot.item.checks)))
+            handovers.append(handover_from(when, snapshot.index, task.controls, previous.controls if previous is not None else ""))
         if task.reviewer and (previous is None or previous.reviewer != task.reviewer):
             review_claims.append((when, task.review_kind or str(ReviewKind.CROSS_MACHINE)))
         if previous is not None and previous.reviewer and not task.reviewer:
@@ -3896,7 +4395,8 @@ def _story(key: str, seen: Sequence[Seen], began: Seen) -> Story:
                     important, nit = None, None
                 matched = {"yes": True, "no": False}.get(task.plan_matched)
                 verdicts.append(Reviewed(when, snapshot.index, clean, previous.reviewer, previous.review_kind or str(ReviewKind.CROSS_MACHINE),
-                                         important, nit, task.review_policies, matched, len(snapshot.item.checks)))
+                                         important, nit, task.review_policies, matched, len(snapshot.item.checks),
+                                         int(task.cannot_fail) if task.cannot_fail.isascii() and task.cannot_fail.isdigit() else None))
         if task.plan_hash and plan_written is None:
             plan_written = when
         if task.plan_approved_by and (previous is None or (previous.plan_approved_by, previous.approved_hash) != (task.plan_approved_by, task.approved_hash)):
@@ -3921,6 +4421,7 @@ def _story(key: str, seen: Sequence[Seen], began: Seen) -> Story:
         reviewer=last.task.reviewer, references=last.task.references, authors=authors, first_index=began.index, first_when=began.when,
         claims=tuple(claims), held=tuple(held), entered_review=tuple(entered), review_claims=tuple(review_claims), verdicts=tuple(verdicts),
         plan_written=plan_written, approvals=tuple(approvals), done=done, first_done_index=first_done, checks=last.checks, skip_noted=last.skip_noted,
+        handovers=tuple(handovers),
     )
 
 
@@ -4315,6 +4816,53 @@ def build_stage(ledger: Ledger, merged: Mapping[str, datetime], window: Window) 
     })
 
 
+def _handover_shares(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """Of these hand-overs: the shares that offered a complete control, a no-control statement, neither, and that were
+    made before controls were recorded. Each hand-over is in exactly one."""
+    def kind(row: Mapping[str, object]) -> str:
+        if not row["recorded"]:
+            return "before"
+        return "with_control" if row["controls"] else "no_control" if row["no_control"] is not None else "neither"
+
+    kinds = Counter(kind(row) for row in rows)
+    return {name: _share(kinds[name], len(rows)) for name in ("with_control", "no_control", "neither", "before")}
+
+
+def controls_metric(ledger: Ledger, window: Window) -> dict[str, object]:
+    """Play 07: what each hand-over of a task larger than size 1 offered as controls, and how many tests its review then
+    found could not fail (R19). A hand-over made before controls were recorded is counted apart from one without a control."""
+    rows: list[dict[str, object]] = []
+    for story in sorted(ledger.stories.values(), key=lambda s: id_key(s.id)):
+        if story.size == "size-1":
+            continue
+        for number, made in enumerate(story.handovers, start=1):
+            if not window.has(made.when):
+                continue
+            until = story.handovers[number].index if number < len(story.handovers) else None
+            verdict = next((v for v in story.verdicts if v.index > made.index and (until is None or v.index < until)), None)
+            said: object = None if verdict is None else "did not say" if verdict.cannot_fail is None else verdict.cannot_fail
+            rows.append({"task": story.id, "handover": number, "first": number == 1, "recorded": made.recorded, "controls": made.controls,
+                         "not_proof": made.not_proof, "no_control": made.no_control, "cannot_fail": said, "unreadable": made.unreadable})
+    everything, first, fixes = (_handover_shares(found) for found in (rows, [r for r in rows if r["first"]], [r for r in rows if not r["first"]]))
+    counts = [r["cannot_fail"] for r in rows if isinstance(r["cannot_fail"], int)]
+    silent = sum(r["cannot_fail"] == "did not say" for r in rows)
+    statements = sum(int(r["not_proof"]) for r in rows)
+    unreadable = sorted({str(r["task"]) for r in rows if r["unreadable"]}, key=id_key)
+    text = (f"{_share_text(everything['with_control'])} hand-overs offered a complete control, {_share_text(everything['no_control'])} a no-control "
+            f"statement, {_share_text(everything['neither'])} neither, {_share_text(everything['before'])} made before controls were recorded; "
+            f"fix rounds alone: {_share_text(fixes['with_control'])} a control, {_share_text(fixes['no_control'])} a no-control statement, "
+            f"{_share_text(fixes['neither'])} neither, {_share_text(fixes['before'])} before; {statements} not-proof statement(s); reviews found "
+            f"{sum(counts)} test(s) that could not fail over {len(counts)} verdict(s) that said, and {silent} verdict(s) did not say"
+            + (f"; {CONTROLS_KEY} could not be read on {', '.join(unreadable)}" if unreadable else ""))
+    return _metric(
+        "07", "Controls offered at hand-over", "controls at hand-over",
+        "each task's asdlc_controls key as each asdlc finish left it, and review-done --cannot-fail on the verdict that followed; size-1 tasks aside",
+        text, handovers=rows, all=everything, first=first, fix_rounds=fixes, not_proof=statements,
+        cannot_fail={"tests": sum(counts), "verdicts": len(counts), "did_not_say": silent},
+        no_control_statements=[{"task": r["task"], "handover": r["handover"], "why": r["no_control"]} for r in rows if r["no_control"] is not None],
+        unreadable=unreadable)
+
+
 def test_stage(ledger: Ledger, window: Window) -> dict[str, object]:
     """Play 07, the feedback loop, and play 08, evals."""
     first_pass = baseline = 0
@@ -4351,6 +4899,7 @@ def test_stage(ledger: Ledger, window: Window) -> dict[str, object]:
             tasks=len(per_task), checks=total, median=percentile(per_task, 0.5), p90=percentile(per_task, 0.9), max=max(per_task, default=None)),
         "failed_checks": _metric("07", "Failed checks", "failed checks", "record-check notes that exited non-zero",
                                  f"{_share_text(failures)} checks failed", **failures),
+        "controls": controls_metric(ledger, window),
         "eval_pass_rate": _unmeasured("08", "Eval pass rate", "eval pass rate",
                                       "there is no eval suite yet; it needs eval results recorded per change, which play 08's eval gate will add"),
     })
@@ -4861,6 +5410,17 @@ def init_board(directory: Path) -> None:
     print("Each developer then installs the team plugin from it once, in Claude Code: /plugin install team --marketplace <owner>/<repo>")
 
 
+def _count(raw: str) -> int:
+    """A whole number of zero or more, for argparse.
+
+    Raises:
+        argparse.ArgumentTypeError: anything else.
+    """
+    if not (raw.isascii() and raw.isdigit()):
+        raise argparse.ArgumentTypeError(f"'{raw}' is not a count: give a whole number, 0 or more")
+    return int(raw)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="asdlc", description="A Backlog.md board: claims, worktrees, routing and orchestration.")
     parser.add_argument("--board", help="the board clone (else $ASDLC_BOARD, else git config asdlc.board, else the board clone you are in)")
@@ -4900,11 +5460,19 @@ def _parser() -> argparse.ArgumentParser:
                            "a plan changed since is refused")
     add("mine", "an engineer's workers' tasks and reservations", who="the engineer, such as kyle", json_output=True)
     commands.add_parser("record-check", help="run a check in the task's worktree and record it on the task: "
-                        "record-check <id> --in <worktree> --as <worker> -- <command...>")
+                        "record-check <id> --in <worktree> --as <worker> [--control <name> --without <text>] -- <command...>; "
+                        "--control offers the run as a control, the run of a named test without the mechanism it proves, which must fail")
+    stating = add("not-proof", "record that a test is kept but is not offered as proof of the change, and which complete control is the proof instead",
+                  task="the task", who=worker, json_output=True)
+    stating.add_argument("--test", required=True, help="the test that is kept but cannot be made to fail without the mechanism")
+    stating.add_argument("--proof", required=True, help="the complete control in this hand-over that is the proof instead")
+    stating.add_argument("--why", required=True, help="why the test cannot be made to fail without the mechanism")
     finishing_work = add("finish", "hand your held task to review: In Review with its branch and pull request", task="the task", who=worker, json_output=True)
     finishing_work.add_argument("--branch", help="the task's branch (default: the one recorded when it was claimed)")
     finishing_work.add_argument("--pr", help="the pull request's URL, when there is one")
     finishing_work.add_argument("--notes", required=True, help="what was built, the checks recorded, and anything the reviewer should look at")
+    finishing_work.add_argument("--no-control", metavar="WHY", help="hand over with no control and say why there is nothing to control for: documentation only, "
+                                "a pure rename, a move with no behaviour change, a round that changed no test, or a proof no command can show")
     reviewer = "the reviewer: your engineer name, a dot, r and a number, such as kyle.r1"
     reviewing = add("review-next", "claim the review that has waited longest among those this reviewer may take", who=reviewer, json_output=True)
     reviewing.add_argument("--fallback", action="store_true",
@@ -4926,21 +5494,27 @@ def _parser() -> argparse.ArgumentParser:
     finishing.add_argument("--policy", action="append", default=[], help="a policy or rule a finding cites, once per policy (repeat it)")
     finishing.add_argument("--plan-matched", required=True, choices=["yes", "no"], help="whether the diff still matches the task's plan")
     finishing.add_argument("--notes", required=True, help="the findings, as they go on the task")
+    finishing.add_argument("--cannot-fail", type=_count, metavar="N", help="how many tests offered as proof the review found would pass without their mechanism "
+                           "(0 for none); left out, the verdict does not say")
     return parser
 
 
 @dataclass(frozen=True)
 class CheckRequest:
-    """What `record-check` was asked: the task, the worker, the check, and the worktree named with --in (or None)."""
+    """What `record-check` was asked: the task, the worker, the check, the worktree named with --in (or None), and the
+    control the run is offered as with what it is without (each None when its flag was not given)."""
 
     task: str
     worker: str
     command: tuple[str, ...]
     folder: str | None = None
+    control: str | None = None
+    without: str | None = None
 
 
 def record_check_arguments(words: Sequence[str]) -> CheckRequest | None:
-    """`<id> --as <worker> [--in <worktree>] -- <command...>`, in any order before the `--`; None when malformed."""
+    """`<id> --as <worker> [--in <worktree>] [--control <name>] [--without <text>] -- <command...>`, in any order before
+    the `--`; None when malformed. Words after the `--` are the check's own, whatever they look like."""
     if "--" not in words:
         return None
     split = list(words).index("--")
@@ -4950,19 +5524,19 @@ def record_check_arguments(words: Sequence[str]) -> CheckRequest | None:
     index = 0
     while index < len(head):
         word = head[index]
-        if word in ("--as", "--in"):
+        if word in ("--as", "--in", "--control", "--without"):
             if index + 1 >= len(head):
                 return None
             options[word], index = head[index + 1], index + 2
             continue
-        if word.startswith(("--as=", "--in=")):
-            options[word[:4]] = word.partition("=")[2]
+        if word.startswith(("--as=", "--in=", "--control=", "--without=")):
+            options[word.partition("=")[0]] = word.partition("=")[2]
         else:
             rest.append(word)
         index += 1
     if "--as" not in options or len(rest) != 1 or not command:
         return None
-    return CheckRequest(rest[0], options["--as"], command, options.get("--in"))
+    return CheckRequest(rest[0], options["--as"], command, options.get("--in"), options.get("--control"), options.get("--without"))
 
 
 def command_index(argv: Sequence[str]) -> int | None:
@@ -5118,7 +5692,7 @@ def main(argv: Sequence[str]) -> int:
                 reviewer = reviewer_for(arguments.worker, _engineer(cwd))
                 important, nit = parse_findings(arguments.findings)
                 policies = tuple(dict.fromkeys(p.strip() for p in arguments.policy if p.strip()))
-                record = ReviewRecord(important, nit, policies, arguments.plan_matched == "yes")
+                record = ReviewRecord(important, nit, policies, arguments.plan_matched == "yes", arguments.cannot_fail)
                 result = review_done(board, arguments.id, reviewer, ReviewVerdict(arguments.verdict), arguments.notes, record)
                 line = (f"{result['task']}: changes requested by @{reviewer}; it is In Progress for @{', @'.join(result['workers']) or 'its author'} again"
                         if result["verdict"] == ReviewVerdict.CHANGES else
@@ -5133,14 +5707,24 @@ def main(argv: Sequence[str]) -> int:
                 if request is None:
                     raise AsdlcError("say which task, which worktree, which worker and which check: "
                                      "asdlc record-check TASK-1 --in <worktree> --as kyle.w1 -- ./scripts/check")
+                if refusal := control_flags_refusal(request.control, request.without):
+                    raise AsdlcError(refusal)
                 _check_backlog()
-                return record_check(board, request.task, worker_for(request.worker, _engineer(cwd)), request.command, cwd)
+                return record_check(board, request.task, worker_for(request.worker, _engineer(cwd)), request.command, cwd,
+                                    request.control, one_line(request.without or ""))
+            case "not-proof":
+                _check_backlog()
+                result = not_proof(board, arguments.id, worker_for(arguments.worker, _engineer(cwd)), arguments.test, arguments.proof, one_line(arguments.why))
+                left = f"; still unresolved: {', '.join(result['unresolved'])}" if result["unresolved"] else ""
+                _emit(result, as_json, [f"{result['task']}: {result['test']} is kept and not offered as proof; the proof is the control {result['proof']}{left}"])
             case "finish":
                 _check_backlog()
                 worker = worker_for(arguments.worker, _engineer(cwd))
-                result = finish(board, arguments.id, worker, arguments.branch, arguments.pr, arguments.notes)
+                result = finish(board, arguments.id, worker, arguments.branch, arguments.pr, arguments.notes,
+                                None if arguments.no_control is None else one_line(arguments.no_control))
                 again = " again, without changes-requested" if result["resubmitted"] else ""
-                _emit(result, as_json, [f"{result['task']} is In Review{again}: branch {result['branch']}, pull request {result['pull_request'] or '-'}"])
+                _emit(result, as_json, [f"{result['task']} is In Review{again}: branch {result['branch']}, pull request {result['pull_request'] or '-'}",
+                                        *([f"{NO_CONTROL_NOTE} {result['no_control']}"] if result["no_control"] is not None else [])])
         return 0
     except AsdlcError as error:
         print(f"asdlc: {error}", file=sys.stderr)
