@@ -7,7 +7,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default:
     @just --list
 
-# set this machine up: Python 3.15, Backlog.md, and the asdlc commands on your PATH. Safe to run again.
+# set this machine up: Python 3.15, Backlog.md, and a launcher on your PATH for the installed plugin's asdlc commands. Safe to run again.
 setup:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -39,17 +39,18 @@ setup:
 
     echo "asdlc commands"
     mkdir -p "$HOME/.local/bin"
+    linked=0
     for name in asdlc asdlc-plugin; do
         link="$HOME/.local/bin/$name"
-        src="$root/scripts/$name"
-        if [ -L "$link" ] && [ "$(readlink -f "$link")" = "$(readlink -f "$src")" ]; then
-            ok "$link"
-        elif [ -e "$link" ] || [ -L "$link" ]; then
-            warn "$link already exists and is not this clone's; left alone (replace it with: ln -sf $src $link)"
-        else
-            ln -s "$src" "$link" && did "linked $link"
+        if [ -L "$link" ]; then
+            case "$(readlink -f "$link")" in
+                */scripts/"$name") linked=1; warn "$link is a link to $(readlink -f "$link"), so it runs whatever that clone has checked out, not the plugin you installed. Replace it: $root/scripts/asdlc install-command" ;;
+            esac
         fi
     done
+    # The launcher runs the installed plugin's scripts, whatever this clone has checked out. An old link is left until you replace it.
+    [ "$linked" = 1 ] || "$root/scripts/asdlc" install-command | sed 's/^/  info  /' || warn "asdlc install-command left a file alone; see the line above"
+    command -v claude >/dev/null 2>&1 && ok "claude: $(command -v claude)" || warn "claude is missing: the commands run the asdlc plugin Claude Code installed (/plugin install asdlc@asdlc)"
     case ":$PATH:" in *":$HOME/.local/bin:"*) ok "$HOME/.local/bin is on your PATH" ;; *) warn "$HOME/.local/bin is not on your PATH; add it to your shell profile" ;; esac
 
     echo "identity"
@@ -95,6 +96,10 @@ try:
     dir=".worktrees/try-$(git rev-parse --short HEAD)"
     [ -d "$dir" ] || git worktree add --detach "$dir" HEAD >/dev/null
     echo "load it with:  claude --plugin-dir $(pwd)/$dir"
+
+# name a release: set the plugin's version and file the changelog's Unreleased entries under it; installs only update when the version changes
+release version:
+    uv run --script scripts/release.py {{version}}
 
 # run scripts/eval with your arguments; run, gate and calibrate spend tokens, so a person types them
 eval *args:

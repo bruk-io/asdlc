@@ -6,7 +6,7 @@ import unittest
 
 from tests.support import ROOT
 
-RECIPES = {"setup", "check", "test", "artefacts", "conformance", "validate", "audit", "doctor", "try", "eval"}
+RECIPES = {"setup", "check", "test", "artefacts", "conformance", "validate", "audit", "doctor", "try", "eval", "release"}
 TEXT = (ROOT / "justfile").read_text()
 
 
@@ -35,6 +35,14 @@ class JustfileTest(unittest.TestCase):
     def test_no_recipe_spends_tokens_on_its_own(self) -> None:
         """`eval` passes arguments through; nothing calls `run`, `gate` or `calibrate` itself."""
         self.assertFalse(re.search(r"scripts/eval\s+(run|gate|calibrate)\b", TEXT))
+
+    def test_setup_never_links_a_command_to_this_clone(self) -> None:
+        """intent/command-from-a-release.md: a link into the clone runs whatever is checked out there."""
+        setup = TEXT.split("\nsetup:\n")[1].split("\n# every artefact check")[0]
+        self.assertNotRegex(setup, r"(?m)^\s*ln\b")
+        self.assertIn('"$root/scripts/asdlc" install-command', setup)
+        self.assertIn('[ "$linked" = 1 ] ||', setup, "an old link is reported, and replaced only when the person runs install-command")
+        self.assertRegex(setup, r"install-command \| sed [^\n]* \|\| warn ", "a file install-command leaves alone is a warning; the rest of setup still runs")
 
     @unittest.skipUnless(shutil.which("just"), "just is not installed")
     def test_just_reads_the_file_and_lists_every_recipe(self) -> None:

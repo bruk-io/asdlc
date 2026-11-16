@@ -16,6 +16,7 @@ from pathlib import Path
 from tests.support import ROOT, git, load, run_script
 
 load("scripts/repo_slug.py")  # scripts/asdlc imports it from beside itself
+load("scripts/asdlc_launcher.py")
 asdlc = load("scripts/asdlc")
 
 BACKLOG = os.environ.get("ASDLC_BACKLOG") or shutil.which("backlog")
@@ -617,6 +618,168 @@ def facts(**changes: object) -> object:
         mcp_configs=(("/home/kyle/.claude.json", json.dumps({"mcpServers": {"github": {"command": "gh-mcp"}}})),),
     )
     return asdlc.replace(healthy, **changes)
+
+
+LAUNCHER_TEXT = (ROOT / "scripts" / "asdlc_launcher.py").read_text()
+INSTALLED = Path("/home/kyle/.claude/plugins/cache/asdlc/asdlc/0.2.0")
+
+
+class CommandFromTheInstalledPluginTest(unittest.TestCase):
+    """intent/command-from-a-release.md: the command is the installed plugin's, whatever a clone has checked out."""
+
+    def test_what_a_file_on_the_path_is(self) -> None:
+        clone = Path("/home/kyle/src/asdlc/scripts")
+        cases = {
+            "this release's launcher": ((LAUNCHER_TEXT, None), asdlc.CommandKind.LAUNCHER),
+            "another release's launcher": ((LAUNCHER_TEXT + "# changed\n", None), asdlc.CommandKind.OLD_LAUNCHER),
+            "a link to a clone's script": (((ROOT / "scripts" / "asdlc").read_text(), clone / "asdlc"), asdlc.CommandKind.CLONE_LINK),
+            "a link to a clone's other script": (("", clone / "asdlc-plugin"), asdlc.CommandKind.CLONE_LINK),
+            "the plugin's bin wrapper": (((ROOT / "bin" / "asdlc").read_text(), None), asdlc.CommandKind.PLUGIN_BIN),
+            "a link to the launcher kept elsewhere": ((LAUNCHER_TEXT, Path("/home/kyle/dotfiles/asdlc")), asdlc.CommandKind.LAUNCHER),
+            "something else": (("#!/bin/sh\necho hello\n", None), asdlc.CommandKind.OTHER),
+            "unreadable": (("", None), asdlc.CommandKind.OTHER),
+        }
+        for name, ((text, link), kind) in cases.items():
+            with self.subTest(name=name):
+                self.assertIs(asdlc.command_kind(text, link, LAUNCHER_TEXT), kind)
+
+    def test_the_copy_that_is_running_says_which_it_is(self) -> None:
+        records = asdlc.plugin_installs(json.dumps({"plugins": {"asdlc@asdlc": [
+            {"scope": "user", "installPath": str(INSTALLED), "version": "0.2.0", "gitCommitSha": "2ac9e69c03096bbf48da48c8b29ebfff8d3ccddb"}]}}))
+        installed = asdlc.running(INSTALLED, '{"name": "asdlc", "version": "0.2.0"}', records, False)
+        self.assertEqual(asdlc.version_text(installed), f"asdlc 0.2.0 (2ac9e69c0309) from {INSTALLED}")
+        self.assertEqual(asdlc.version_text(asdlc.running(INSTALLED, '{"version": "0.2.0"}', (), False)), f"asdlc 0.2.0 from {INSTALLED}")
+        copy = asdlc.running(ASDLC_ROOT, '{"version": "0.3.0"}', records, True)
+        self.assertEqual(asdlc.version_text(copy), "asdlc 0.3.0, a working copy at /home/kyle/src/asdlc, not the installed plugin")
+        for manifest in ("", "not json", "[]", '{"name": "asdlc"}'):
+            with self.subTest(manifest=manifest):
+                self.assertIn("asdlc of an unknown version", asdlc.version_text(asdlc.running(INSTALLED, manifest, (), False)))
+
+    def findings(self, kind: object, target: str = "", **changes: object) -> list[object]:
+        found = facts(commands=(asdlc.CommandFacts("asdlc", kind, target), asdlc.CommandFacts("asdlc-plugin", asdlc.CommandKind.LAUNCHER)), **changes)
+        return [f for f in asdlc.diagnose(found) if f.area == "asdlc"]
+
+    def test_doctor_on_each_kind_of_command(self) -> None:
+        cases = {
+            asdlc.CommandKind.LAUNCHER: (asdlc.Level.PASS, "/usr/bin/asdlc"),
+            asdlc.CommandKind.CLONE_LINK: (asdlc.Level.FAIL, "is a link to /home/kyle/src/asdlc/scripts/asdlc, so it runs whatever that clone has checked out"),
+            asdlc.CommandKind.OLD_LAUNCHER: (asdlc.Level.WARN, "another release's launcher"),
+            asdlc.CommandKind.PLUGIN_BIN: (asdlc.Level.WARN, "your terminal has no asdlc"),
+            asdlc.CommandKind.OTHER: (asdlc.Level.WARN, "can't tell which release it runs"),
+        }
+        for kind, (level, says) in cases.items():
+            with self.subTest(kind=kind):
+                (finding,) = self.findings(kind, "/home/kyle/src/asdlc/scripts/asdlc")
+                self.assertEqual(finding.level, level)
+                self.assertIn(says, finding.message)
+                if level is not asdlc.Level.PASS:
+                    self.assertIn("asdlc install-command", finding.message, "every finding that is not a pass names the fix")
+
+    def test_doctor_says_which_copy_is_running(self) -> None:
+        installed = asdlc.Running("0.2.0", INSTALLED, False, "2ac9e69c03096bbf48da48c8b29ebfff8d3ccddb")
+        (passed,) = [f for f in asdlc.diagnose(facts(running=installed)) if f.area == "release"]
+        self.assertEqual((passed.level, passed.message), (asdlc.Level.PASS, f"asdlc 0.2.0 (2ac9e69c0309) from {INSTALLED}"))
+        (warned,) = [f for f in asdlc.diagnose(facts(running=asdlc.Running("0.3.0", ASDLC_ROOT, True))) if f.area == "release"]
+        self.assertEqual(warned.level, asdlc.Level.WARN)
+        self.assertIn("a working copy at /home/kyle/src/asdlc", warned.message)
+
+    def test_a_command_missing_from_the_path_names_the_fix(self) -> None:
+        (finding,) = [f for f in asdlc.diagnose(facts(asdlc=asdlc.Tool(None))) if f.area == "asdlc"]
+        self.assertEqual(finding.level, asdlc.Level.FAIL)
+        self.assertIn("asdlc install-command", finding.message)
+
+    def test_an_allow_rule_for_the_installed_plugin_outlives_an_update(self) -> None:
+        self.assertEqual(asdlc.any_release(INSTALLED), "/home/kyle/.claude/plugins/cache/asdlc/asdlc/*")
+        self.assertEqual(asdlc.any_release(ASDLC_ROOT), "/home/kyle/src/asdlc")
+        self.assertEqual(asdlc.any_release(Path("/cache/a/b")), "/cache/a/b", "only the version folder of an installed plugin")
+        rules = asdlc.permission_rules((), None, {}, (INSTALLED, INSTALLED.with_name("0.1.0"))).allow
+        for script in ("asdlc", "asdlc-plugin"):
+            with self.subTest(script=script):
+                self.assertIn(f"Bash(/home/kyle/.claude/plugins/cache/asdlc/asdlc/*/scripts/{script} *)", rules)
+                self.assertIn(f"Bash(uv run --script /home/kyle/.claude/plugins/cache/asdlc/asdlc/*/scripts/{script} *)", rules)
+        self.assertEqual(len([r for r in rules if "/scripts/asdlc " in r]), 2, "two installed versions make one pair of rules")
+        self.assertFalse([r for r in rules if "0.2.0" in r or "0.1.0" in r])
+
+    def test_version_prints_the_working_copy_when_run_from_one(self) -> None:
+        done = run_script("scripts/asdlc", "--version")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertRegex(done.stdout, rf"^asdlc \S+, a working copy at {re.escape(str(ROOT))}, not the installed plugin\n$")
+
+    def test_the_plugins_bin_folder_holds_both_commands(self) -> None:
+        for name in ("asdlc", "asdlc-plugin"):
+            with self.subTest(name=name):
+                wrapper = ROOT / "bin" / name
+                self.assertTrue(os.access(wrapper, os.X_OK), f"bin/{name} is not executable")
+                self.assertIn(f'exec uv run --quiet --script "$(dirname "$0")/../scripts/{name}" "$@"', wrapper.read_text())
+
+    @unittest.skipUnless(shutil.which("uv"), "uv is not installed")
+    def test_a_bin_wrapper_runs_the_script_beside_it_from_any_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as elsewhere:
+            done = subprocess.run([str(ROOT / "bin" / "asdlc"), "--version"], capture_output=True, text=True, cwd=elsewhere)
+        self.assertEqual((done.returncode, done.stdout), (0, run_script("scripts/asdlc", "--version").stdout), done.stderr)
+
+
+class InstallCommandTest(unittest.TestCase):
+    def setUp(self) -> None:
+        handle = tempfile.TemporaryDirectory()
+        self.addCleanup(handle.cleanup)
+        self.home = Path(handle.name).resolve()
+        self.bin = self.home / "bin"
+
+    def install(self) -> tuple[int, dict[str, object]]:
+        done = run_script("scripts/asdlc", "install-command", "--to", str(self.bin), "--json")
+        return done.returncode, {row["command"]: row for row in json.loads(done.stdout)["commands"]}
+
+    def test_it_installs_the_launcher_and_a_second_run_changes_nothing(self) -> None:
+        code, rows = self.install()
+        self.assertEqual((code, rows["asdlc"]["was"], rows["asdlc-plugin"]["result"]), (0, "missing", "installed"))
+        for name in ("asdlc", "asdlc-plugin"):
+            with self.subTest(name=name):
+                self.assertEqual((self.bin / name).read_text(), LAUNCHER_TEXT)
+                self.assertTrue(os.access(self.bin / name, os.X_OK))
+                self.assertFalse((self.bin / name).is_symlink())
+        code, rows = self.install()
+        self.assertEqual((code, rows["asdlc"]["result"]), (0, "already this release's launcher"))
+
+    def test_a_link_into_a_clone_is_replaced_and_the_clone_is_untouched(self) -> None:
+        """What `just setup` used to make. The launcher must replace the link, never be written through it into the clone."""
+        scripts = self.home / "src" / "asdlc" / "scripts"
+        scripts.mkdir(parents=True)
+        self.bin.mkdir()
+        for name in ("asdlc", "asdlc-plugin"):
+            (scripts / name).write_text(f"the clone's {name}\n")
+            (self.bin / name).symlink_to(scripts / name)
+        code, rows = self.install()
+        self.assertEqual(code, 0)
+        for name in ("asdlc", "asdlc-plugin"):
+            with self.subTest(name=name):
+                self.assertEqual(rows[name]["was"], "clone link")
+                self.assertIn(str(scripts / name), rows[name]["result"])
+                self.assertFalse((self.bin / name).is_symlink())
+                self.assertEqual((self.bin / name).read_text(), LAUNCHER_TEXT)
+                self.assertEqual((scripts / name).read_text(), f"the clone's {name}\n")
+
+    def test_another_releases_launcher_is_replaced(self) -> None:
+        self.bin.mkdir()
+        (self.bin / "asdlc").write_text(LAUNCHER_TEXT + "# an older release\n")
+        code, rows = self.install()
+        self.assertEqual((code, rows["asdlc"]["was"]), (0, "old launcher"))
+        self.assertEqual((self.bin / "asdlc").read_text(), LAUNCHER_TEXT)
+
+    def test_a_file_that_is_not_asdlcs_is_left_alone_and_the_command_fails(self) -> None:
+        self.bin.mkdir()
+        (self.bin / "asdlc").write_text("#!/bin/sh\necho mine\n")
+        code, rows = self.install()
+        self.assertEqual(code, 1)
+        self.assertIn("left alone", rows["asdlc"]["result"])
+        self.assertEqual((self.bin / "asdlc").read_text(), "#!/bin/sh\necho mine\n")
+        self.assertEqual(rows["asdlc-plugin"]["result"], "installed", "the other command is still installed")
+
+    def test_it_says_when_the_folder_is_not_on_the_path(self) -> None:
+        done = run_script("scripts/asdlc", "install-command", "--to", str(self.bin))
+        self.assertIn(f"{self.bin} is not on your PATH", done.stdout)
+        on_path = run_script("scripts/asdlc", "install-command", "--to", str(self.bin), env={"PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"})
+        self.assertNotIn("is not on your PATH", on_path.stdout)
 
 
 def settings(**permissions: object) -> tuple[tuple[str, str], ...]:
