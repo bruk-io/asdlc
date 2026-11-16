@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### A control can be recorded, handed to the reviewer and counted ([plan](plan/negative-control.md))
+
+- `asdlc record-check` takes `--control <name> --without "<text>"` before the `--`: the run is offered as a control, the run of a named test without the mechanism it proves, which must fail. The same command recorded passing afterwards, on another commit or with different uncommitted changes, completes it. A marked run that passes is recorded as a control that did not fail, and `record-check` says so. Without the flags `record-check` does what it did.
+- Controls are kept on the task in `asdlc_controls`, a key only asdlc writes. Nothing in a task's notes counts as one.
+- `asdlc not-proof` records that a test is kept but is not the proof of the change, and which complete control is. `asdlc finish --no-control "<why>"` states that a hand-over has nothing to control for. Each hand-over is counted, so a control counts for the hand-over it was recorded in and no later one.
+- `asdlc review-next` hands the reviewer the controls, the statements and the number of earlier hand-overs, in its JSON and its text. `asdlc review-done --cannot-fail <n>` records how many tests offered as proof would pass without their mechanism.
+- `asdlc mine` says where each held task's hand-over stands. `asdlc stats` has a new number in the Test stage, controls at hand-over; the stats cache is rebuilt once.
+- Nothing is refused for want of a control yet. `asdlc finish` will refuse a task larger than size 1 without one in a later change, with the agents' instructions.
+
 ## 0.2.0 - 2026-11-15
 
 ### The asdlc command comes from the installed plugin ([plan](plan/command-from-a-release.md))

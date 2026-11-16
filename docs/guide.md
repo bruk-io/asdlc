@@ -134,7 +134,7 @@ With `review: true`, your orchestrator also claims reviews of other engineers' f
 
 ### Seeing how it's going
 
-- `asdlc mine --as <you>`: your workers' tasks, reviews and reserved work.
+- `asdlc mine --as <you>`: your workers' tasks, reviews and reserved work. Under each task, a `control:` line says where its hand-over stands: not needed (size-1), missing, unresolved (with the controls' names), ready, or, for a task In Review, what its hand-over offered.
 - `asdlc stats [--since 2026-11-01] [--stage plan|design|build|test|deploy|maintain|coordination]`: the playbook's numbers by stage, each beside the playbook's own name for it, and the ones the board can't measure, with what they need. "What the numbers mean", below, defines each one.
 
 ### When an asdlc command is interrupted
@@ -181,7 +181,8 @@ Ctrl-C, closing the terminal or killing an agent mid-command is safe. A change t
 ### Test (plays 07 and 08)
 
 - **First-pass check success** (play 07): of each task's first `record-check` after a change (a check on a later commit than the worker's baseline, or with uncommitted changes), the share that passed. The baseline, which the worker records before changing anything, is counted apart: a red baseline means the task started from a broken branch.
-- **Checks per task** and **failed checks**: the `record-check` notes on each task, and how many exited non-zero.
+- **Checks per task** and **failed checks**: the `record-check` notes on each task, and how many exited non-zero. A control's two runs are recorded checks like any other, so each control adds one failed check.
+- **Controls at hand-over** (play 07): for each task larger than size 1, per hand-over (each `asdlc finish`), what it offered: how many complete controls, how many not-proof statements, and its no-control statement if it gave one, read from the task's `asdlc_controls` key as that `finish` left it. A control is a test recorded failing without the mechanism it proves (`record-check --control <name> --without "<text>"`) and the same command recorded passing afterwards on a different tree. Beside each hand-over is the number of tests its review then found could not fail (`review-done --cannot-fail <n>`), or that the review did not say. The totals are shares of hand-overs: with a control, with a no-control statement, with neither, and made before controls were recorded (a task handed over by an older asdlc, counted apart from one without a control), then the same for fix rounds alone. Read it this way: the share with a control should be high, the no-control share small outside fix rounds, and tests that could not fail should fall towards none. A high no-control share on first hand-overs, or `--cannot-fail` staying up while controls are recorded, says controls are being recorded for the wrong thing, which the reviewer and the team's review policy fix, not the tool. `asdlc finish` does not refuse a hand-over without a control yet, so "neither" is expected for now.
 - **Eval pass rate** (play 08): not measured until there is an eval suite whose results are recorded per change.
 
 ### Deploy (plays 05, 09 and 10)
