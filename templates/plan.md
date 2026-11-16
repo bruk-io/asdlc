@@ -1,25 +1,19 @@
-# Plan: <the change>
-
-- Spec: [`spec/<slug>.md`](../spec/<slug>.md), approved <YYYY-MM-DD>
-- Status: draft. Merging this file approves the plan; implementation starts after it.
-- Delivers: <the requirement numbers this change delivers, such as R1, R4>
-
-<One paragraph: what this change is and why it comes now.>
-
-## Files that change
-
-| File | New | What it holds | Requirements |
-|---|---|---|---|
-| `<path>` | yes | <what changes> | R1 |
+---
+kind: plan
+---
+# Plan: <the intent's or the task's title>
 
 ## Order of work
 
-1. <A step small enough to check before the next one starts.>
+### Step 1: <one piece of the work>
+- delivers: <R1, R2>
+
+<What changes and where. A step that needs product questions answered first hands over to a child intent: "- intent: <slug>".>
 
 ## Risks
 
-- **<What could break.>** <How likely, and what is done about it.>
+<What could break, and the riskiest step.>
 
 ## Proof
 
-- <A check that shows the change works, as a command or an observable result.>
+<The checks that show each requirement is met.>

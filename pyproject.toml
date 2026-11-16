@@ -1,0 +1,31 @@
+[project]
+name = "asdlc"
+version = "2.0.0.dev0"
+description = "Anthropic's AI-native SDLC playbook as a Claude Code plugin: intents, specs, plans and tasks as files in git, each accepted by merging it."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.15"
+dependencies = ["click>=8.1"]
+
+[project.scripts]
+asdlc = "asdlc.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["asdlc", "asdlc.domain", "asdlc.io", "asdlc.presentation"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+builtins = ["frozendict"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

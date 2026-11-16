@@ -1,25 +1,25 @@
-# Intent: <what the requester wants, in their words>
-
-- Author: <the person with the problem>
-- Status: draft. Merging this file accepts it.
-- Date: <YYYY-MM-DD>
+---
+kind: intent
+author: <who asked for this>
+---
+# Intent: <what is wanted, in a few words>
 
 ## Problem
 
-<What can't be done today, and why it matters, in the requester's own terms. Not a solution.>
+<What is wrong today, in the requester's own words.>
 
 ## Proposed outcome
 
-- <What is true when this is done, phrased so a check or a reviewer can judge it.>
+<What will be true when this is finished. Each line is something a person can judge.>
 
 ## Affected users and systems
 
-- <Who and what this touches.>
+<Who and what this touches.>
 
 ## Constraints
 
-- <What must hold or must not break.>
+<What must not break.>
 
 ## Open questions
 
-- [ ] <What nobody knows yet, one question per line. The spec answers each one or carries it forward with a reason, citing it as "intent question N". If there are none, replace this line with "None.">
+### Q1: <a question the spec must answer or carry forward>

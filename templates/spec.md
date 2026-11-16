@@ -1,22 +1,28 @@
+---
+kind: spec
+policies: [<each policy skill applied while writing this>]
+---
 # Spec: <the intent's title>
-
-- Intent: [`intent/<slug>.md`](../intent/<slug>.md), accepted <YYYY-MM-DD>
-- Status: draft. Merging this file approves it and starts planning.
-
-<One paragraph: what will be built and the decisions that shape it.>
 
 ## Requirements
 
-- **R1.** <One checkable requirement. Number them in order; plans cite them by number.>
+### R1: <one thing that must be true, checkable yes or no>
+- area: <the part of the product it belongs to>
+
+<Detail, when the title is not enough. To end an earlier requirement, add "- replaces: <intent>.R<n>".>
 
 ## Design
 
-<How the requirements are met. Answer each of the intent's open questions here, under a heading or line that says "answers intent question N", or carry it forward with "carries forward intent question N" and the reason.>
+<How the requirements are met, and what was decided on the way.>
+
+## Open questions from intent
+
+### Q1: <the question, copied from the intent>
+- answer: <answered or carried>
+
+<The answer, or where the question was carried to.>
 
 ## Areas of concern
 
-- <Where policies conflict or a requirement can't be met cleanly, for the gate owner to decide.>
-
-## Out of scope
-
-<What this spec deliberately leaves out.>
+### C1: <something that could go wrong, or two policies that cannot both be met>
+- owner: <who decides>
