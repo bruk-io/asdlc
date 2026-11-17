@@ -44,8 +44,9 @@ The repository is a marketplace holding one Python package and one plugin. `.cla
 - `src/asdlc/presentation/` - turns what the domain returned into text for a person or JSON for a hook.
 - `src/asdlc/cli.py` - the click command. The only module that imports all three.
 - `src/asdlc/templates/` - the four documents, shipped in the package. `examples/claims/` - a worked example the tests read.
-- `plugins/asdlc/` - the Claude Code plugin, and everything Claude Code loads: its manifest in `.claude-plugin/plugin.json`, and later its skills, agents and evals. `hooks/hooks.json` registers two hooks: `asdlc hook run lint` after Claude writes a document, and `asdlc hook run guard` before Claude runs `git push`. `bin/asdlc` puts the command on a session's PATH.
-- An installed plugin is a copy of `plugins/asdlc/` alone, without `src/`. So `bin/asdlc` runs the working tree's package in a checkout, and otherwise has uv fetch the command from the repository. Nothing in the plugin may read a path above its own folder any other way.
+- `plugins/asdlc/` - the Claude Code plugin, and everything Claude Code loads: its manifest in `.claude-plugin/plugin.json`, and later its skills, agents and evals. `hooks/hooks.json` registers three hooks: `scripts/install` when a session starts, `asdlc hook run lint` after Claude writes a document, and `asdlc hook run guard` before Claude runs `git push`.
+- An installed plugin is a copy of `plugins/asdlc/` alone, without `src/`. So `scripts/install` installs the package at each session start: from the working tree in a checkout, and otherwise from the repository, once for each version of `plugin.json`. It installs into `${CLAUDE_PLUGIN_DATA}`, which the hooks call, and copies that to the session's temp folder, which goes first on `PATH`. Nothing else in the plugin may read a path above its own folder.
+- In a session, the hooks and `asdlc` on `PATH` are the copy made when the session started. After editing `src/asdlc`, `uv run asdlc` runs the working tree, and a new session refreshes the copy.
 - `tests/` - mirrors the layers. Domain tests touch no files; `test_example.py` and `test_cli.py` run on real files and a real git repository.
 
 ## Conventions
