@@ -22,10 +22,12 @@ kind: plan
 
 This is built on top of capture-intent's four tasks. It needs their session install, their shape check and `just eval`.
 
-### Step 1: Lint finds a property written twice under one heading
-- delivers: R17
+### Step 1: Lint finds a property written twice, and a concern with no owner
+- delivers: R17, R18
 
 `items` in `src/asdlc/domain/documents.py` reads the `- key: value` lines under a heading into a mapping, so a second line with the same key replaces the first. An `Item` will also carry the keys that were repeated, and `parse` will report each under the `property` rule. The message says a heading takes a property once, and that a requirement ending two requirements is written as two.
+
+`parse` also reports a `### C<n>:` heading with no `- owner:` under it, under a new `owner` rule. An owner written lower down, under the concern's text, is not read as its owner, so it counts as none.
 
 It comes first because the skill's cases lean on it: a spec with two `- replaces:` lines has to fail lint, or the case that checks `- replaces:` can pass on a spec that leaves a requirement in force.
 
@@ -70,6 +72,7 @@ One step, because `just check` fails on a skill that lands without both kinds of
 
 - **`just check`.** The shape check reads the new skill and its cases, and the new test lints what every scaffold builds.
 - **R17.** Tests in `tests/domain/test_documents.py`: a requirement with two `- replaces:` lines is a `property` finding that names the heading and the key, and one with a single line is not.
+- **R18.** Tests in the same file: a concern with no owner, and one whose owner is under its text, are each an `owner` finding. A concern with its owner on the line under the heading is not. Every spec already in the repository still lints clean.
 - **R1 to R11, R14, R15, R16.** `just eval --tag generating-a-spec`, three runs a case, with its report in the pull request.
 - **R12.** A live session on this repository's next intent, in a copy of the repository where that intent's merge is simulated: the draft is shown, one correction is applied, and nothing is pushed before that.
 - **R13.** Not shown by this plan. The skill's last step is the first skill's, word for word in what it forbids, and that one opened a pull request and stopped. This skill opening one is seen the first time it is used after the stack is merged.
