@@ -5,6 +5,12 @@ kind: plan
 
 Sizing gave this task its own plan: the cache is shared with two other panels.
 
+## Files that change
+
+- portal/src/shared/cache.ts (new)
+- portal/src/documents/DocumentsPanel.tsx
+- portal/src/claims/StatusPanel.tsx (new)
+
 ## Order of work
 
 ### Step 1: Move the shared cache out of the documents panel

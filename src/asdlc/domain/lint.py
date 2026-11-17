@@ -3,24 +3,34 @@
 from collections.abc import Iterable, Sequence
 
 from asdlc.domain.documents import (
+    CONSTRAINTS,
+    CONSTRAINTS_MET,
     Document,
     Finding,
     Kind,
     Mark,
+    bullets,
+    filled,
     label,
     listed,
     of_kind,
     parse,
     qualify,
     step_delivers,
+    table_rows,
 )
 from asdlc.domain.requirements import requirements
 
 _ANSWERS = ("answered", "carried")
 
 
+def _plain(text: str) -> str:
+    """Give a constraint as it is compared: spacing, case and a final stop aside."""
+    return " ".join(text.split()).rstrip(".").casefold()
+
+
 def lint(documents: Sequence[Document]) -> tuple[Finding, ...]:
-    """Find a broken chain, a citation of nothing, and work that nothing delivers."""
+    """Find a broken chain, a citation of nothing, and what nothing answers."""
     findings: list[Finding] = []
     intents = {d.slug: d for d in of_kind(documents, Kind.INTENT)}
     specs = {d.slug: d for d in of_kind(documents, Kind.SPEC)}
@@ -90,6 +100,17 @@ def lint(documents: Sequence[Document]) -> tuple[Finding, ...]:
                     "questions",
                     f"the intent's {name} must appear here as '### {name}: ...' "
                     "with '- answer: answered' or '- answer: carried'",
+                )
+        rows = table_rows(spec.sections.get(CONSTRAINTS_MET, ()))
+        met = {_plain(row[0]) for row in rows}
+        for constraint in filled(bullets(intent.sections.get(CONSTRAINTS, ()))):
+            if _plain(constraint) not in met:
+                wrong(
+                    spec,
+                    "constraints",
+                    f'the intent\'s constraint "{constraint}" has no row under '
+                    f"'## {CONSTRAINTS_MET}'; a spec says how each one is met, "
+                    f"as '| {constraint} | what meets it |'",
                 )
 
     for plan in (*plans.values(), *task_plans):

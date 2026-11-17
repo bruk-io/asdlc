@@ -42,10 +42,14 @@ policies: [pii-in-logs]
 ---
 ### R1: Status updates within 2 seconds of a change
 - replaces: claims-status.R3
-- area: freshness
 ```
 
 `R` is a requirement, `Q` an open question, `C` an area of concern, `Step` a plan step. A requirement's id is `<slug>.R<n>` and is never reused. A later spec ends an earlier requirement with `- replaces:`; the earlier spec is never edited.
+
+Lint also reads two sections, both named as the course names them:
+
+- A plan's `## Files that change` lists the files it touches, one `- path` to a line.
+- A spec's `## How each constraint in the intent is met` is a table with a row for every constraint the intent lists.
 
 ## Commands
 
@@ -75,7 +79,7 @@ The grammar is the one steg's command uses: a singular noun, a verb from a close
 Every command takes `-h`, `--json`, `-q` (identifiers only), `-v` (diagnostics on stderr), `--no-color`, `--no-input` and `--root <folder>`.
 
 - **stdout is the result and nothing else.** A check that finds nothing prints nothing.
-- **A list is one record per line, tab-separated,** with no header: `requirement list` prints id, state, area, title.
+- **A list is one record per line, tab-separated,** with no header: `requirement list` prints id, state, title.
 - **`--json` is one array for a list and one object for `show`.**
 
 | Status | Meaning |

@@ -18,7 +18,8 @@ Customers, the claims line, the portal and claims-api.
 
 ## Constraints
 
-Only claims-api talks to claims-core. No personal data beyond the status leaves claims-api.
+- Only claims-api talks to claims-core.
+- No personal data beyond the status leaves claims-api.
 
 ## Open questions
 

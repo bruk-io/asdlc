@@ -7,6 +7,7 @@ INTENT = "---\nkind: intent\nauthor: a\n---\n# Intent: claims status\n"
 SPEC = "---\nkind: spec\n---\n# Spec: claims status\n### R1: one\n### R2: two\n"
 PLAN = (
     "---\nkind: plan\n---\n# Plan: claims status\n"
+    "## Files that change\n- a.py\n## Order of work\n"
     "### Step 1: x\n- delivers: R1\n### Step 2: y\n- delivers: R2\n"
 )
 FIRST = "---\nkind: task\nstep: 1\ndelivers: [R1]\nsize: 3\n---\n# Task: the endpoint\n"
@@ -20,7 +21,10 @@ FILES = {
     "intent/claims/plan.md": PLAN,
     "intent/claims/tasks/01-a/task.md": FIRST,
     "intent/claims/tasks/02-b/task.md": SECOND,
-    "intent/claims/tasks/02-b/plan.md": "---\nkind: plan\n---\n### Step 1: z\n",
+    "intent/claims/tasks/02-b/plan.md": (
+        "---\nkind: plan\n---\n## Files that change\n- b.py\n"
+        "## Order of work\n### Step 1: z\n"
+    ),
 }
 
 

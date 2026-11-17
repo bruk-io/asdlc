@@ -492,7 +492,7 @@ def requirement() -> None:
 @click.option("--all", "everything", is_flag=True, help="Replaced and retired too.")
 @universal
 def requirement_list(options: Options, everything: bool) -> None:
-    """List the requirements in force: id, state, area, title."""
+    """List the requirements in force: id, state, title."""
     rows = [
         row
         for row in _requirements(options)

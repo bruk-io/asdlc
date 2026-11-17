@@ -21,7 +21,6 @@ def requirement(found: Requirement) -> dict[str, object]:
     return {
         "id": found.id,
         "title": found.title,
-        "area": found.area,
         "state": state(found),
         "standing": found.standing,
         "progress": found.progress,

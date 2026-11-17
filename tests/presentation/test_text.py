@@ -11,7 +11,6 @@ def requirement(id: str, title: str, **changes: object) -> Requirement:
     fields = dict(
         id=id,
         title=title,
-        area="status",
         replaces=None,
         replaced_by=None,
         retired_by=None,
@@ -46,15 +45,9 @@ def test_a_finding_is_path_rule_message():
     }
 
 
-def test_a_requirement_is_id_state_area_title():
-    assert (
-        text.requirement_line(NEW)
-        == "new.R1\tin tasks\tstatus\tUpdate within 2 seconds"
-    )
-    assert (
-        text.requirement_line(OLD)
-        == "old.R3\treplaced\tstatus\tRefresh every 60 seconds"
-    )
+def test_a_requirement_is_id_state_title():
+    assert text.requirement_line(NEW) == "new.R1\tin tasks\tUpdate within 2 seconds"
+    assert text.requirement_line(OLD) == "old.R3\treplaced\tRefresh every 60 seconds"
 
 
 def test_the_state_of_a_retired_requirement():
@@ -69,7 +62,6 @@ def test_a_requirement_in_full_is_a_field_per_line_then_its_lineage():
     assert text.requirement_record(OLD, (OLD, NEW)).split("\n") == [
         "id\told.R3",
         "title\tRefresh every 60 seconds",
-        "area\tstatus",
         "state\treplaced",
         "replaces\t",
         "replaced-by\tnew.R1",
@@ -86,7 +78,6 @@ def test_a_requirement_as_json_keeps_every_field_and_its_lineage():
     assert document == {
         "id": "new.R1",
         "title": "Update within 2 seconds",
-        "area": "status",
         "state": "in tasks",
         "standing": "in force",
         "progress": "in tasks",

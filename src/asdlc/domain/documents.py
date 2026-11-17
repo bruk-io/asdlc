@@ -5,14 +5,13 @@ with a heading and a short list of properties:
 
     ### R1: Status updates within 2 seconds of a change
     - replaces: claims-status.R3
-    - area: status
 
 A document holds what a person declared. State is worked out elsewhere and has no
 place to be written here: an unknown key or property is a finding.
 """
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import PurePosixPath
@@ -62,7 +61,13 @@ class Document:
     title: str  # the first heading, without its 'Intent:' or 'Task:' prefix
     meta: frozendict[str, str | tuple[str, ...]]
     items: tuple[Item, ...]
+    sections: frozendict[str, tuple[str, ...]]  # each '## heading', its lines
 
+
+# The sections a rule reads. The names are the course's.
+FILES = "Files that change"
+CONSTRAINTS = "Constraints"
+CONSTRAINTS_MET = "How each constraint in the intent is met"
 
 _FILES = frozendict(
     {"intent.md": Kind.INTENT, "spec.md": Kind.SPEC, "plan.md": Kind.PLAN}
@@ -94,7 +99,7 @@ _MARKS = frozendict(
 )
 _PROPS = frozendict(
     {
-        Mark.REQUIREMENT: ("replaces", "area"),
+        Mark.REQUIREMENT: ("replaces",),
         Mark.QUESTION: ("answer",),
         Mark.CONCERN: ("owner",),
         Mark.STEP: ("delivers", "intent"),
@@ -106,6 +111,9 @@ _ITEM = re.compile(r"### (Step |[RQC])(\d+): (\S.*)")
 _NEARLY_ITEM = re.compile(r"### (Step |[RQC]) ?\d")
 _PROP = re.compile(r"- ([a-z][a-z-]*): (\S.*)")
 _TITLE = re.compile(r"# (?:(?:Intent|Spec|Plan|Task): )?(\S.*)")
+_SECTION = re.compile(r"## (\S.*)")
+_CELL = re.compile(r"(?<!\\)\|")
+_RULE = re.compile(r":?-+:?")
 
 
 def label(item: Item) -> str:
@@ -200,6 +208,65 @@ def items(body: str) -> tuple[tuple[Item, ...], tuple[str, ...]]:
     return tuple(found), tuple(problems)
 
 
+def sections(body: str) -> frozendict[str, tuple[str, ...]]:
+    """Split a body into its `## ` sections: each heading, and the lines under it.
+
+    Blank lines are dropped. A heading inside a code fence is text.
+    """
+    found: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    fenced = False
+    for line in body.split("\n"):
+        if line.startswith("```"):
+            fenced = not fenced
+        heading = None if fenced else _SECTION.fullmatch(line)
+        if heading is not None:
+            current = found.setdefault(heading[1].strip(), [])
+        elif current is not None and line.strip():
+            current.append(line)
+    return frozendict({name: tuple(lines) for name, lines in found.items()})
+
+
+def bullets(lines: Sequence[str]) -> tuple[str, ...]:
+    """Give the list items among a section's lines, a wrapped item as one line."""
+    found: list[str] = []
+    for line in lines:
+        if line.startswith("- "):
+            found.append(line[2:].strip())
+        elif found and line.startswith((" ", "\t")):
+            found[-1] = f"{found[-1]} {line.strip()}"
+    return tuple(found)
+
+
+def filled(entries: Iterable[str]) -> tuple[str, ...]:
+    """Drop the entries that are still a template's `<placeholder>`."""
+    return tuple(
+        entry
+        for entry in entries
+        if not (entry.startswith("<") and entry.endswith(">"))
+    )
+
+
+def table_rows(lines: Sequence[str]) -> tuple[tuple[str, ...], ...]:
+    """Give the rows of a Markdown table among a section's lines, as cells.
+
+    The header, which is the row above the rule of dashes, is left out.
+    """
+    rows: list[tuple[str, ...]] = []
+    for line in lines:
+        text = line.strip()
+        if not text.startswith("|"):
+            continue
+        cells = tuple(
+            cell.strip().replace("\\|", "|") for cell in _CELL.split(text.strip("|"))
+        )
+        if all(_RULE.fullmatch(cell) for cell in cells):
+            del rows[-1:]
+            continue
+        rows.append(cells)
+    return tuple(rows)
+
+
 def title(body: str) -> str:
     """Give a document's first heading without its kind; empty when it has none."""
     for line in body.split("\n"):
@@ -262,7 +329,16 @@ def parse(path: str, text: str) -> tuple[Document | None, tuple[Finding, ...]]:
                     f"{label(item)} has '- {key}:', which is not a property of "
                     f"'{item.mark}'; the properties are {known}",
                 )
-    document = Document(path, kind, slug, task, title(body), frozendict(meta), found)
+    parts = sections(body)
+    if kind is Kind.PLAN and not filled(bullets(parts.get(FILES, ()))):
+        wrong(
+            "files",
+            f"a plan names the files it changes, so a review can compare the "
+            f"change with it: add '## {FILES}' with one '- path' line for each",
+        )
+    document = Document(
+        path, kind, slug, task, title(body), frozendict(meta), found, parts
+    )
     return document, tuple(findings)
 
 

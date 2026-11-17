@@ -18,7 +18,7 @@ author: <who asked for this>
 
 ## Constraints
 
-<What must not break.>
+- <one thing that must not break, one to a line; the spec says how each is met>
 
 ## Open questions
 

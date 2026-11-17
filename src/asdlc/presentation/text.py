@@ -24,7 +24,7 @@ def finding_line(finding: Finding) -> str:
 
 def requirement_line(requirement: Requirement) -> str:
     r = requirement
-    return f"{r.id}\t{state(r)}\t{r.area}\t{r.title}"
+    return f"{r.id}\t{state(r)}\t{r.title}"
 
 
 def ruling_line(ruling: Ruling) -> str:
@@ -37,7 +37,6 @@ def requirement_record(requirement: Requirement, chain: Sequence[Requirement]) -
     fields = [
         ("id", r.id),
         ("title", r.title),
-        ("area", r.area),
         ("state", state(r)),
         ("replaces", r.replaces or ""),
         ("replaced-by", r.replaced_by or ""),

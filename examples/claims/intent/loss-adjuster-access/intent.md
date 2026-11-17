@@ -19,7 +19,7 @@ Loss adjusters, the claims line, the partner portal.
 
 ## Constraints
 
-An adjuster is not a customer and has no customer login.
+- An adjuster is not a customer and has no customer login.
 
 ## Open questions
 

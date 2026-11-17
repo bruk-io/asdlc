@@ -7,22 +7,25 @@ policies: [pii-in-logs]
 ## Requirements
 
 ### R1: A customer can see the status of their own claim
-- area: status
 
 ### R2: Status is one of four states
-- area: status
 
 Received, in review, approved, paid.
 
 ### R3: Status refreshes every 60 seconds
-- area: freshness
 
 ### R4: The response holds no field beyond the status
-- area: privacy
 
 ## Design
 
 The portal's status panel reads one endpoint on claims-api, which reads claims-core and caches the answer.
+
+## How each constraint in the intent is met
+
+| Constraint | Met by |
+|---|---|
+| Only claims-api talks to claims-core | The panel reads one endpoint on claims-api and never calls claims-core. |
+| No personal data beyond the status leaves claims-api | R4. The response holds the status and nothing else. |
 
 ## Open questions from intent
 

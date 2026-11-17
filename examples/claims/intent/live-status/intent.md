@@ -18,7 +18,7 @@ Customers, the portal, claims-api, claims-core's event feed.
 
 ## Constraints
 
-The 50 requests a second limit on claims-core still holds.
+- The 50 requests a second limit on claims-core still holds.
 
 ## Open questions
 

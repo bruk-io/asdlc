@@ -2,7 +2,7 @@ from asdlc.domain.lint import library
 
 INTENT = "---\nkind: intent\nauthor: a\n---\n"
 SPEC = "---\nkind: spec\n---\n"
-PLAN = "---\nkind: plan\n---\n"
+PLAN = "---\nkind: plan\n---\n## Files that change\n- a.py\n## Order of work\n"
 BASE = {
     "intent/old/intent.md": INTENT,
     "intent/old/spec.md": SPEC + "### R1: one\n### R2: two\n",
@@ -54,6 +54,26 @@ def test_an_intents_question_is_answered_or_carried_in_its_spec():
     assert found(new__intent=asked, new__spec=vague) == ["questions"]
     carried = SPEC + "### Q1: who?\n- answer: carried\n"
     assert found(new__intent=asked, new__spec=carried) == []
+
+
+def test_a_spec_says_how_each_constraint_in_its_intent_is_met():
+    intent = (
+        INTENT + "## Constraints\n- No new login.\n- Reads stay under\n  50 a second.\n"
+    )
+    assert found(new__intent=intent, new__spec=SPEC) == ["constraints"] * 2
+    title = "## How each constraint in the intent is met\n"
+    head = title + "| Constraint | Met by |\n|---|---|\n"
+    one = SPEC + head + "| No new login | The gateway token. |\n"
+    assert found(new__intent=intent, new__spec=one) == ["constraints"]
+    both = one + "| reads stay under 50 a second. | The cache. |\n"
+    assert found(new__intent=intent, new__spec=both) == []
+
+
+def test_a_constraint_is_a_list_item_that_someone_filled_in():
+    prose = INTENT + "## Constraints\nNone beyond the existing ones.\n"
+    assert found(new__intent=prose, new__spec=SPEC) == []
+    untouched = INTENT + "## Constraints\n- <one thing that must not break>\n"
+    assert found(new__intent=untouched, new__spec=SPEC) == []
 
 
 def test_every_requirement_reaches_a_step_and_every_step_a_task():
