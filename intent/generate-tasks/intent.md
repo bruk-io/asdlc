@@ -42,6 +42,19 @@ Intents, specs and plans are each done by a skill now. The split and the task ge
 - A step that is specified becomes a task.
 - A step that is specified but large also gets a plan of its own.
 - Size is by complexity, unknowns and risk, never by time.
+- A task's size is 1, 2, 3, 5 or 8 story points, and each size means what the table under this list says.
+- An 8 is the largest task. Anything that feels bigger is not a task yet and is broken down.
+- When unknowns dominate the estimate, a spike comes first and the work is sized after it.
+- A task is split so that the unknown sits in one piece, either a spike or the first slice. The other pieces can then be sized with confidence.
+- A size is not changed once its task is accepted. It records what was known at the time, and what was learned goes into the next sizing.
+
+| Size | Meaning |
+|---|---|
+| 1 | A trivial change with no unknowns. Whoever builds it knows exactly what to change and where. |
+| 2 | A small, well-understood change. It may touch a few places or need a simple test, with no open questions. |
+| 3 | A typical task. The approach is clear, and there is real work in building and testing it. |
+| 5 | A large task with some complexity or uncertainty, such as several moving parts or a dependency outside the repository. Check whether it can be split before cutting it. |
+| 8 | The maximum, and a warning sign. It usually hides unknowns or is more than one task. Try to split it first. If it cannot be split, the risk is talked through in the task's own plan. |
 
 ## Open questions
 
