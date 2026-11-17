@@ -197,6 +197,23 @@ def _on_branch(root: Path, ref: str, branch: str) -> None:
         raise _fail(f"git would not create '{branch}'", FAILED)
 
 
+def _record_start(root: Path, ref: str, slug: str, branch: str) -> None:
+    """Make the branch's first commit, an empty one, so git holds when work began.
+
+    The time from that commit to the one that adds `intent.md` is how long the
+    intent took to capture. A branch that has a commit already has its start.
+    """
+    written = files.read_text(root / scaffold.path(Kind.INTENT, slug)) is not None
+    if written or git.ahead(root, ref):
+        return
+    if not git.commit_empty(root, f"Start intent {slug}"):
+        raise _fail(
+            f"git would not record the start of '{branch}'. It makes a commit, so "
+            "git has to know who is committing: set user.name and user.email",
+            FAILED,
+        )
+
+
 def _title_of(root: Path, slug: str) -> str:
     """Give the title of an intent in the working tree; empty when it has none."""
     documents, _ = library(files.document_texts(root))
@@ -310,18 +327,22 @@ def intent_new(
     """Start an intent on its own branch. Prints the file it wrote.
 
     The target is the new intent's slug: lowercase words joined by hyphens.
+    The branch's first commit is an empty one, so git holds when the intent began.
     """
     slug, task = _split(slug)
     if task is not None:
         raise click.UsageError("an intent is named by a slug alone")
-    root, _ = _repository(options)
+    root, ref = _repository(options)
     author = author or git.user_name(root)
     if not author:
         raise click.UsageError("no --author given, and git has no user.name")
     fields: dict[str, str | tuple[str, ...]] = {"author": author}
     if parent:
         fields["parent"] = parent
-    _start(options, Kind.INTENT, slug, None, f"intent/{slug}", fields, title)
+    branch = f"intent/{slug}"
+    _on_branch(root, ref, branch)
+    _record_start(root, ref, slug, branch)
+    _start(options, Kind.INTENT, slug, None, branch, fields, title)
 
 
 @cli.group(context_settings=_SETTINGS)

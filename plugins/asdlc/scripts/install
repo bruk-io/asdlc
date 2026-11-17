@@ -1,0 +1,112 @@
+#!/bin/sh
+# Runs when a session starts. Installs the asdlc command and puts it first on the
+# Bash tool's PATH.
+#
+# The package is at the repository's root, outside this plugin's folder, and an
+# installed plugin is a copy of this folder alone. So the command is installed
+# twice, not run in place:
+#
+#   1. Into ${CLAUDE_PLUGIN_DATA}/asdlc/venv, which outlasts the session. The lint
+#      and guard hooks in hooks.json call this copy.
+#   2. From there into a folder of the session's own under $TMPDIR, whose bin is put
+#      first on PATH. An eval run's sandbox cannot read the data folder, and it can
+#      read this one.
+#
+# The environment is built on uv's own Python and is relocatable, so the copy runs
+# from where it lands. An eval run cannot start the machine's Python, and uv
+# downloads its own into the run's home, which the run can read.
+#
+# It prints nothing when it works, because Claude reads a session-start hook's
+# stdout. When it fails it says why on stderr and exits 1.
+
+set -u
+
+# What an installed plugin fetches. A release changes `ref` to its tag.
+repository="https://github.com/bruk-io/asdlc"
+ref="main"
+
+fail() {
+    echo "asdlc: the command was not installed for this session, so its lint and its guard will not run. $1" >&2
+    exit 1
+}
+
+input="$(cat)"
+
+command -v uv >/dev/null 2>&1 ||
+    fail "uv is not installed: https://docs.astral.sh/uv/"
+
+plugin="${CLAUDE_PLUGIN_ROOT:?CLAUDE_PLUGIN_ROOT is not set}"
+data="${CLAUDE_PLUGIN_DATA:?CLAUDE_PLUGIN_DATA is not set}/asdlc"
+venv="$data/venv"
+stamp="$data/installed"
+lock="$data/lock"
+
+# In a checkout the working tree is the source, and it changes without its version
+# changing, so it is installed every time. An installed plugin is installed once for
+# each version of plugin.json.
+root="$(cd "$plugin/../.." 2>/dev/null && pwd)"
+if [ -f "$root/pyproject.toml" ] && [ -d "$root/src/asdlc" ]; then
+    source="$root"
+    wanted=""
+else
+    source="git+$repository@$ref"
+    wanted="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$plugin/.claude-plugin/plugin.json" | head -n 1)"
+    [ -n "$wanted" ] || fail "$plugin/.claude-plugin/plugin.json names no version"
+fi
+
+mkdir -p "$data" || fail "Could not make $data"
+
+# One install at a time: two sessions starting together must not copy a folder the
+# other is still writing. A lock whose owner has gone is taken over.
+waited=0
+until mkdir "$lock" 2>/dev/null; do
+    owner="$(cat "$lock/pid" 2>/dev/null)"
+    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+        rm -rf "$lock"
+        continue
+    fi
+    waited=$((waited + 1))
+    [ "$waited" -le 240 ] || fail "Another session has held $lock for two minutes"
+    sleep 0.5
+done
+echo "$$" >"$lock/pid"
+trap 'rm -rf "$lock"' EXIT
+
+if [ -z "$wanted" ] || [ "$(cat "$stamp" 2>/dev/null)" != "$wanted" ] ||
+    [ ! -x "$venv/bin/asdlc" ]; then
+    if [ ! -x "$venv/bin/python" ]; then
+        rm -rf "$venv"
+        problem="$(uv venv --quiet --no-project --relocatable --managed-python \
+            --python 3.15 "$venv" 2>&1)" ||
+            fail "uv could not make an environment on Python 3.15: $problem"
+    fi
+    problem="$(uv pip install --quiet --python "$venv/bin/python" \
+        --reinstall-package asdlc "$source" 2>&1)" ||
+        fail "uv could not install it from $source: $problem"
+    [ -x "$venv/bin/asdlc" ] || fail "Installing from $source left no asdlc command"
+    echo "$wanted" >"$stamp"
+fi
+
+# The session's own copy. Its bin holds asdlc alone, so the environment's python
+# does not come first on PATH as well.
+session="$(printf '%s' "$input" |
+    sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_-]*\)".*/\1/p' |
+    head -n 1)"
+temp="${TMPDIR:-/tmp}"
+temp="${temp%/}"
+copy="$temp/asdlc-${session:-$$}"
+
+# Copies that sessions left behind more than a week ago.
+find "$temp" -maxdepth 1 -name 'asdlc-*' -mtime +7 -exec rm -rf {} + 2>/dev/null
+
+rm -rf "$copy" "$copy.new"
+mkdir -p "$copy.new/bin" &&
+    cp -R "$venv" "$copy.new/venv" &&
+    ln -s ../venv/bin/asdlc "$copy.new/bin/asdlc" &&
+    mv "$copy.new" "$copy" ||
+    fail "Could not copy it to $copy"
+
+if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+    echo "export PATH=\"$copy/bin:\$PATH\"" >>"$CLAUDE_ENV_FILE"
+fi

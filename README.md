@@ -61,7 +61,7 @@ The grammar is the one steg's command uses: a singular noun, a verb from a close
 
 | Command | Target | What it does |
 |---|---|---|
-| `asdlc intent new` | The new intent's slug | Starts an intent on its branch from the template. `--author`, `--parent`, `--title` |
+| `asdlc intent new` | The new intent's slug | Starts an intent on its branch from the template. The branch's first commit is an empty one, so git holds when the intent began. `--author`, `--parent`, `--title` |
 | `asdlc intent list`, `intent show` | none; an intent's slug | The intents and how far each has got: intent, spec, plan, tasks, built |
 | `asdlc spec new` | An intent's slug | Starts its spec on its branch, once the intent is on `main` |
 | `asdlc plan new` | An intent's slug, or `<slug>/<task>` | Starts the intent's plan, or a task's own plan |
@@ -103,7 +103,7 @@ Try them on the worked example: `uv run asdlc requirement list --all --root exam
 /plugin install asdlc --marketplace bruk-io/asdlc
 ```
 
-The plugin puts `asdlc` on a session's `PATH` and registers two Claude Code hooks: lint after Claude writes a document, and the guard before Claude runs `git push`. They run the command through uv, which fetches Python 3.15, click and the command itself from this repository the first time.
+When a session starts, the plugin installs the `asdlc` command with uv and puts it first on the session's `PATH`. uv fetches Python 3.15, click and the command itself from this repository the first time, and again when the plugin's version changes. Two more Claude Code hooks call that command: lint after Claude writes a document, and the guard before Claude runs `git push`. If the install fails, the session says why, and so does each hook when it cannot run.
 
 The Claude Code hooks cover agents. To cover pushes you make by hand as well, install the command for your own terminal and add the git hook:
 
@@ -111,6 +111,16 @@ The Claude Code hooks cover agents. To cover pushes you make by hand as well, in
 uv tool install git+https://github.com/bruk-io/asdlc
 asdlc hook new pre-push
 ```
+
+## Skills and their evals
+
+A skill tells Claude how to run one stage. Each lands with eval cases that judge whether Claude does the job with it.
+
+| Skill | When it loads | What it leaves |
+|---|---|---|
+| `capturing-intent` | Someone describes a problem, or asks for work bigger than a handful of tool calls | `intent.md` on `intent/<slug>`, in the requester's words, as a pull request. It never merges |
+
+The cases are in `plugins/asdlc/evals/`, in the format `claude plugin eval` reads. `just eval` runs them three times each, with the plugin and without it, and writes a report under `plugins/asdlc/evals/results/`. It runs a model, so it is not part of `just check`. `just check` does read the cases: it fails when a skill lacks a case where it must act or one where it must stay out, or when a case has no pattern grader.
 
 ## When each thing runs
 
@@ -124,17 +134,17 @@ asdlc hook new pre-push
 
 ## Code
 
-The repository is a marketplace with two parts. `plugins/asdlc/` is the Claude Code plugin: its manifest, its hooks and the launcher that puts `asdlc` on a session's `PATH`. `src/asdlc/` is a Python package in three layers: `domain` decides, `io` reads files and git, `presentation` words the answer, and `cli.py` wires them. `just check` runs `asdlc document check` on the example, formatting, ruff and the tests.
+The repository is a marketplace with two parts. `plugins/asdlc/` is the Claude Code plugin: its manifest, its hooks and the script that installs `asdlc` when a session starts. `src/asdlc/` is a Python package in three layers: `domain` decides, `io` reads files and git, `presentation` words the answer, and `cli.py` wires them. `just check` runs `asdlc document check` on the example, formatting, ruff and the tests.
 
 ## What is built, and what is not
 
-Built: the document format and its lint, scaffold commands for each document, task and intent state read from git, requirements and lineage, the guard as one function behind `asdlc branch check` and the hook before a push, lint after each document edit, four templates, a worked example.
+Built: the document format and its lint, scaffold commands for each document, task and intent state read from git, requirements and lineage, the guard as one function behind `asdlc branch check` and the hook before a push, lint after each document edit, four templates, a worked example. One skill, `capturing-intent`, with two eval cases.
 
 Not built yet:
 
-- **Skills.** Capturing an intent, writing a spec, planning, sizing and cutting tasks are done by hand from the templates.
+- **The other skills.** Writing a spec, planning, sizing and cutting tasks are done by hand from the templates.
 - **The measures.** Nothing reads merge commits or pull requests yet.
 - **Making CI required.** `.github/workflows/ci.yml` runs lint, the tests and the guard on every pull request, but branch protection and `CODEOWNERS` are not set up, so nothing yet stops a merge.
 - **Commit order.** The guard judges which files a branch changed, not that a plan was committed before the code.
-- **Evals.** Replaying a saved task under the plugin and scoring the result. Nothing of it exists yet.
+- **Evals in CI.** The cases run by hand, with `just eval`. Nothing runs them on a pull request or on a schedule yet, and no pass mark is set.
 - **Review and releases.** Version 1 had both, and an eval suite. They are on `main` and not carried over.
