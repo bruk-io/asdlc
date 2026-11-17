@@ -1,21 +1,22 @@
 ---
 kind: task
-step: 1
+step: 2
 delivers: [R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, R13, R14, R15, R16]
+depends: [01-repeated-property]
 size: 5
 ---
 # Task: the generating-a-spec skill and its three cases
 
 ## What to build
 
-Step 1 of the plan, in one pull request, on top of capture-intent's four tasks.
+Step 2 of the plan, in one pull request, on top of capture-intent's four tasks and of task 01.
 
-- `plugins/asdlc/skills/generating-a-spec/SKILL.md`: a description that says when it loads, and the seven steps of the spec's design as its body, with the two fallback rules the plan names for what a run cannot ask.
+- `plugins/asdlc/skills/generating-a-spec/SKILL.md`: a description that says when it loads, and the seven steps of the spec's design as its body, with the three rules the plan spells out.
 - Three cases under `plugins/asdlc/evals/`, each a `case.yaml` and a `scaffold.sh` that builds its repository with plain git: `spec-from-an-accepted-intent`, `spec-with-a-conflict` and `spec-waits-for-the-merge`.
 - A test in `tests/test_evals.py` that runs every case's scaffold and lints what it built.
 - `README.md` and `CLAUDE.md` gain the skill and `just eval --tag <skill>`.
 
-The plan's step 1 says what each case's repository holds and what its patterns and its judge check.
+The plan's step 2 says what each case's repository holds and what its patterns and its judge check.
 
 ## Done when
 
