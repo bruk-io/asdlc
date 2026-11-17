@@ -122,3 +122,29 @@ def test_gh_failing_or_missing_is_no_answer_not_an_empty_one(
     assert github.open_pull_branches(repository) is None
     monkeypatch.setenv("PATH", str(tmp_path_factory.mktemp("empty")))
     assert github.open_pull_branches(repository) is None
+
+
+def test_an_empty_commit_changes_no_file_and_leaves_what_is_staged(repository):
+    run_git(repository, "config", "user.name", "t")
+    run_git(repository, "config", "user.email", "t@example.com")
+    run_git(repository, "switch", "-q", "-c", "intent/new")
+    (repository / "staged.py").write_text("x = 1\n")
+    run_git(repository, "add", "staged.py")
+    assert git.ahead(repository, "main") == 0
+
+    assert git.commit_empty(repository, "Start intent new") is True
+
+    assert git.ahead(repository, "main") == 1
+    assert run_git(repository, "log", "-1", "--format=%s").strip() == "Start intent new"
+    assert git.changed_since(repository, "main") == ()
+    assert run_git(repository, "diff", "--cached", "--name-only").strip() == "staged.py"
+
+
+def test_an_empty_commit_is_refused_when_git_cannot_tell_who_commits(
+    repository, monkeypatch
+):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    run_git(repository, "config", "user.useConfigOnly", "true")
+    assert git.commit_empty(repository, "Start intent new") is False
+    assert git.ahead(repository, "main") == 0
