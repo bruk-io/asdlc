@@ -7,7 +7,7 @@ A Claude Code plugin implementing Anthropic's AI-native SDLC playbook. This is v
 - `just check` - everything: `asdlc document check` on the example, formatting, ruff and every test. Exits non-zero on any failure. Run it before saying any change is done, and paste its result.
 - `uv run asdlc requirement list --root examples/claims` - try a command against the worked example.
 - `claude plugin validate .` and `claude plugin validate plugins/asdlc` - the marketplace and plugin manifests.
-- `just eval` - run the plugin's eval cases with `claude plugin eval`: three runs a case, with the plugin and without it. It runs a model and spends money, so it is not part of `just check` or of CI. `just eval --case <name> --runs 1 --ablation none` is one cheap run of one case.
+- `just eval` - run the plugin's eval cases with `claude plugin eval`: three runs a case, with the plugin and without it. It runs a model and spends money, so it is not part of `just check` or of CI. `just eval --tag <skill>` runs one skill's cases, and `just eval --case <name> --runs 1 --ablation none` is one cheap run of one case.
 
 ## Words
 
@@ -55,6 +55,6 @@ The repository is a marketplace holding one Python package and one plugin. `.cla
 - Python 3.15, run through uv. click is the only runtime dependency.
 - A new decision goes in `domain` as a function that takes data and returns data. Reading goes in `io`, wording in `presentation`.
 - A hook says why it denied something, and never fails silently.
-- A skill lands with its eval cases: one tagged with the skill's name and `acts`, one with its name and `stays-out`, and in each a grader that is a pattern and not a judge. `tests/test_evals.py` fails `just check` otherwise. Pilot a case with one run before the full three.
+- A skill lands with its eval cases: one tagged with the skill's name and `acts`, one with its name and `stays-out`, and in each a grader that is a pattern and not a judge. `tests/test_evals.py` fails `just check` otherwise. Pilot a case with one run before the full three, and read what the run wrote before changing a grader. A case's `scaffold.sh` writes its documents by hand, and a test lints what each scaffold builds.
 - Fix the code, not the check. Never weaken a check or a test to make it pass.
 - Canadian spelling; regular hyphens, never em dashes.

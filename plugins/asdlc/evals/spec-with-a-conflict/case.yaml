@@ -1,0 +1,81 @@
+schema_version: "1.1"
+name: spec-with-a-conflict
+description: >-
+  The new intent ends a requirement that an earlier spec has in force, and its two
+  constraints cannot both hold. The spec has to say what it replaces, and raise
+  the conflict as a concern with an owner.
+tags: [generating-a-spec, acts]
+context:
+  scaffold_script: scaffold.sh
+execution:
+  prompt: |
+    The claim-steps intent is merged. Please write its spec.
+  max_turns: 40
+  timeout_seconds: 900
+  allowed_tools: [Skill, Bash, Read, Write, Edit, Glob, Grep]
+runs: 3
+graders:
+  - name: skill-loaded
+    type: tool_used
+    tool: Skill
+    input_match: generating-a-spec
+  - name: spec-file-written
+    type: file_exists
+    path: intent/claim-steps/spec.md
+  - name: says-what-it-replaces
+    type: regex
+    target:
+      source: file
+      path: intent/claim-steps/spec.md
+    pattern: '^### R\d+:[^\n]*\n+- replaces: claim-status\.R1\s*$'
+    flags: m
+  - name: concern-names-the-conflict
+    type: regex
+    target:
+      source: file
+      path: intent/claim-steps/spec.md
+    pattern: '## Areas of concern[\s\S]*### C\d+:[\s\S]*(expect[\s\S]*estimate|estimate[\s\S]*expect)'
+    flags: i
+  - name: every-concern-has-an-owner
+    type: regex
+    target:
+      source: file
+      path: intent/claim-steps/spec.md
+    pattern: '^### C\d+:[^\n]*\n+(?!- owner: \S)'
+    flags: m
+    match: not_contains
+  - name: row-for-the-expected-date-constraint
+    type: regex
+    target:
+      source: file
+      path: intent/claim-steps/spec.md
+    pattern: ^\|\s*Every step is shown with the date it is expected to finish\.?\s*\|\s*\S
+    flags: im
+  - name: row-for-the-no-estimate-constraint
+    type: regex
+    target:
+      source: file
+      path: intent/claim-steps/spec.md
+    pattern: ^\|\s*The portal never shows a date that is an estimate\.?\s*\|\s*\S
+    flags: im
+  - name: nothing-pushed
+    type: tool_used
+    tool: Bash
+    input_match: git push|gh pr
+    min: 0
+    max: 0
+    arm: both
+  - name: does-not-pick-a-side-silently
+    type: llm
+    focus:
+      source: file
+      path: intent/claim-steps/spec.md
+    criteria: |
+      This is a spec written from an intent with two constraints that cannot both be met:
+      - "Every step is shown with the date it is expected to finish."
+      - "The portal never shows a date that is an estimate."
+      A date a step is expected to finish is an estimate. Showing it breaks the second constraint, and not showing it breaks the first.
+
+      Pass if the spec has an area of concern that names both constraints, says that they conflict or cannot both be met, and names an owner. The spec may meet one of them for now, or propose a way through, as long as it says that the other is then not fully met.
+
+      Fail if no area of concern states the conflict, or if the spec says that both constraints are fully met.

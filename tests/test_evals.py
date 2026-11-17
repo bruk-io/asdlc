@@ -5,11 +5,16 @@ when a skill is missing a kind of case, or when a case rests on a judge alone.
 Running the cases is `just eval`, which is not part of `just check`.
 """
 
+import subprocess
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
+from click.testing import CliRunner
 
+from asdlc.cli import cli
 from tests.conftest import ROOT
 
 PLUGIN = ROOT / "plugins" / "asdlc"
@@ -114,3 +119,22 @@ def cases_in_the_plugin() -> tuple[Case, ...]:
 
 def test_every_skill_in_the_plugin_has_both_kinds_and_no_case_is_judge_only():
     assert problems(skills_in_the_plugin(), cases_in_the_plugin()) == ()
+
+
+SCAFFOLDS = sorted(PLUGIN.glob("evals/*/scaffold.sh"))
+
+
+@pytest.mark.parametrize("scaffold", SCAFFOLDS, ids=lambda path: path.parent.name)
+def test_a_scaffold_builds_a_repository_whose_documents_lint_clean(
+    scaffold: Path, tmp_path: Path
+):
+    """A scaffold writes its documents by hand, so they can drift from the format.
+
+    Finding that here costs nothing. Finding it in a run costs a run.
+    """
+    built = subprocess.run(
+        ["sh", str(scaffold)], cwd=tmp_path, capture_output=True, text=True
+    )
+    assert built.returncode == 0, built.stderr
+    checked = CliRunner().invoke(cli, ["document", "check", "--root", str(tmp_path)])
+    assert (checked.exit_code, checked.stdout) == (0, "")
