@@ -5,6 +5,8 @@ kind: plan
 
 ## Files that change
 
+- src/asdlc/domain/documents.py
+- tests/domain/test_documents.py
 - plugins/asdlc/skills/generating-a-spec/SKILL.md (new)
 - plugins/asdlc/evals/spec-from-an-accepted-intent/case.yaml (new)
 - plugins/asdlc/evals/spec-from-an-accepted-intent/scaffold.sh (new)
@@ -20,14 +22,22 @@ kind: plan
 
 This is built on top of capture-intent's four tasks. It needs their session install, their shape check and `just eval`.
 
-### Step 1: The skill and its three cases
+### Step 1: Lint finds a property written twice under one heading
+- delivers: R17
+
+`items` in `src/asdlc/domain/documents.py` reads the `- key: value` lines under a heading into a mapping, so a second line with the same key replaces the first. An `Item` will also carry the keys that were repeated, and `parse` will report each under the `property` rule. The message says a heading takes a property once, and that a requirement ending two requirements is written as two.
+
+It comes first because the skill's cases lean on it: a spec with two `- replaces:` lines has to fail lint, or the case that checks `- replaces:` can pass on a spec that leaves a requirement in force.
+
+### Step 2: The skill and its three cases
 - delivers: R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, R13, R14, R15, R16
 
 One step, because `just check` fails on a skill that lands without both kinds of case.
 
-**The skill.** `plugins/asdlc/skills/generating-a-spec/SKILL.md`. Its description says when it loads: someone asks for the spec, the requirements or the design of an intent (R1). Its body is the seven steps of the spec's design, in that order (R2 to R15). Two rules need spelling out, because a run is one turn and cannot ask:
+**The skill.** `plugins/asdlc/skills/generating-a-spec/SKILL.md`. Its description says when it loads: someone asks for the spec, the requirements or the design of an intent (R1). Its body is the seven steps of the spec's design, in that order (R2 to R15). Three rules need spelling out. The first two are there because a run is one turn and cannot ask:
 
 - An answer comes from the intent, the code or the requester. Anything else is carried (R8).
+- A requirement ends one requirement. To end two, the spec has a requirement for each (R11).
 - A concern's owner is a person or team the intent or the requester named. When none fits, it is the intent's author, and the draft says so (R10).
 
 **The cases.** Each `scaffold.sh` builds its repository with plain git and files written in the script. `asdlc` is not there when a scaffold script runs, so the documents are written out in full. Each prompt asks for the spec of one named intent and says nothing else.
@@ -59,6 +69,7 @@ One step, because `just check` fails on a skill that lands without both kinds of
 ## Proof
 
 - **`just check`.** The shape check reads the new skill and its cases, and the new test lints what every scaffold builds.
+- **R17.** Tests in `tests/domain/test_documents.py`: a requirement with two `- replaces:` lines is a `property` finding that names the heading and the key, and one with a single line is not.
 - **R1 to R11, R14, R15, R16.** `just eval --tag generating-a-spec`, three runs a case, with its report in the pull request.
 - **R12.** A live session on this repository's next intent, in a copy of the repository where that intent's merge is simulated: the draft is shown, one correction is applied, and nothing is pushed before that.
 - **R13.** Not shown by this plan. The skill's last step is the first skill's, word for word in what it forbids, and that one opened a pull request and stopped. This skill opening one is seen the first time it is used after the stack is merged.
