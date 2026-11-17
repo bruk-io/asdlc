@@ -213,6 +213,44 @@ def test_a_requirement_no_longer_carries_an_area():
     assert rules(documents.parse(SPEC_PATH, text)[1]) == ["property"]
 
 
+def test_a_property_written_twice_under_one_heading_is_a_finding():
+    """The second line would win and the first be dropped, with nothing said."""
+    text = (
+        "---\nkind: spec\n---\n"
+        "### R1: a\n- replaces: old.R1\n- replaces: old.R2\n- replaces: old.R3\n"
+    )
+    document, findings = documents.parse(SPEC_PATH, text)
+    assert [(found.rule, found.message) for found in findings] == [
+        (
+            "property",
+            "R1 has '- replaces:' more than once, and only the last would count. "
+            "A heading takes a property once: to end two requirements, write a "
+            "requirement for each",
+        )
+    ]
+    assert document.items[0].repeated == ("replaces",)
+
+
+def test_a_step_that_delivers_on_two_lines_is_told_to_use_one():
+    text = (
+        "---\nkind: plan\n---\n## Files that change\n\n- a.py\n\n"
+        "### Step 1: a\n- delivers: R1\n- delivers: R2\n"
+    )
+    messages = [found.message for found in documents.parse(PLAN_PATH, text)[1]]
+    assert messages == [
+        "Step 1 has '- delivers:' more than once, and only the last would count. "
+        "A heading takes a property once: list what a step delivers on one line, "
+        "as 'R1, R2'"
+    ]
+
+
+def test_each_property_written_once_is_no_finding():
+    spec = "---\nkind: spec\n---\n### R1: a\n- replaces: old.R1\n### R2: b\n"
+    document, findings = documents.parse(SPEC_PATH, spec)
+    assert findings == ()
+    assert [item.repeated for item in document.items] == [(), ()]
+
+
 def test_a_file_in_the_wrong_place_is_no_document():
     document, findings = documents.parse("intent/claims/notes.md", "anything")
     assert (document, rules(findings)) == (None, ["place"])

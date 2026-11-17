@@ -50,6 +50,7 @@ class Item:
     number: int
     title: str
     props: frozendict[str, str]
+    repeated: tuple[str, ...] = ()  # the keys written more than once; the last won
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,14 @@ _PROPS = frozendict(
         Mark.QUESTION: ("answer",),
         Mark.CONCERN: ("owner",),
         Mark.STEP: ("delivers", "intent"),
+    }
+)
+
+# What to do in place of a second line, for the properties that tempt one.
+_ONCE = frozendict(
+    {
+        "replaces": ": to end two requirements, write a requirement for each",
+        "delivers": ": list what a step delivers on one line, as 'R1, R2'",
     }
 )
 
@@ -200,11 +209,22 @@ def items(body: str) -> tuple[tuple[Item, ...], tuple[str, ...]]:
         while at < len(lines) and not lines[at].strip():
             at += 1
         props = {}
+        repeated = []
         while at < len(lines) and (prop := _PROP.fullmatch(lines[at])):
+            if prop[1] in props and prop[1] not in repeated:
+                repeated.append(prop[1])
             props[prop[1]] = prop[2].strip()
             at += 1
         mark = Mark(heading[1].strip())
-        found.append(Item(mark, int(heading[2]), heading[3].strip(), frozendict(props)))
+        found.append(
+            Item(
+                mark,
+                int(heading[2]),
+                heading[3].strip(),
+                frozendict(props),
+                tuple(repeated),
+            )
+        )
     return tuple(found), tuple(problems)
 
 
@@ -329,6 +349,12 @@ def parse(path: str, text: str) -> tuple[Document | None, tuple[Finding, ...]]:
                     f"{label(item)} has '- {key}:', which is not a property of "
                     f"'{item.mark}'; the properties are {known}",
                 )
+        for key in item.repeated:
+            wrong(
+                "property",
+                f"{label(item)} has '- {key}:' more than once, and only the last "
+                f"would count. A heading takes a property once{_ONCE.get(key, '')}",
+            )
     parts = sections(body)
     if kind is Kind.PLAN and not filled(bullets(parts.get(FILES, ()))):
         wrong(
