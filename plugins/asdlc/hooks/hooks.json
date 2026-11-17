@@ -1,6 +1,17 @@
 {
-  "description": "asdlc: lint a document as soon as Claude writes it, and guard a branch before Claude pushes it",
+  "description": "asdlc: install the command when a session starts, lint a document as soon as Claude writes it, and guard a branch before Claude pushes it",
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/install\"",
+            "timeout": 300
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
@@ -8,13 +19,13 @@
           {
             "type": "command",
             "if": "Bash(git push*)",
-            "command": "command -v uv >/dev/null 2>&1 || { echo 'asdlc: uv is not installed, so the guard did not run. Install uv: https://docs.astral.sh/uv/' >&2; exit 1; }; \"${CLAUDE_PLUGIN_ROOT}/bin/asdlc\" hook run guard; status=$?; if [ \"$status\" -eq 2 ]; then echo 'asdlc: uv could not start the guard (often no network to fetch Python 3.15 or its packages), so it did not run' >&2; exit 1; fi; exit \"$status\"",
+            "command": "asdlc=\"${CLAUDE_PLUGIN_DATA}/asdlc/venv/bin/asdlc\"; [ -x \"$asdlc\" ] || { echo 'asdlc: the command was not installed when this session started, so the guard did not run. Start a new session with uv installed and the network up' >&2; exit 1; }; exec \"$asdlc\" hook run guard",
             "timeout": 60
           },
           {
             "type": "command",
             "if": "Bash(git -C * push*)",
-            "command": "command -v uv >/dev/null 2>&1 || { echo 'asdlc: uv is not installed, so the guard did not run. Install uv: https://docs.astral.sh/uv/' >&2; exit 1; }; \"${CLAUDE_PLUGIN_ROOT}/bin/asdlc\" hook run guard; status=$?; if [ \"$status\" -eq 2 ]; then echo 'asdlc: uv could not start the guard (often no network to fetch Python 3.15 or its packages), so it did not run' >&2; exit 1; fi; exit \"$status\"",
+            "command": "asdlc=\"${CLAUDE_PLUGIN_DATA}/asdlc/venv/bin/asdlc\"; [ -x \"$asdlc\" ] || { echo 'asdlc: the command was not installed when this session started, so the guard did not run. Start a new session with uv installed and the network up' >&2; exit 1; }; exec \"$asdlc\" hook run guard",
             "timeout": 60
           }
         ]
@@ -26,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v uv >/dev/null 2>&1 || { echo 'asdlc: uv is not installed, so the linter did not run. Install uv: https://docs.astral.sh/uv/' >&2; exit 1; }; \"${CLAUDE_PLUGIN_ROOT}/bin/asdlc\" hook run lint; status=$?; if [ \"$status\" -eq 2 ]; then echo 'asdlc: uv could not start the linter (often no network to fetch Python 3.15 or its packages), so it did not run' >&2; exit 1; fi; exit \"$status\"",
+            "command": "asdlc=\"${CLAUDE_PLUGIN_DATA}/asdlc/venv/bin/asdlc\"; [ -x \"$asdlc\" ] || { echo 'asdlc: the command was not installed when this session started, so the linter did not run. Start a new session with uv installed and the network up' >&2; exit 1; }; exec \"$asdlc\" hook run lint",
             "timeout": 60
           }
         ]

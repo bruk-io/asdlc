@@ -293,3 +293,47 @@ def test_the_installed_git_hook_stops_a_push_the_guard_denies(
     )
     assert pushed.returncode != 0
     assert "app.py" in pushed.stdout + pushed.stderr
+
+
+def known_to_git(repository):
+    """Tell git who commits here, as a person's own repository does."""
+    git(repository, "config", "user.name", "Dana")
+    git(repository, "config", "user.email", "dana@example.com")
+    return repository
+
+
+def test_intent_new_records_the_start_before_it_writes_the_file(repository):
+    done = run("intent", "new", "slow-claims", "--root", known_to_git(repository))
+    assert (done.exit_code, done.stdout.strip()) == (
+        0,
+        "intent/slow-claims/intent.md",
+    )
+    log = git(repository, "log", "--format=%s", "main..HEAD").strip().split("\n")
+    assert log == ["Start intent slow-claims"]
+    assert git(repository, "diff", "--name-only", "main", "HEAD").strip() == ""
+    assert "author: Dana" in (repository / done.stdout.strip()).read_text()
+
+    git(repository, "add", "-A")
+    git(repository, "commit", "-q", "-m", "Intent: slow claims")
+    guard = run("branch", "check", "--root", repository)
+    assert (guard.exit_code, guard.stdout) == (0, "")
+
+
+def test_intent_new_records_one_start_however_often_it_is_asked(repository):
+    run("intent", "new", "slow-claims", "--root", known_to_git(repository))
+    again = run("intent", "new", "slow-claims", "--root", repository)
+    assert again.exit_code == 1
+    assert "already exists" in again.stderr
+    assert git(repository, "rev-list", "--count", "main..HEAD").strip() == "1"
+
+
+def test_intent_new_writes_nothing_when_git_cannot_tell_who_commits(
+    repository, monkeypatch
+):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    git(repository, "config", "user.useConfigOnly", "true")
+    done = run("intent", "new", "slow-claims", "--author", "Dana", "--root", repository)
+    assert done.exit_code == 1
+    assert "user.name and user.email" in done.stderr
+    assert not (repository / "intent" / "slow-claims" / "intent.md").exists()
