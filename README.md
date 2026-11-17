@@ -61,7 +61,7 @@ The grammar is the one steg's command uses: a singular noun, a verb from a close
 
 | Command | Target | What it does |
 |---|---|---|
-| `asdlc intent new` | The new intent's slug | Starts an intent on its branch from the template. `--author`, `--parent`, `--title` |
+| `asdlc intent new` | The new intent's slug | Starts an intent on its branch from the template. The branch's first commit is an empty one, so git holds when the intent began. `--author`, `--parent`, `--title` |
 | `asdlc intent list`, `intent show` | none; an intent's slug | The intents and how far each has got: intent, spec, plan, tasks, built |
 | `asdlc spec new` | An intent's slug | Starts its spec on its branch, once the intent is on `main` |
 | `asdlc plan new` | An intent's slug, or `<slug>/<task>` | Starts the intent's plan, or a task's own plan |
