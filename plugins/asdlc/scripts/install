@@ -45,8 +45,10 @@ lock="$data/lock"
 # changing, so it is installed every time. An installed plugin is installed once for
 # each version of plugin.json.
 root="$(cd "$plugin/../.." 2>/dev/null && pwd)"
+checkout=""
 if [ -f "$root/pyproject.toml" ] && [ -d "$root/src/asdlc" ]; then
-    source="$root"
+    checkout="$root"
+    source="$data/source"
     wanted=""
 else
     source="git+$repository@$ref"
@@ -81,10 +83,21 @@ if [ -z "$wanted" ] || [ "$(cat "$stamp" 2>/dev/null)" != "$wanted" ] ||
             --python 3.15 "$venv" 2>&1)" ||
             fail "uv could not make an environment on Python 3.15: $problem"
     fi
+    if [ -n "$checkout" ]; then
+        # Build from a copy of what the build reads. Building in the working tree
+        # writes there, and sessions that start together, each with a lock of its
+        # own, would write over each other.
+        rm -rf "$source"
+        mkdir -p "$source" &&
+            cp "$checkout/pyproject.toml" "$checkout/README.md" "$source/" &&
+            cp -R "$checkout/src" "$source/src" ||
+            fail "Could not copy the package's source from $checkout"
+    fi
     problem="$(uv pip install --quiet --python "$venv/bin/python" \
         --reinstall-package asdlc "$source" 2>&1)" ||
-        fail "uv could not install it from $source: $problem"
-    [ -x "$venv/bin/asdlc" ] || fail "Installing from $source left no asdlc command"
+        fail "uv could not install it from ${checkout:-$source}: $problem"
+    [ -x "$venv/bin/asdlc" ] ||
+        fail "Installing from ${checkout:-$source} left no asdlc command"
     echo "$wanted" >"$stamp"
 fi
 
