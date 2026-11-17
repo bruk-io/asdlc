@@ -13,7 +13,7 @@ The plugin can capture an intent and write its spec, but once a spec is merged t
 - When a spec is on `main`, a person asks Claude for its plan and gets `plan.md` on its own branch, as a pull request they can merge or close.
 - The plan does what Anthropic's AI-native SDLC course asks of a plan:
   - it lists the files that change, and every file it lists as existing is in the repository
-  - its order of work is steps, and each step says which requirements it delivers
+  - its order of work is steps, and a step that delivers a requirement says which
   - every requirement in the spec is delivered by some step
   - its risks include each area of concern the spec raised that the work can run into
   - its proof says how each requirement will be shown to be met
