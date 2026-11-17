@@ -349,6 +349,12 @@ def parse(path: str, text: str) -> tuple[Document | None, tuple[Finding, ...]]:
                     f"{label(item)} has '- {key}:', which is not a property of "
                     f"'{item.mark}'; the properties are {known}",
                 )
+        if item.mark is Mark.CONCERN and "owner" not in item.props:
+            wrong(
+                "owner",
+                f"{label(item)} names no owner: put '- owner: <who decides>' on the "
+                "line under its heading. A line lower down is not read as its owner",
+            )
         for key in item.repeated:
             wrong(
                 "property",

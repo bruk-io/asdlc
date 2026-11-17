@@ -251,6 +251,36 @@ def test_each_property_written_once_is_no_finding():
     assert [item.repeated for item in document.items] == [(), ()]
 
 
+def test_a_concern_with_no_owner_is_a_finding():
+    text = "---\nkind: spec\n---\n### C1: nobody load tested the cache\n"
+    findings = documents.parse(SPEC_PATH, text)[1]
+    assert [(found.rule, found.message) for found in findings] == [
+        (
+            "owner",
+            "C1 names no owner: put '- owner: <who decides>' on the line under its "
+            "heading. A line lower down is not read as its owner",
+        )
+    ]
+
+
+def test_an_owner_under_the_concerns_text_is_not_its_owner():
+    text = (
+        "---\nkind: spec\n---\n"
+        "### C1: nobody load tested the cache\n\nIt may fall over.\n"
+        "- owner: the claims team\n"
+    )
+    assert rules(documents.parse(SPEC_PATH, text)[1]) == ["owner"]
+
+
+def test_a_concern_with_its_owner_under_the_heading_is_no_finding():
+    text = (
+        "---\nkind: spec\n---\n"
+        "### C1: nobody load tested the cache\n- owner: the claims team\n\n"
+        "It may fall over.\n"
+    )
+    assert documents.parse(SPEC_PATH, text)[1] == ()
+
+
 def test_a_file_in_the_wrong_place_is_no_document():
     document, findings = documents.parse("intent/claims/notes.md", "anything")
     assert (document, rules(findings)) == (None, ["place"])
