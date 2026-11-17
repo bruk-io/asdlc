@@ -119,8 +119,9 @@ A skill tells Claude how to run one stage. Each lands with eval cases that judge
 | Skill | When it loads | What it leaves |
 |---|---|---|
 | `capturing-intent` | Someone describes a problem, or asks for work bigger than a handful of tool calls | `intent.md` on `intent/<slug>`, in the requester's words, as a pull request. It never merges |
+| `generating-a-spec` | Someone asks for the spec, the requirements or the design of an intent | `spec.md` on `spec/<slug>`, as a pull request: checkable requirements, a design that names the code, each constraint and question dealt with, concerns with owners. It writes nothing until the intent is on `main`, and it never merges |
 
-The cases are in `plugins/asdlc/evals/`, in the format `claude plugin eval` reads. `just eval` runs them three times each, with the plugin and without it, and writes a report under `plugins/asdlc/evals/results/`. It runs a model, so it is not part of `just check`. `just check` does read the cases: it fails when a skill lacks a case where it must act or one where it must stay out, or when a case has no pattern grader.
+The cases are in `plugins/asdlc/evals/`, in the format `claude plugin eval` reads. `just eval` runs them three times each, with the plugin and without it, and writes a report under `plugins/asdlc/evals/results/`. `just eval --tag <skill>` runs one skill's cases. It runs a model, so it is not part of `just check`. `just check` does read the cases: it fails when a skill lacks a case where it must act or one where it must stay out, or when a case has no pattern grader.
 
 ## When each thing runs
 
@@ -138,11 +139,11 @@ The repository is a marketplace with two parts. `plugins/asdlc/` is the Claude C
 
 ## What is built, and what is not
 
-Built: the document format and its lint, scaffold commands for each document, task and intent state read from git, requirements and lineage, the guard as one function behind `asdlc branch check` and the hook before a push, lint after each document edit, four templates, a worked example. One skill, `capturing-intent`, with two eval cases.
+Built: the document format and its lint, scaffold commands for each document, task and intent state read from git, requirements and lineage, the guard as one function behind `asdlc branch check` and the hook before a push, lint after each document edit, four templates, a worked example. Two skills, `capturing-intent` and `generating-a-spec`, with five eval cases between them.
 
 Not built yet:
 
-- **The other skills.** Writing a spec, planning, sizing and cutting tasks are done by hand from the templates.
+- **The other skills.** Planning, sizing and cutting tasks are done by hand from the templates.
 - **The measures.** Nothing reads merge commits or pull requests yet.
 - **Making CI required.** `.github/workflows/ci.yml` runs lint, the tests and the guard on every pull request, but branch protection and `CODEOWNERS` are not set up, so nothing yet stops a merge.
 - **Commit order.** The guard judges which files a branch changed, not that a plan was committed before the code.
