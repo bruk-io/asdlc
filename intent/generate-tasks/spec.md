@@ -33,7 +33,7 @@ The skill names the step and says it becomes a child intent. A step waits on a p
 
 ### R7: When a step gets no task, the skill cuts no task for that plan
 
-It says what has to be on `main` first: the child intent, with this intent as its parent, and the plan's step saying `- intent: <child>`. This follows what C1 proposes.
+It says what has to be on `main` first: the child intent, with this intent as its parent, and the plan's step saying `- intent: <child>`. The owner decided this in C1.
 
 ### R8: Every task has a size of 1, 2, 3, 5 or 8
 
@@ -45,7 +45,7 @@ Every piece has the step's number as its `step`. Before cutting a 5 or an 8 the 
 
 ### R10: When unknowns dominate a step, the unknown sits in one task and the rest of the step waits for it
 
-That task is a spike or the first slice of the work. A spike's "Done when" is the question answered in writing. With a first slice, the other pieces are cut in the same pull request and depend on it. With a spike, the other pieces are cut and sized after the spike is done, as C2 proposes.
+That task is a spike or the first slice of the work. A spike's "Done when" is the question answered in writing. With a first slice, the other pieces are cut in the same pull request and depend on it. With a spike, the other pieces are cut and sized after the spike is done, as the owner decided in C2.
 
 ### R11: A task of size 8 says it gets a plan of its own
 
@@ -105,7 +105,7 @@ With the skill loaded, Claude works in this order:
 
 A split step's pieces all carry the step's whole `delivers` list, because `asdlc task new` copies it and the skill does not edit frontmatter. That is right as the code stands: `_progress` in `src/asdlc/domain/requirements.py` calls a requirement built only when every task that delivers it is done.
 
-Steps 2 and 3 follow what C1 and C2 propose. If their owner decides otherwise, the design changes there, and R7 and R10 are the requirements to revisit.
+Steps 2 and 3 follow what the owner decided in C1 and C2, and R7 and R10 are the requirements that rest on those decisions.
 
 ### What the command already does
 
@@ -174,11 +174,13 @@ From the requester. A step with an open product question becomes a child intent 
 ### C1: One step with an open product question holds up every task of the plan
 - owner: Bruk Habtu
 
+Decided as proposed by the owner, Bruk Habtu, on 2026-11-17. What follows says what the conflict is, what was decided and what it costs.
+
 Four things the intent asks for cannot all hold in one pull request. A step with an open product question becomes a child intent and not a task. Lint is clean on the pull request. The guard on the tasks branch and the lint stay as they are. A person asks for the tasks and gets a pull request.
 
 Lint's `coverage` rule fails a plan as soon as it has one task and a step with neither a task nor `- intent: <child>`. The `child` rule needs that child intent to exist with this intent as its parent. On `tasks/<slug>` the guard allows `task.md` files only, so the skill can add neither the child intent nor the line in the plan. Cutting the other steps' tasks and leaving the step out gives a pull request that fails lint.
 
-Proposed, and what R7 assumes: the skill cuts nothing. It names the step and says what has to be merged first: the child intent, captured on `intent/<child>` with `asdlc intent new <child> --parent <slug>`, and the plan's step changed to say `- intent: <child>` on `plan/<slug>`. The person asks for the tasks again after those two merges. The cost is that the first outcome is not met for such a plan until two more pull requests are merged.
+Decided, and what R7 requires: the skill cuts nothing. It names the step and says what has to be merged first: the child intent, captured on `intent/<child>` with `asdlc intent new <child> --parent <slug>`, and the plan's step changed to say `- intent: <child>` on `plan/<slug>`. The person asks for the tasks again after those two merges. The cost is that the first outcome is not met for such a plan until two more pull requests are merged.
 
 The other ways through are to let the pull request fail lint until the child intent lands, or to change the guard or the `coverage` rule. Each breaks something the intent says to keep.
 
@@ -187,9 +189,11 @@ The skill does not write the child intent. It belongs to the `capturing-intent` 
 ### C2: After a spike, the rest of the step's tasks need a second pull request
 - owner: Bruk Habtu
 
+Decided as proposed by the owner, Bruk Habtu, on 2026-11-17. What follows says what the conflict is, what was decided and what it costs.
+
 The intent says a spike comes first and the work is sized after it, and that a size is not changed once its task is accepted. So the work behind a spike cannot be in the same pull request with a size on it.
 
-Proposed, and what R10 assumes: the spike is the only task cut from that step, which satisfies lint's `coverage` rule. Its "What to build" says the rest of the step is cut once it is done. The person then asks for the tasks again, and the skill adds them on `tasks/<slug>` in a second pull request. A task of another step that needs what the uncut work builds waits for that second pull request too.
+Decided, and what R10 requires: the spike is the only task cut from that step, which satisfies lint's `coverage` rule. Its "What to build" says the rest of the step is cut once it is done. The person then asks for the tasks again, and the skill adds them on `tasks/<slug>` in a second pull request. A task of another step that needs what the uncut work builds waits for that second pull request too.
 
 Three things follow that nobody has decided. Between the spike's merge and the second pull request, `asdlc requirement list` shows the step's requirements as built, because the spike is the only task that delivers them. A local `tasks/<slug>` left from the first pull request is behind `main`, and `asdlc task new` switches to it as it is. And the outcome "holding the tasks for that plan" is met in two parts.
 
