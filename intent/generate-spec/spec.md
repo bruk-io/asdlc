@@ -5,7 +5,7 @@ kind: spec
 
 ## Requirements
 
-R1 to R15 describe one skill. "The skill does X" means Claude does X in the conversation with the skill loaded. This intent creates no subagent. R17 is its one change to the `asdlc` package.
+R1 to R15 describe one skill. "The skill does X" means Claude does X in the conversation with the skill loaded. This intent creates no subagent. R17 and R18 are its only changes to the `asdlc` package.
 
 ### R1: The plugin has a skill, `generating-a-spec`, that loads when someone asks for the spec of an intent
 
@@ -59,6 +59,10 @@ The skill reads the requirements in force before it writes its own.
 
 Today the second `- replaces:` under a requirement silently wins and the first is dropped. The skill's first pilot run wrote two, lint was clean, and one of the two requirements it meant to end stayed in force.
 
+### R18: Lint finds an area of concern that names no owner
+
+Today a concern with no `- owner:` under its heading is clean. A later pilot run wrote its owners under the concern's text, where they are not read, and lint said nothing.
+
 ## Design
 
 ### The skill
@@ -88,9 +92,11 @@ Three cases under `plugins/asdlc/evals/`, in the format the first skill's cases 
 - `spec-with-a-conflict` acts. An earlier spec has a requirement in force that the new intent ends, and the new intent has two constraints that cannot both hold. Patterns check for `- replaces:` naming that requirement (R11) and for a concern that names both constraints (R9). A judge checks that the requirements do not quietly satisfy one constraint and drop the other.
 - `spec-waits-for-the-merge` stays out. The intent is on its own branch and not on `main`. Patterns check that no `spec.md` was created and that no `spec/` branch was made by hand (R3).
 
-### The one change to the package
+### The two changes to the package
 
 `items` in `src/asdlc/domain/documents.py` keeps the last value when a property is written twice under a heading. It will note the repeat, and `parse` will report it under the `property` rule (R17). A requirement ends one requirement, so the message says to write a requirement for each one that ends.
+
+`parse` will also report a `### C<n>:` heading with no `- owner:` on the line under it, under a new `owner` rule (R18). The message says where the line goes.
 
 Nothing else in `src/asdlc` changes. `asdlc spec new` already refuses an intent that is not on `main` and says what it waits for, and lint already has the rules behind R6 and R7.
 
@@ -102,7 +108,7 @@ Nothing else in `src/asdlc` changes. `asdlc spec new` already refuses an intent 
 | The skill writes the prose only. The path, the branch name and the frontmatter come from `asdlc spec new`. | R2. |
 | The branch changes only `spec.md`, so the guard stays clean. | R14. |
 | A spec is not started before its intent is on `main`. | R3. The command already refuses, and the skill does not work around it. |
-| The layers in the package hold. | R17 is one rule in `domain`, where lint's decisions live. Nothing in `io` or `presentation` changes. |
+| The layers in the package hold. | R17 and R18 are rules in `domain`, where lint's decisions live. Nothing in `io` or `presentation` changes. |
 
 ## Open questions from intent
 
