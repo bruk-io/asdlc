@@ -48,6 +48,24 @@ def switch(root: Path, name: str) -> bool:
     return _git(root, "switch", "--quiet", name) is not None
 
 
+def ahead(root: Path, ref: str) -> int:
+    """Count the commits the current branch has that `ref` does not."""
+    counted = _git(root, "rev-list", "--count", f"{ref}..HEAD")
+    return int(counted) if counted else 0
+
+
+def commit_empty(root: Path, subject: str) -> bool:
+    """Add a commit that changes no file, whatever is staged; False when git refuses.
+
+    The commit carries its parent's tree, so the index and the working tree are
+    left as they were. Git refuses when it cannot tell who is committing.
+    """
+    made = _git(root, "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", subject)
+    if made is None:
+        return False
+    return _git(root, "reset", "--quiet", "--soft", made.strip()) is not None
+
+
 def hooks_folder(root: Path) -> Path:
     """Give the folder git runs this repository's hooks from."""
     listed = _git(root, "rev-parse", "--git-path", "hooks") or ".git/hooks"

@@ -7,12 +7,13 @@ A Claude Code plugin implementing Anthropic's AI-native SDLC playbook. This is v
 - `just check` - everything: `asdlc document check` on the example, formatting, ruff and every test. Exits non-zero on any failure. Run it before saying any change is done, and paste its result.
 - `uv run asdlc requirement list --root examples/claims` - try a command against the worked example.
 - `claude plugin validate .` and `claude plugin validate plugins/asdlc` - the marketplace and plugin manifests.
+- `just eval` - run the plugin's eval cases with `claude plugin eval`: three runs a case, with the plugin and without it. It runs a model and spends money, so it is not part of `just check` or of CI. `just eval --case <name> --runs 1 --ablation none` is one cheap run of one case.
 
 ## Words
 
 - **lint** (`asdlc document check`) judges the documents: are they well formed and consistent with each other? It reads files only.
 - **guard** (`asdlc branch check`, and the hook before `git push`) judges a change: may this branch touch these files yet?
-- **eval** judges the agent: does it still do the job under this configuration? Not built yet.
+- **eval** judges the agent: does it still do the job under this configuration? Its cases are under `plugins/asdlc/evals/`, and `just eval` runs them.
 - **gate** means a person's decision, recorded as a merge. It is never the name of a command.
 - **check** is a verb: validate without changing anything. Lint and guard are both a `check`, on different nouns.
 
@@ -44,8 +45,9 @@ The repository is a marketplace holding one Python package and one plugin. `.cla
 - `src/asdlc/presentation/` - turns what the domain returned into text for a person or JSON for a hook.
 - `src/asdlc/cli.py` - the click command. The only module that imports all three.
 - `src/asdlc/templates/` - the four documents, shipped in the package. `examples/claims/` - a worked example the tests read.
-- `plugins/asdlc/` - the Claude Code plugin, and everything Claude Code loads: its manifest in `.claude-plugin/plugin.json`, and later its skills, agents and evals. `hooks/hooks.json` registers two hooks: `asdlc hook run lint` after Claude writes a document, and `asdlc hook run guard` before Claude runs `git push`. `bin/asdlc` puts the command on a session's PATH.
-- An installed plugin is a copy of `plugins/asdlc/` alone, without `src/`. So `bin/asdlc` runs the working tree's package in a checkout, and otherwise has uv fetch the command from the repository. Nothing in the plugin may read a path above its own folder any other way.
+- `plugins/asdlc/` - the Claude Code plugin, and everything Claude Code loads: its manifest in `.claude-plugin/plugin.json`, its skills in `skills/`, their eval cases in `evals/`, and later its agents. `hooks/hooks.json` registers three hooks: `scripts/install` when a session starts, `asdlc hook run lint` after Claude writes a document, and `asdlc hook run guard` before Claude runs `git push`.
+- An installed plugin is a copy of `plugins/asdlc/` alone, without `src/`. So `scripts/install` installs the package at each session start: from the working tree in a checkout, and otherwise from the repository, once for each version of `plugin.json`. It installs into `${CLAUDE_PLUGIN_DATA}`, which the hooks call, and copies that to the session's temp folder, which goes first on `PATH`. Nothing else in the plugin may read a path above its own folder.
+- In a session, the hooks and `asdlc` on `PATH` are the copy made when the session started. After editing `src/asdlc`, `uv run asdlc` runs the working tree, and a new session refreshes the copy.
 - `tests/` - mirrors the layers. Domain tests touch no files; `test_example.py` and `test_cli.py` run on real files and a real git repository.
 
 ## Conventions
@@ -53,5 +55,6 @@ The repository is a marketplace holding one Python package and one plugin. `.cla
 - Python 3.15, run through uv. click is the only runtime dependency.
 - A new decision goes in `domain` as a function that takes data and returns data. Reading goes in `io`, wording in `presentation`.
 - A hook says why it denied something, and never fails silently.
+- A skill lands with its eval cases: one tagged with the skill's name and `acts`, one with its name and `stays-out`, and in each a grader that is a pattern and not a judge. `tests/test_evals.py` fails `just check` otherwise. Pilot a case with one run before the full three.
 - Fix the code, not the check. Never weaken a check or a test to make it pass.
 - Canadian spelling; regular hyphens, never em dashes.
