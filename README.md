@@ -99,7 +99,7 @@ Try them on the worked example: `uv run asdlc requirement list --all --root exam
 /plugin install asdlc --marketplace bruk-io/asdlc
 ```
 
-The plugin puts `asdlc` on a session's `PATH` and registers two Claude Code hooks: lint after Claude writes a document, and the guard before Claude runs `git push`. They run the package through uv, which fetches Python 3.15 and click the first time.
+The plugin puts `asdlc` on a session's `PATH` and registers two Claude Code hooks: lint after Claude writes a document, and the guard before Claude runs `git push`. They run the command through uv, which fetches Python 3.15, click and the command itself from this repository the first time.
 
 The Claude Code hooks cover agents. To cover pushes you make by hand as well, install the command for your own terminal and add the git hook:
 
@@ -120,7 +120,7 @@ asdlc hook new pre-push
 
 ## Code
 
-`asdlc/` is a Python package in three layers: `domain` decides, `io` reads files and git, `presentation` words the answer, and `cli.py` wires them. `just check` runs `asdlc document check` on the example, formatting, ruff and the tests.
+The repository is a marketplace with two parts. `plugins/asdlc/` is the Claude Code plugin: its manifest, its hooks and the launcher that puts `asdlc` on a session's `PATH`. `src/asdlc/` is a Python package in three layers: `domain` decides, `io` reads files and git, `presentation` words the answer, and `cli.py` wires them. `just check` runs `asdlc document check` on the example, formatting, ruff and the tests.
 
 ## What is built, and what is not
 

@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "asdlc",
-      "source": "./",
+      "source": "./plugins/asdlc",
       "description": "Anthropic's AI-native SDLC playbook as a Claude Code plugin that builds itself."
     }
   ]
