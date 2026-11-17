@@ -1,0 +1,115 @@
+schema_version: "1.1"
+name: plan-from-an-accepted-spec
+description: >-
+  An intent and its spec are on main: three requirements, a design that names two
+  modules, and one area of concern the work runs into. Graders open the plan by
+  its path and read the file.
+tags: [generating-a-plan, acts]
+context:
+  scaffold_script: scaffold.sh
+execution:
+  prompt: |
+    The claim-steps spec is merged. Please write its plan.
+  max_turns: 40
+  timeout_seconds: 900
+  allowed_tools: [Skill, Bash, Read, Write, Edit, Glob, Grep]
+runs: 3
+graders:
+  - name: skill-loaded
+    type: tool_used
+    tool: Skill
+    input_match: generating-a-plan
+  - name: started-by-the-command
+    type: tool_used
+    tool: Bash
+    input_match: asdlc plan new
+    arm: both
+  - name: plan-file-written
+    type: file_exists
+    path: intent/claim-steps/plan.md
+  - name: nothing-else-written
+    type: regex
+    target: files
+    pattern: ^(?!intent/claim-steps/plan\.md$)(?!\.git/)(?!(.*/)?__pycache__/).+$
+    flags: m
+    match: not_contains
+  - name: lists-the-gateway-as-existing
+    type: regex
+    target:
+      source: file
+      path: intent/claim-steps/plan.md
+    pattern: '^- `?claims_gateway\.py`?\s*$'
+    flags: m
+  - name: lists-the-view-as-existing
+    type: regex
+    target:
+      source: file
+      path: intent/claim-steps/plan.md
+    pattern: '^- `?portal/adjuster_view\.py`?\s*$'
+    flags: m
+  - name: lists-no-file-that-is-not-there
+    type: regex
+    target:
+      source: file
+      path: intent/claim-steps/plan.md
+    pattern: '^- `?(?!claims_gateway\.py`?\s*$|portal/adjuster_view\.py`?\s*$|tests/test_adjuster_view\.py`?\s*$|README\.md`?\s*$)[\w./-]+\.\w+`?\s*$'
+    flags: m
+    match: not_contains
+  - name: delivers-r1
+    type: regex
+    target:
+      source: file
+      path: intent/claim-steps/plan.md
+    pattern: '^- delivers:[^\n]*\bR1\b'
+    flags: m
+  - name: delivers-r2
+    type: regex
+    target:
+      source: file
+      path: intent/claim-steps/plan.md
+    pattern: '^- delivers:[^\n]*\bR2\b'
+    flags: m
+  - name: delivers-r3
+    type: regex
+    target:
+      source: file
+      path: intent/claim-steps/plan.md
+    pattern: '^- delivers:[^\n]*\bR3\b'
+    flags: m
+  - name: proof-names-every-requirement
+    type: regex
+    target:
+      source: file
+      path: intent/claim-steps/plan.md
+    pattern: '^## Proof(?=[\s\S]*\bR1\b)(?=[\s\S]*\bR2\b)(?=[\s\S]*\bR3\b)'
+    flags: m
+  - name: risks-name-the-concern
+    type: regex
+    target:
+      source: file
+      path: intent/claim-steps/plan.md
+    pattern: '^## Risks(?:(?!\n## )[\s\S])*\bC1\b'
+    flags: m
+  - name: no-placeholder-left
+    type: regex
+    target:
+      source: file
+      path: intent/claim-steps/plan.md
+    pattern: '<(a file this changes|one piece of the work|R1, R2>|What changes and where|What could break|The checks that show)'
+    match: not_contains
+  - name: nothing-pushed
+    type: tool_used
+    tool: Bash
+    input_match: git push|gh pr
+    min: 0
+    max: 0
+    arm: both
+  - name: a-stranger-could-build-from-it
+    type: llm
+    focus:
+      source: file
+      path: intent/claim-steps/plan.md
+    criteria: |
+      This is a plan for building a change. Its steps are the headings that start "### Step".
+
+      Pass only if every step says what changes and names the file or files it changes in, so that an engineer who has the repository and this plan, and was never in the conversation that produced it, could start on that step. A step that says only "implement R1", or that refers to something "as discussed" or "as agreed", is a fail.
