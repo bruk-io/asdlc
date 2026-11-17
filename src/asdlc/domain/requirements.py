@@ -33,7 +33,6 @@ class Progress(StrEnum):
 class Requirement:
     id: str
     title: str
-    area: str
     replaces: str | None
     replaced_by: str | None
     retired_by: str | None  # the slug of the intent whose spec retired it
@@ -101,7 +100,6 @@ def requirements(
                 Requirement(
                     id=id,
                     title=item.title,
-                    area=item.props.get("area", ""),
                     replaces=qualify(spec.slug, replaces) if replaces else None,
                     replaced_by=replaced.get(id),
                     retired_by=retired.get(id),

@@ -7,13 +7,18 @@ policies: [<each policy skill applied while writing this>]
 ## Requirements
 
 ### R1: <one thing that must be true, checkable yes or no>
-- area: <the part of the product it belongs to>
 
-<Detail, when the title is not enough. To end an earlier requirement, add "- replaces: <intent>.R<n>".>
+<Detail, when the title is not enough. To end an earlier requirement, add "- replaces: <intent>.R<n>" under its heading.>
 
 ## Design
 
 <How the requirements are met, and what was decided on the way.>
+
+## How each constraint in the intent is met
+
+| Constraint | Met by |
+|---|---|
+| <a constraint, copied from the intent> | <the requirement or decision that meets it> |
 
 ## Open questions from intent
 

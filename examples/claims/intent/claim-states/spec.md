@@ -7,6 +7,5 @@ kind: spec
 
 ### R1: Status is one of five states
 - replaces: claims-status.R2
-- area: status
 
 Received, in review, waiting on you, approved, paid.

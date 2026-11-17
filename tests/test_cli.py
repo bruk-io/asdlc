@@ -26,7 +26,7 @@ def test_the_bare_program_lists_the_nouns_and_a_bare_noun_its_verbs():
 @pytest.mark.parametrize("help_flag", ["-h", "--help"])
 def test_help_works_on_the_program_and_on_any_command(help_flag):
     assert run(help_flag).exit_code == 0
-    assert "id, state, area, title" in run("requirement", "list", help_flag).output
+    assert "id, state, title" in run("requirement", "list", help_flag).output
 
 
 def test_version_prints_the_version_alone():
@@ -79,9 +79,9 @@ def test_document_check_takes_one_intent_as_its_target(example):
 def test_requirement_list_is_what_is_in_force_unless_asked(example):
     lines = run("requirement", "list", "--root", example).stdout.strip().split("\n")
     assert "claims-status.R3" not in {line.split("\t")[0] for line in lines}
-    assert all(len(line.split("\t")) == 4 for line in lines)
+    assert all(len(line.split("\t")) == 3 for line in lines)
     everything = run("requirement", "list", "--all", "--root", example).stdout
-    assert "claims-status.R3\treplaced\tfreshness\t" in everything
+    assert "claims-status.R3\treplaced\tStatus refreshes" in everything
 
 
 def test_flags_may_come_before_or_after(example):

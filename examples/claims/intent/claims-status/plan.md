@@ -3,6 +3,12 @@ kind: plan
 ---
 # Plan: claims status self-service
 
+## Files that change
+
+- claims-api/routes/status.py (new)
+- claims-api/tests/test_status.py (new)
+- portal/src/claims/StatusPanel.tsx (new)
+
 ## Order of work
 
 ### Step 1: Add the status endpoint behind existing auth

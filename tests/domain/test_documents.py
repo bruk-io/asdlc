@@ -10,7 +10,6 @@ policies: [pii-in-logs, api-versioning]
 # Spec: claims status
 
 ### R1: A customer can see their claim's status
-- area: status
 
 Detail that is not a property.
 
@@ -83,7 +82,7 @@ def test_a_spec_and_the_headings_others_cite():
             Mark.REQUIREMENT,
             1,
             "A customer can see their claim's status",
-            {"area": "status"},
+            {},
         ),
         (
             Mark.REQUIREMENT,
@@ -102,6 +101,7 @@ def test_a_heading_inside_a_code_fence_is_not_an_item():
 
 SPEC_PATH = "intent/claims/spec.md"
 INTENT_PATH = "intent/claims/intent.md"
+PLAN_PATH = "intent/claims/plan.md"
 
 
 @pytest.mark.parametrize(
@@ -153,16 +153,64 @@ INTENT_PATH = "intent/claims/intent.md"
             "property",
             id="unknown-property",
         ),
+        pytest.param(
+            PLAN_PATH,
+            "---\nkind: plan\n---\n## Risks\n- none\n",
+            "files",
+            id="no-files",
+        ),
+        pytest.param(
+            PLAN_PATH,
+            "---\nkind: plan\n---\n## Files that change\nThe usual ones.\n",
+            "files",
+            id="files-not-listed",
+        ),
+        pytest.param(
+            PLAN_PATH,
+            "---\nkind: plan\n---\n## Files that change\n- <a file this changes>\n",
+            "files",
+            id="files-left-as-the-template",
+        ),
     ],
 )
 def test_what_is_wrong_inside_one_document(path, text, rule):
     assert rules(documents.parse(path, text)[1]) == [rule]
 
 
+def test_a_plan_that_names_a_file_is_clean():
+    text = "---\nkind: plan\n---\n## Files that change\n- api/status.py (new)\n"
+    assert documents.parse(PLAN_PATH, text)[1] == ()
+
+
+def test_a_body_splits_into_its_sections():
+    fence = "```\n## not a heading\n```\n"
+    body = f"# Plan: x\n## Files that change\n\n- a.py\n{fence}## Risks\nNone.\n"
+    assert dict(documents.sections(body)) == {
+        "Files that change": ("- a.py", "```", "## not a heading", "```"),
+        "Risks": ("None.",),
+    }
+
+
+def test_list_items_are_read_whole_and_a_placeholder_is_not_an_entry():
+    lines = ("Some prose.", "- one", "- two is", "  wrapped", "- <fill me in>")
+    assert documents.bullets(lines) == ("one", "two is wrapped", "<fill me in>")
+    assert documents.filled(documents.bullets(lines)) == ("one", "two is wrapped")
+
+
+def test_a_tables_rows_are_its_cells_without_the_header():
+    lines = ("| Constraint | Met by |", "| :--- | ---: |", "| a \\| b | R1 |", "prose")
+    assert documents.table_rows(lines) == (("a | b", "R1"),)
+
+
 def test_state_cannot_be_written_into_a_document():
     """Status is worked out, so neither frontmatter nor a requirement can hold it."""
     text = "---\nkind: spec\nstatus: approved\n---\n### R1: a\n- state: built\n"
     assert rules(documents.parse(SPEC_PATH, text)[1]) == ["frontmatter", "property"]
+
+
+def test_a_requirement_no_longer_carries_an_area():
+    text = "---\nkind: spec\n---\n### R1: a\n- area: status\n"
+    assert rules(documents.parse(SPEC_PATH, text)[1]) == ["property"]
 
 
 def test_a_file_in_the_wrong_place_is_no_document():

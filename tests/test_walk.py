@@ -62,7 +62,8 @@ def test_an_intent_goes_from_a_spec_to_built(repository, tmp_path_factory, monke
         "### Step 1: the endpoint\n- delivers: R1\n"
         "### Step 2: the panel\n- delivers: R2\n"
     )
-    fill(repository, "intent/claims/plan.md", f"# Plan: claims\n{steps}")
+    files_ = "## Files that change\n- api/status.py (new)\n## Order of work\n"
+    fill(repository, "intent/claims/plan.md", f"# Plan: claims\n{files_}{steps}")
     accept(repository, "plan/claims", 2)
     assert progress(repository) == {"claims.R1": "planned", "claims.R2": "planned"}
 
