@@ -42,5 +42,7 @@ jobs:
         if: github.event_name == 'pull_request'
         run: uv run asdlc branch check "$GITHUB_HEAD_REF"
 
-      - name: Plugin and marketplace manifests
-        run: npx --yes @anthropic-ai/claude-code plugin validate .
+      - name: Marketplace and plugin manifests
+        run: |
+          npx --yes @anthropic-ai/claude-code plugin validate .
+          npx --yes @anthropic-ai/claude-code plugin validate plugins/asdlc

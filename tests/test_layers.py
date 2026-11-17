@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-PACKAGE = Path(__file__).resolve().parent.parent / "asdlc"
+PACKAGE = Path(__file__).resolve().parent.parent / "src" / "asdlc"
 
 # What each layer must not import. Only cli may import all three.
 FORBIDDEN = {
@@ -50,7 +50,7 @@ def test_a_layer_imports_only_what_it_may(layer, file):
         for banned in FORBIDDEN[layer]
         if name == banned or name.startswith(f"{banned}.")
     )
-    assert not crossed, f"asdlc/{layer}/{file.name} must not import {crossed}"
+    assert not crossed, f"src/asdlc/{layer}/{file.name} must not import {crossed}"
 
 
 def test_every_layer_has_modules_to_judge():

@@ -6,7 +6,7 @@ A Claude Code plugin implementing Anthropic's AI-native SDLC playbook. This is v
 
 - `just check` - everything: `asdlc document check` on the example, formatting, ruff and every test. Exits non-zero on any failure. Run it before saying any change is done, and paste its result.
 - `uv run asdlc requirement list --root examples/claims` - try a command against the worked example.
-- `claude plugin validate .` - the plugin and marketplace manifests.
+- `claude plugin validate .` and `claude plugin validate plugins/asdlc` - the marketplace and plugin manifests.
 
 ## Words
 
@@ -31,17 +31,21 @@ A Claude Code plugin implementing Anthropic's AI-native SDLC playbook. This is v
 
 - An intent, its spec, its plan and its tasks are files under `intent/<slug>/`. Each is added on a branch named for it (`intent/<slug>`, `spec/<slug>`, `plan/<slug>`, `tasks/<slug>`) and accepted by a person merging that branch.
 - A task is built on `task/<slug>/<task>` once its `task.md` is on `main`. A small intent is built on `change/<slug>` with its plan as the first commit.
-- Documents hold what a person declared. State (in force, replaced, built; ready, claimed, in review, done) is worked out in `asdlc/domain` from the files and from git, and never written into a file.
+- Documents hold what a person declared. State (in force, replaced, built; ready, claimed, in review, done) is worked out in `src/asdlc/domain` from the files and from git, and never written into a file.
 
 ## Layout
 
-`asdlc/` is the package, in three layers. `tests/test_layers.py` fails when one imports what it must not.
+The repository is a marketplace holding one Python package and one plugin. `.claude-plugin/marketplace.json` lists the plugins under `plugins/`.
 
-- `asdlc/domain/` - decides. Pure functions over data: documents, requirements, lint, the guard, tasks and their state, scaffolding. Imports nothing else here, and no files, git or printing.
-- `asdlc/io/` - reads files, git, GitHub (through `gh`) and a hook's stdin. Decides nothing.
-- `asdlc/presentation/` - turns what the domain returned into text for a person or JSON for a hook.
-- `asdlc/cli.py` - the click command. The only module that imports all three.
-- `hooks/` - registers two Claude Code hooks: `asdlc hook run lint` after Claude writes a document, and `asdlc hook run guard` before Claude runs `git push`. `bin/` - puts `asdlc` on a session's PATH. `asdlc/templates/` - the four documents, shipped in the package. `examples/claims/` - a worked example the tests read.
+`src/asdlc/` is the package, in three layers. `tests/test_layers.py` fails when one imports what it must not.
+
+- `src/asdlc/domain/` - decides. Pure functions over data: documents, requirements, lint, the guard, tasks and their state, scaffolding. Imports nothing else here, and no files, git or printing.
+- `src/asdlc/io/` - reads files, git, GitHub (through `gh`) and a hook's stdin. Decides nothing.
+- `src/asdlc/presentation/` - turns what the domain returned into text for a person or JSON for a hook.
+- `src/asdlc/cli.py` - the click command. The only module that imports all three.
+- `src/asdlc/templates/` - the four documents, shipped in the package. `examples/claims/` - a worked example the tests read.
+- `plugins/asdlc/` - the Claude Code plugin, and everything Claude Code loads: its manifest in `.claude-plugin/plugin.json`, and later its skills, agents and evals. `hooks/hooks.json` registers two hooks: `asdlc hook run lint` after Claude writes a document, and `asdlc hook run guard` before Claude runs `git push`. `bin/asdlc` puts the command on a session's PATH.
+- An installed plugin is a copy of `plugins/asdlc/` alone, without `src/`. So `bin/asdlc` runs the working tree's package in a checkout, and otherwise has uv fetch the command from the repository. Nothing in the plugin may read a path above its own folder any other way.
 - `tests/` - mirrors the layers. Domain tests touch no files; `test_example.py` and `test_cli.py` run on real files and a real git repository.
 
 ## Conventions

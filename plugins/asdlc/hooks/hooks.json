@@ -1,0 +1,36 @@
+{
+  "description": "asdlc: lint a document as soon as Claude writes it, and guard a branch before Claude pushes it",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git push*)",
+            "command": "command -v uv >/dev/null 2>&1 || { echo 'asdlc: uv is not installed, so the guard did not run. Install uv: https://docs.astral.sh/uv/' >&2; exit 1; }; \"${CLAUDE_PLUGIN_ROOT}/bin/asdlc\" hook run guard; status=$?; if [ \"$status\" -eq 2 ]; then echo 'asdlc: uv could not start the guard (often no network to fetch Python 3.15 or its packages), so it did not run' >&2; exit 1; fi; exit \"$status\"",
+            "timeout": 60
+          },
+          {
+            "type": "command",
+            "if": "Bash(git -C * push*)",
+            "command": "command -v uv >/dev/null 2>&1 || { echo 'asdlc: uv is not installed, so the guard did not run. Install uv: https://docs.astral.sh/uv/' >&2; exit 1; }; \"${CLAUDE_PLUGIN_ROOT}/bin/asdlc\" hook run guard; status=$?; if [ \"$status\" -eq 2 ]; then echo 'asdlc: uv could not start the guard (often no network to fetch Python 3.15 or its packages), so it did not run' >&2; exit 1; fi; exit \"$status\"",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v uv >/dev/null 2>&1 || { echo 'asdlc: uv is not installed, so the linter did not run. Install uv: https://docs.astral.sh/uv/' >&2; exit 1; }; \"${CLAUDE_PLUGIN_ROOT}/bin/asdlc\" hook run lint; status=$?; if [ \"$status\" -eq 2 ]; then echo 'asdlc: uv could not start the linter (often no network to fetch Python 3.15 or its packages), so it did not run' >&2; exit 1; fi; exit \"$status\"",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}
