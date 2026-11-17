@@ -68,6 +68,30 @@ def test_a_session_runs_the_package_it_shipped_ahead_of_an_older_asdlc(tmp_path)
     assert os.listdir(tmp_path / "tmp" / "asdlc-s1" / "bin") == ["asdlc"]
 
 
+def test_installing_from_a_checkout_writes_nothing_into_it(tmp_path):
+    """Sessions that start together must not build in the tree they share.
+
+    Each has a lock of its own, so a build that wrote into the checkout would be
+    written over by the next one. Some of those sessions then got no command.
+    """
+    checkout = tmp_path / "checkout"
+    shutil.copytree(PLUGIN, checkout / "plugins" / "asdlc")
+    shutil.copytree(
+        ROOT / "src" / "asdlc",
+        checkout / "src" / "asdlc",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    for name in ("pyproject.toml", "README.md"):
+        shutil.copy(ROOT / name, checkout / name)
+    before = sorted(path.relative_to(checkout) for path in checkout.rglob("*"))
+
+    done = install(checkout / "plugins" / "asdlc", tmp_path, os.environ["PATH"])
+
+    assert (done.returncode, done.stdout) == (0, ""), done.stderr
+    assert sorted(path.relative_to(checkout) for path in checkout.rglob("*")) == before
+    assert (tmp_path / "tmp" / "asdlc-s1" / "bin" / "asdlc").exists()
+
+
 STAND_IN = """#!/bin/sh
 # Records how uv was called, and leaves what the real one would: a python for
 # `venv`, an asdlc beside it for `pip install`.
