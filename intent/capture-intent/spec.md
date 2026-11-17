@@ -136,7 +136,12 @@ The probe ran the copy with the machine's own Python. uv could not start inside 
 ### C3: The course gates configuration changes on eval results, and the intent says evals never block
 - owner: Bruk Habtu
 
-Both cannot hold as written. In this intent the cases are run by hand. Whether a change to a skill must pass them before it merges is left to the intent that puts evals in CI.
+Decided: once the cases run in CI, a pull request that changes what they measure must pass them. That is the plugin's skills, agents and hooks, and the cases themselves. A pull request that changes none of those does not run them. This is the course's rule.
+
+This intent does not put the cases in CI, so its constraint still holds here: the cases run by hand. The intent that puts them in CI builds the rule, and settles two things:
+
+- What failing means. A judge's verdict varies between runs (C4), so a drop against the last result on `main` is a fairer test than one red case.
+- Whether the cases also run on a schedule. A model update can change how a skill behaves with no pull request at all, and the course runs its cases nightly for that reason.
 
 ### C4: The checks a judge makes vary from run to run
 - owner: Bruk Habtu
