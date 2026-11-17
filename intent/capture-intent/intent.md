@@ -2,7 +2,7 @@
 kind: intent
 author: Bruk Habtu
 ---
-# Intent: an agent captures an intent
+# Intent: a skill that captures an intent
 
 ## Problem
 
