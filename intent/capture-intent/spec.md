@@ -59,7 +59,11 @@ Time to a committed intent can then be read from git alone.
 
 ### The skill
 
-`plugins/asdlc/skills/capturing-intent/SKILL.md`. It works in this order:
+`plugins/asdlc/skills/capturing-intent/SKILL.md`.
+
+It is a skill and not a subagent. Capturing an intent is a conversation, and a skill loads into the conversation the requester is already in, with their own words in front of it. A subagent starts in a fresh context with only a brief. "The agent" in the requirements means Claude in that conversation.
+
+It works in this order:
 
 1. Decide whether the request needs an intent. If it fits in a handful of tool calls, do the work and stop (R9).
 2. Run `asdlc intent new <slug>`. This starts the branch and the clock (R1, R16). It comes before the questions, so the clock starts with the conversation.
@@ -146,7 +150,20 @@ This intent does not put the cases in CI, so its constraint still holds here: th
 ### C4: The checks a judge makes vary from run to run
 - owner: Bruk Habtu
 
-R2, R3 and R4 need a judge, and one run can pass or fail by chance. The cases run three times each, and the pass mark is set once the first runs show the spread.
+A pattern grader gives the same verdict on the same text every time. A judge is a second model answering a question, such as "does this intent name a solution the requester did not state?", and it does not. R2, R3 and R4 need a judge.
+
+Two things move between runs:
+
+- The intent itself. Claude writes a different one each run, so even a pattern can pass once and fail once.
+- The verdict. On a close call the judge can answer either way.
+
+So one run says little, and a case that passes two times in three is neither broken nor fine. Three things keep the score usable:
+
+- Each case runs three times, and its score is the share that passed.
+- Before a pass mark is set, the unchanged cases are run several times to see how far the score moves by chance. That spread is not known yet, because nothing has been run.
+- A change counts as worse only when the score drops by more than the spread.
+
+R14 is the other half: a fact planted in the prompt is checked by a pattern, so no case rests on a judge alone.
 
 ### C5: An installed plugin needs the network on the first session after an update
 - owner: Bruk Habtu
