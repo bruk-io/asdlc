@@ -1,0 +1,89 @@
+schema_version: "1.1"
+name: tasks-with-a-spike
+description: >-
+  An intent, its spec and its plan are on main. Step 2 of three starts with a
+  question about how to build it, and the plan says the rest of the step cannot be
+  sized until it is answered. Step 3 needs what step 2 builds. Graders read the
+  asdlc task new command lines, the files the run created and the answer.
+tags: [generating-tasks, acts]
+context:
+  scaffold_script: scaffold.sh
+execution:
+  prompt: |
+    The claim-steps plan is merged. Please cut its tasks.
+  max_turns: 40
+  timeout_seconds: 900
+  allowed_tools: [Skill, Bash, Read, Write, Edit, Glob, Grep]
+runs: 3
+graders:
+  - name: skill-loaded
+    type: tool_used
+    tool: Skill
+    input_match: generating-tasks
+  - name: branch-made-by-the-command
+    type: tool_used
+    tool: Bash
+    input_match: asdlc branch new tasks/claim-steps
+    arm: both
+  # "The rest of this command" is spelled out as tasks-from-an-accepted-plan has
+  # it, with the reason there: the harness matches the tool's input as JSON.
+  - name: step-1-has-a-task-with-a-size-on-the-scale
+    type: tool_used
+    tool: Bash
+    input_match: 'asdlc task new(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--step[ =](?:\\")?1\b)(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--size[ =](?:\\")?(?:1|2|3|5|8)\b)'
+    arm: both
+  - name: step-2-has-a-spike
+    type: tool_used
+    tool: Bash
+    input_match: 'asdlc task new(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--step[ =](?:\\")?2\b)(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--title[ =](?:\\"|'')?Spike:)'
+    arm: both
+  # A spike is the only task cut from its step.
+  - name: step-2-has-no-task-that-is-not-a-spike
+    type: tool_used
+    tool: Bash
+    input_match: 'asdlc task new(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--step[ =](?:\\")?2\b)(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--title[ =](?!(?:\\"|'')?Spike:))'
+    min: 0
+    max: 0
+    arm: both
+  - name: step-3-depends-on-a-task
+    type: tool_used
+    tool: Bash
+    input_match: 'asdlc task new(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--step[ =](?:\\")?3\b)(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--depends[ =])'
+    arm: both
+  - name: at-least-three-task-files
+    type: regex
+    target: files
+    pattern: '(?:^intent/claim-steps/tasks/[^/\n]+/task\.md$[\s\S]*?){3}'
+    flags: m
+  - name: no-fourth-task-file
+    type: regex
+    target: files
+    pattern: '(?:^intent/claim-steps/tasks/[^/\n]+/task\.md$[\s\S]*?){4}'
+    flags: m
+    match: not_contains
+  - name: nothing-else-written
+    type: regex
+    target: files
+    pattern: ^(?!intent/claim-steps/tasks/[^/\n]+/task\.md$)(?!\.git/)(?!(.*/)?__pycache__/).+$
+    flags: m
+    match: not_contains
+  - name: draft-shows-three-bodies
+    type: regex
+    pattern: '(?:## What to build[\s\S]*?## Done when[\s\S]*?){3}'
+  - name: nothing-pushed
+    type: tool_used
+    tool: Bash
+    input_match: git push|gh pr
+    min: 0
+    max: 0
+    arm: both
+  - name: the-spike-says-where-its-answer-goes-and-step-3-says-what-it-waits-for
+    type: llm
+    criteria: |
+      The message shows a draft of three tasks cut from a plan. Each task has a part headed "What to build" and a part headed "Done when". One of them is a spike: its title starts with "Spike:".
+
+      Pass only if both are true:
+      1. The spike's "Done when" names a file where the answer is to be written, and that file's path does not start with `intent/`. A "Done when" that only says the question is answered, with no file named, is a fail.
+      2. The task cut from step 3 of the plan says in its own text that it waits for more than the spike: for the task or tasks that will be cut from step 2 once the spike is answered, which do not exist yet. A task that only says it depends on the spike is a fail.
+
+      If the message shows no spike, that is a fail.

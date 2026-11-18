@@ -88,7 +88,7 @@ Edit each file the command wrote. Leave its frontmatter alone and replace every 
   - A spike's "What to build" is the question, and says the rest of the step is cut once it is answered.
   - A task of size 8 says its first commit is a plan of its own, started with `asdlc plan new <slug>/<task>`, and names the risk that plan talks through.
 - **Done when.** Each line is one a reviewer can answer yes or no to.
-  - A spike's names the file where the answer is written. That file is outside `intent/`, because a task's branch may add no other document.
+  - A spike's names the file where the answer is written. That file is outside `intent/`, and never in the task's own folder. The guard lets a task's branch add no file under `intent/` but the task's own plan, so an answer written there could not be merged.
   - A task of size 8 has its own plan as a line.
 - Use no heading that starts `### R`, `### Q`, `### C` or `### Step` followed by a number. Lint reads those as cited headings, and a task has none.
 
@@ -100,15 +100,19 @@ Run `asdlc document check <slug>`. It prints nothing when the tasks are well for
 
 ## 7. Show the draft and apply corrections
 
-The person sees what you write, not what a tool printed. Reading a file with a tool does not show it to them. So write the draft out, in one message:
+The draft is one message that you write. It has two parts, in this order.
 
-- every task's file in full, as it is on disk: its path, then the whole file in a fenced block, frontmatter included. The frontmatter shows its step, its size and what it depends on. Do not summarise a body, shorten it or reword it. The person is accepting the words in the file, so the conversation has to show those words;
-- one line for each step of the plan:
-  - the task or tasks cut from it, with their sizes and the reason for each size;
-  - for a split step, why it was split;
-  - for a 5 or an 8, why it was not split;
-  - for a handed-over step, its child intent;
-  - for a step with a spike, that the rest is cut after it.
+**First, every task's file, typed out in full.** For each task, its path on a line, then the whole file in a fenced block, frontmatter included, exactly as it is on disk. The frontmatter shows its step, its size and what it depends on. Do not summarise a body, shorten it or reword it: the person is accepting the words in the file.
+
+**Then, one line for each step of the plan:**
+
+- the task or tasks cut from it, with their sizes and the reason for each size;
+- for a split step, why it was split;
+- for a 5 or an 8, why it was not split;
+- for a handed-over step, its child intent;
+- for a step with a spike, that the rest is cut after it.
+
+The person sees your message and nothing else. A tool's output is not shown to them, so reading the files with a tool, or printing them with `cat`, shows them nothing. A message that holds only the line for each step is not a draft. Before you send it, check that the message itself has a fenced block for every task.
 
 Ask whether it is right. Change what the person corrects and show it again.
 
