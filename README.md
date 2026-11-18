@@ -143,7 +143,7 @@ The repository is a marketplace with two parts. `plugins/asdlc/` is the Claude C
 
 ## What is built, and what is not
 
-Built: the document format and its lint, scaffold commands for each document, task and intent state read from git, requirements and lineage, the guard as one function behind `asdlc branch check` and the hook before a push, lint after each document edit, four templates, a worked example. Four skills, `capturing-intent`, `generating-a-spec`, `generating-a-plan` and `generating-tasks`, with ten eval cases between them.
+Built: the document format and its lint, scaffold commands for each document, task and intent state read from git, requirements and lineage, the guard as one function behind `asdlc branch check` and the hook before a push, lint after each document edit, four templates, a worked example. Four skills, `capturing-intent`, `generating-a-spec`, `generating-a-plan` and `generating-tasks`, with eleven eval cases between them.
 
 Not built yet:
 
