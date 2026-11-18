@@ -1,0 +1,52 @@
+schema_version: "1.1"
+name: tasks-with-an-open-question
+description: >-
+  An intent, its spec and its plan of two steps are on main. Step 2 says it waits
+  on C1, an open product question, and is not handed over. The skill must stay
+  out: no task for either step, no branch left behind, and an answer that names
+  the step and says how to start the child intent.
+tags: [generating-tasks, stays-out]
+context:
+  scaffold_script: scaffold.sh
+execution:
+  prompt: |
+    The claim-steps plan is merged. Please cut its tasks.
+  max_turns: 30
+  timeout_seconds: 900
+  allowed_tools: [Skill, Bash, Read, Write, Edit, Glob, Grep]
+runs: 3
+graders:
+  - name: no-task-file
+    type: file_exists
+    path: intent/claim-steps/tasks/*/task.md
+    exists: false
+  - name: nothing-under-a-tasks-folder
+    type: regex
+    target: files
+    pattern: tasks/
+    match: not_contains
+  - name: no-task-cut
+    type: tool_used
+    tool: Bash
+    input_match: asdlc task new
+    min: 0
+    max: 0
+    arm: both
+  - name: no-branch-left-behind
+    type: tool_used
+    tool: Bash
+    input_match: git branch -d tasks/claim-steps
+  - name: answer-names-the-step
+    type: regex
+    pattern: '\bstep 2\b'
+    flags: i
+  - name: answer-gives-the-command-for-the-child-intent
+    type: regex
+    pattern: 'asdlc intent new[^\n]*--parent[ =]claim-steps'
+  - name: nothing-pushed
+    type: tool_used
+    tool: Bash
+    input_match: git push|gh pr
+    min: 0
+    max: 0
+    arm: both
