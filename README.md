@@ -46,6 +46,8 @@ policies: [pii-in-logs]
 
 `R` is a requirement, `Q` an open question, `C` an area of concern, `Step` a plan step. A requirement's id is `<slug>.R<n>` and is never reused. A later spec ends an earlier requirement with `- replaces:`; the earlier spec is never edited.
 
+`policies` names the policy skills applied while the spec was written, as the course's example spec has a "Skills applied" line. A policy skill is a rule of the repository that adopts asdlc, written as a skill of its own under `.claude/skills/`. This plugin ships none, and `pii-in-logs` above is an example name, not a skill that exists. Lint accepts the list and does not check that a skill of that name exists.
+
 Lint also reads two sections, both named as the course names them:
 
 - A plan's `## Files that change` lists the files it touches, one `- path` to a line.
