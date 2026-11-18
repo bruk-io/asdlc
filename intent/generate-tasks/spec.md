@@ -25,9 +25,9 @@ The path, the branch and the frontmatter are the commands': `step` and `delivers
 
 A plan that could be built in a single pass still gives a task for each step.
 
-### R5: A step gives one task, unless it is split under R10, R11 or R12
+### R5: A step gives one task, unless it is split under R10, R11 or R12, or has a spike under R13
 
-Two steps are never folded into one task. A plan with one step gives one task, unless that step is split. Independent work inside a step never causes a split: size and unknowns do. Once a 5 or an 8 is being split under R11, it may be split along its independent work.
+A step with a spike has the spike and, after a later pass under R15, the tasks cut behind it. Two steps are never folded into one task. A plan with one step gives one task, unless that step is split or has a spike. Independent work inside a step never causes a split: size and unknowns do. Once a 5 or an 8 is being split under R11, it may be split along its independent work.
 
 ### R6: A step that waits gets no task, and the skill names the step and the question
 
@@ -65,23 +65,23 @@ The owner decided this in C2. A spike's title starts with "Spike:". Its "What to
 
 Its `depends` names the spike, and its "What to build" says it also waits for the tasks cut after the spike, which have no name yet.
 
-### R15: Asked again for a plan that has tasks, the skill cuts only for a specified step with no task, or whose only task is a merged spike
+### R15: Asked again for a plan that has tasks, the skill cuts only for a specified step with no task, or whose tasks are all merged spikes
 
-It changes no task that exists and cuts no second task for a step that has one. For a step behind a spike it reads the spike's answer from `main` before it sizes anything, so what the spike taught goes into the new sizes and no accepted size changes. A new task's number follows the highest one on `main`. When there is nothing to cut, it says why and makes no branch.
+It changes no task that exists and cuts no second task for a step that has one. For a step behind a spike it reads each spike's answer from `main` before it sizes anything, so what the spikes taught goes into the new sizes and no accepted size changes. When an answer leaves the rest still impossible to size, what it cuts is another spike. A new task's number follows the highest one on `main`. When there is nothing to cut, it says why and leaves no branch behind.
 
 ### R16: A task of size 8 says it gets a plan of its own, and which risk that plan talks through
 
 Its "What to build" says the task's first commit is its own plan, started with `asdlc plan new <slug>/<task>`, and names the risk. Its "Done when" has that plan as a criterion.
 
-### R17: A task names another under `depends` when it needs what that one builds, and for no other reason
+### R17: A task names another under `depends` when it needs what that one builds, and for no other reason except R14
 
-Two tasks that change the same file do not depend on each other for that reason. A task with no `depends` can start as soon as it is on `main`.
+Under R14 a spike stands in for work that is not cut yet. Two tasks that change the same file do not depend on each other for that reason. A task with no `depends` can start as soon as it is on `main`.
 
 ### R18: Each size has a reason in complexity, unknowns and risk, and no size and no reason for one is given in hours, days or weeks
 
 ### R19: A task's "What to build" and "Done when" are enough for someone who never saw the conversation to start, and to review
 
-"What to build" names the files, the functions and the plan's step. A piece of a split step, and a spike, says which part of the step it is, because its `delivers` is the whole step's. A 5 or an 8 says what makes it one. Each line of "Done when" is one a reviewer can answer yes or no to.
+"What to build" names the files, the functions and the plan's step. A piece of a split step, and a spike, says which part of the step it is, because its `delivers` is the whole step's. A 5 or an 8 says what makes it one. Each line of "Done when" is one a reviewer can answer yes or no to. A task's body has no heading that starts `### R`, `### Q`, `### C` or `### Step` followed by a number: lint reads those as cited headings, and a task has none.
 
 ### R20: Every step of the plan is accounted for, in the draft and in the pull request's description
 
@@ -113,16 +113,16 @@ With the skill loaded, Claude works in this order:
 
 1. Run `asdlc branch new tasks/<slug>` (R2). It makes the branch from `main`, so what is read next is what was accepted.
    - When it refuses because the plan is not on `main`, say which merge the tasks wait for and stop (R3).
-   - When it fails because `tasks/<slug>` already exists, the branch is left from an earlier pass. If `main` holds everything on it, delete it with `git branch -d` and run the command again. If not, stop and say the branch holds tasks that are not on `main`, and that their pull request is merged or closed first.
+   - When it fails because `tasks/<slug>` already exists, the branch is left from an earlier pass. `main` holds everything on it when `git rev-list --count main..tasks/<slug>` prints 0. `git branch -d` alone is not that test: it also deletes a branch that is merged only to its own upstream, such as one with an open pull request. When the count is 0, switch to `main` if the session is on the branch, delete it with `git branch -d`, and run the command again. When it is not, stop and say the branch holds commits `main` does not, and that the tasks can be asked for again once its pull request is merged and `main` is up to date, or it is closed and the branch deleted.
 2. Read `intent/<slug>/intent.md`, `spec.md` and `plan.md`, and the files the plan lists. Run `asdlc task list <slug>` to see which tasks exist and which are done, and read the answer of each merged spike from the file its "Done when" names (R15).
 3. Go through the steps in order and decide, for each:
-   - whether it is handed over (R8), has a task already (R15), or waits (R6). If any step waits, say which and why, say what has to be merged, switch back to `main`, delete the branch just made, and stop (R7);
+   - whether it is handed over (R8), has a task already (R15), or waits (R6). If any step waits, say which and why, say what has to be merged, switch back to `main`, delete the branch just made with `git branch -d`, and stop (R7). If no step waits and there is nothing to cut, say why, and leave no branch behind in the same way (R15);
    - its size, from the intent's table (R9), by complexity, unknowns and risk (R18);
    - whether it is split, and under which of R10 to R13;
    - what it needs that another task builds (R14, R17). The skill reads the plan's "Files that change" and each step's text to see what overlaps. That is best effort. A shared file alone is not a dependency, and no list of files is written on a task.
 4. Run `asdlc task new <slug>/<nn>-<name> --step <n> --size <s> --depends <task> --title <title>` once for each task (R2). `--depends` takes the other task's folder name alone, `<nn>-<name>`, once for each task it depends on. `<nn>` counts the tasks in the order they would be built, and on a later pass goes on from the highest on `main`.
 5. Write each task's body: "What to build" and "Done when" (R13, R14, R16, R19). Leave the frontmatter alone.
-6. Run `asdlc document check <slug>` (R21). Lint reads no task's body, so whatever it prints about a task is about its frontmatter or about a step with no task, and is fixed by cutting again as R2 says.
+6. Run `asdlc document check <slug>` (R21). A `heading` finding on a task is about its body, where a line reads as a cited heading, and is fixed in the body (R19). Everything else lint prints about a task is about its frontmatter or about a step with no task, and is fixed by cutting again as R2 says.
 7. Show the draft (R20, R23). Apply what the person corrects, by R2's path when the correction is to a step, a size, a `depends` or a name.
 8. Commit the `task.md` files alone, with the subject `Tasks: <the intent's title>`. Run `asdlc branch check` (R22). Push, open the pull request with R20's lines as its description, and stop (R24).
 
@@ -138,6 +138,7 @@ Nothing in `src/asdlc` changes. Read in `src/asdlc/cli.py`, `src/asdlc/domain/gu
 - `task new <slug>/<task> --step <n>` stays on `tasks/<slug>` when that is the current branch. Run from another branch it switches to an existing `tasks/<slug>` as it is, however far behind `main`, which is why the skill starts with `branch new`.
 - `task new` writes `intent/<slug>/tasks/<task>/task.md` from `src/asdlc/templates/task.md`, with `step`, `delivers` copied from the step, and `depends` and `size` from its flags, written as given (R2). It refuses a step the plan does not have, and a task that already exists, which is why a correction removes the file first.
 - The guard allows `tasks/<slug>` to change only `intent/<slug>/tasks/<task>/task.md` (R22). It does not allow `plan.md`, a task's own `plan.md`, or another intent's files. On `task/<slug>/<task>` it allows any file outside `intent/` and the task's own `plan.md`, and no other new document (R13).
+- `parse` looks for cited headings in every document's body, a task's too. A task has none, so `### Step 1: ...` in a task's body is a `heading` finding, and so is a line such as `### R1 notes` (R19). Lint reads nothing else in a task's body, so a placeholder left from the template is not a finding.
 - Lint's `step` rule finds a task cut from a step the plan does not have, `delivers` one that delivers a requirement no spec has, and `depends` one that names anything but the folder of another task of the intent.
 - Lint's `coverage` rule: once a plan has any task, every step needs a task or a `- intent: <child>` line. Several tasks may share one step, so a split needs nothing new, and a handed-over step needs no task (R8, R10).
 - Lint's `child` rule: a step's `- intent: <child>` needs that intent to exist and to name this one as its parent. `asdlc intent new <child> --parent <slug>` writes that.
@@ -160,7 +161,7 @@ A judge reads the answer too. A pattern on a command line shows what was asked o
 - `tasks-from-an-accepted-plan` acts. `main` holds an intent, its spec and a plan of three small steps. The third needs what the first builds. The second needs nothing from the others and changes a file the first also changes. Patterns check that `asdlc task new` ran with `--step 1`, `--step 2` and `--step 3` (R4), that exactly three `task.md` files and nothing else were created (R2, R5, R22), that every `--size` is 1, 2, 3, 5 or 8 (R9), that the command for step 3 has a `--depends` and the command for step 2 has none, which is Q1's answer (R17), that the answer has no placeholder from the template (R19) and gives no size in hours, days or weeks (R18), that the answer has a line for each step (R20), and that nothing was pushed. A judge checks the rest of R19.
 - `tasks-with-a-spike` acts. Step 2 of three holds an unknown, and the plan's text makes plain that the rest of the step cannot be sized until it is answered. Step 3 needs what step 2 builds. Patterns check that one `task new` ran with `--step 2`, that its title starts with "Spike:" (R13), that the command for step 3 has a `--depends` (R14), and that exactly three `task.md` files were created. A judge checks that the spike's "Done when" names where the answer is written, and that step 3's task says it also waits for what is cut after the spike.
 - `tasks-with-a-handed-over-step` acts. Step 2 of the plan says `- intent: <child>`, its text still says it waits on `C1`, and the child intent is on `main` with this intent as its parent. Patterns check that `asdlc task new` ran with `--step 1`, that none ran with `--step 2`, that exactly one `task.md` was created, and that the answer names the child intent (R8). This is the only case that shows the route C1 decided comes to an end.
-- `tasks-with-an-open-question` stays out. One step of the plan says it waits on `C1` in the spec and is not handed over. Patterns check that no `task.md` was created, and that the answer names the step and gives `asdlc intent new` with `--parent` (R6, R7).
+- `tasks-with-an-open-question` stays out. One step of the plan says it waits on `C1` in the spec and is not handed over. Patterns check that no `task.md` was created, that the answer names the step and gives `asdlc intent new` with `--parent`, and that `git branch -d tasks/` ran, so no branch is left behind (R6, R7).
 - `tasks-wait-for-the-merge` stays out. The plan is on the branch `plan/<slug>` and not on `main`. Patterns check that no `task.md` was created, that no `tasks/` branch was made by hand, that Claude merged nothing, and that the answer says the plan has to be merged first (R3).
 
 C6 lists the requirements no case checks. `tests/test_evals.py` needs no change: it already finds every skill and case, and lints what each scaffold builds. `README.md` gains the skill in its table, and loses the line that says cutting tasks is done by hand.
@@ -252,7 +253,7 @@ The guard does not let `tasks/<slug>` add `intent/<slug>/tasks/<task>/plan.md`, 
 
 Lint does not read `size`, and the intent keeps lint as it is. The guard lets `tasks/<slug>` change a `task.md` that is already on `main`. A task written by hand, or by a session that did not load the skill, can have a size of 13 or none, or a new size on an accepted task, and lint and the guard are clean.
 
-### C6: No eval case checks nine of the requirements
+### C6: No eval case checks ten of the requirements
 - owner: Bruk Habtu
 
 An eval run is one turn with no network, and each scaffold holds one situation. No case checks:
@@ -261,8 +262,9 @@ An eval run is one turn with no network, and each scaffold holds one situation. 
 - R10: no scaffold has a step bigger than an 8.
 - R11: no scaffold has a 5 or an 8 to try to split.
 - R12: no scaffold has a first slice. The one case with an unknown is a spike.
-- R15: no scaffold has tasks already, or a merged spike.
+- R15: no scaffold has tasks already, or a merged spike, or a branch left from an earlier pass.
 - R16: no scaffold has an 8.
+- R21: a grader can show that `asdlc document check` ran, and not that it printed nothing.
 - R22's refusal to resize an accepted task.
 - R23's corrections, and so R2's path for changing a size or a `depends`.
 - R24, and the pull request's description that R20 asks for. The same lines in the draft are checked.
