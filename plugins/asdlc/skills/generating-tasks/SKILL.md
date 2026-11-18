@@ -1,5 +1,5 @@
 ---
-description: Cuts an accepted plan into its tasks - a task.md for each step on the branch tasks/<slug>, as a pull request a person merges or closes - each with a size, what it depends on, and enough to build from alone. Load this before cutting, splitting, sizing or resizing the tasks of a plan, and when someone asks for the tasks of an intent or what there is to build from a plan. Without it Claude cuts tasks before the plan is merged, folds steps together or splits them for no reason, sizes in days, makes one task wait for another because they share a file, types the frontmatter by hand, and cuts tasks for a plan that still has a step with an open product question.
+description: Cuts an accepted plan into its tasks - a task.md for each step on the branch tasks/<slug>, as a pull request a person merges or closes - each with a size, what it depends on, and enough to build from alone. Load this before cutting, splitting, sizing or resizing the tasks of a plan, and when someone asks for the tasks of an intent. Without it Claude cuts tasks before the plan is merged, folds steps together or splits them for no reason, sizes in days, makes one task wait for another because they share a file, types the frontmatter by hand, and cuts tasks for a plan that still has a step with an open product question.
 allowed-tools: Bash(asdlc *)
 ---
 
@@ -9,7 +9,12 @@ A task is one piece of an accepted plan, built later on a branch of its own by s
 
 You decide what is cut and write the words. `asdlc` makes the branch, each file, its path and its frontmatter. Never type frontmatter and never edit it.
 
-Work in this order.
+Two requests need no branch, so settle them before you start:
+
+- **Which tasks exist, or where they stand.** Run `asdlc task list <slug>` and answer from it. Start the branch only when the person wants tasks cut.
+- **Resizing a task that is already on `main`.** Say that a size records what was known when the task was accepted, and change nothing. What was learned goes into the next sizing.
+
+Otherwise, work in this order.
 
 ## 1. Start the branch with the command
 
@@ -106,8 +111,6 @@ The person sees what you write, not what a tool printed. Reading a file with a t
   - for a step with a spike, that the rest is cut after it.
 
 Ask whether it is right. Change what the person corrects and show it again.
-
-Asked to resize a task that is already on `main`, say that a size records what was known when the task was accepted, and change nothing. What was learned goes into the next sizing.
 
 Commit nothing and push nothing until they say it is right.
 
