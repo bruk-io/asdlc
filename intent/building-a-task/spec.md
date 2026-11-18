@@ -5,16 +5,13 @@ kind: spec
 
 ## Requirements
 
-R1 to R8 are about starting a task, R9 to R11 about how tasks and their states are read, R12 to R20 about stopping, R21 to R34 about the skill, and R35 about the eval cases. This spec changes no hook.
+R1 to R8 are about starting a task, R9 to R11 about how tasks and their states are read, R12 to R20 about stopping, R21 to R34 about the skill, R35 about the eval cases, and R36 about the link `task show` gives. This spec changes no hook.
 
-Four words are used throughout. The **builder** is Claude with the `building-a-task` skill loaded. A task is **started** when its branch is on the remote with a pull request. The **checks** are the command lines in `.asdlc/checks` on the remote's `main`, one to a line. A **branch of the loop** is one named `intent/<slug>`, `spec/<slug>`, `plan/<slug>`, `tasks/<slug>`, `task/<slug>/<task>` or `change/<slug>`.
+Four words are used throughout. The **builder** is Claude with the `building-a-task` skill loaded. A task is **started** when its branch is on the remote with a pull request. The **checks** are the command lines in `.asdlc/checks` on the remote's `main`, one to a line. A file with no command line in it counts as missing. A **branch of the loop** is one named `intent/<slug>`, `spec/<slug>`, `plan/<slug>`, `tasks/<slug>`, `task/<slug>/<task>` or `change/<slug>`.
 
 ### R1: `asdlc task start <slug>/<task>` puts the branch `task/<slug>/<task>`, made from the remote's `main`, in a worktree of its own
 
-- Run inside a linked worktree that is clean and holds no commit the remote's `main` lacks, it takes that worktree over and switches it to the branch.
-- Run anywhere else, it makes the worktree `.worktrees/<slug>/<task>` under the root of the main checkout, and leaves the checkout it was run from as it was.
-
-The branch is made with no upstream. The command prints one line: the worktree's path, the branch and the pull request's link.
+The worktree is always a new one, `.worktrees/<slug>/<task>` under the root of the main checkout. The checkout or worktree the command was run from is left as it was, on its branch. The branch is made with no upstream. The command prints one line: the worktree's path, the branch and the pull request's link.
 
 ### R2: The branch's first commit is an empty one that records when the task was started
 
@@ -26,26 +23,26 @@ The push sets the branch's upstream to its own branch on the remote. The pull re
 
 ### R4: `task start` makes nothing when it can tell beforehand that it cannot finish
 
-Before it makes a branch it refuses, with exit 1 and the reason: a repository with no remote, a `gh` that cannot open a pull request in this repository, and a remote `main` with no `.asdlc/checks`.
+Before it makes a branch it refuses, with exit 1 and the reason: a repository with no remote, a `gh` that cannot open a pull request in this repository, and a remote `main` with no checks.
 
 ### R5: `task start` starts only a task that reads as `ready`, judged from the remote alone
 
-It fetches first. It refuses, with exit 1 and the reason, a task that is `waiting`, `claimed`, `in review` or `done`. For a task that is claimed or in review the reason gives its pull request, or says that it has none and that `--resume` opens one. A target that names no task on the remote's `main` exits 3. A local branch left by a start that was cut short before its push does not count: the command uses it again.
+It fetches first. It refuses, with exit 1 and the reason, a task that is `waiting`, `claimed`, `in review` or `done`. For a task that is claimed or in review the reason gives its pull request, or says that it has none and that `--resume` opens one. A task whose `task.md` is in the checkout, or on the remote's `tasks/<slug>`, and not on the remote's `main` is refused the same way, and the reason names the merge it waits for. A target that names a task found in none of those exits 3. A local branch left by a start that was cut short before its push does not count: the command uses it again when it holds nothing but a start commit, and otherwise refuses and names it.
 
 ### R6: When one task is started from two clones, at most one start succeeds, and the other changes nothing on the remote
 
-The push is the claim, and it counts only when it made the branch on the remote. A push the remote rejects, or answers as already up to date, lost. The start that lost removes its own worktree and local branch, and names the pull request of the one that won when there is one.
+The push is the claim, and it counts only when it made the branch on the remote. A push the remote rejects, or answers as already up to date, lost. The start that lost removes the worktree and the local branch it made, and nothing else, and names the pull request of the one that won when there is one.
 
 ### R7: When the pull request cannot be opened after the push, `task start` undoes the start
 
-It deletes the branch from the remote only while the remote still holds this start's own commit, removes the worktree and the local branch, says why on stderr and exits 1. When the undoing fails too, it says what is left and that `task start --resume` finishes the start.
+It deletes the branch from the remote only while the remote still holds this start's own commit, removes the worktree and the local branch it made, says why on stderr and exits 1. When the undoing fails too, it says what is left and that `task start --resume` finishes the start.
 
 ### R8: `task start --resume` gives a worktree on a task that is already started
 
 - It opens the draft pull request when the branch has none.
 - It makes a pull request that was ready a draft again.
 - When the task's worktree is already there and clean, it brings it up to the remote's branch. When it cannot, it says why and changes nothing.
-- It refuses a task whose branch is not on the remote.
+- It refuses a task whose branch is not on the remote, and a task that is `done`.
 
 ### R9: `asdlc task list`, `task show` and `task start` read which tasks exist from the `task.md` files on the remote's `main`
 
@@ -57,17 +54,19 @@ So a task started from another clone shows as `claimed` without anyone running `
 
 ### R11: A task whose pull request is a draft reads as `claimed`, and as `in review` once the pull request is marked ready
 
+This holds wherever a task's state is shown: `task list`, `task show`, `intent list` and `intent show`.
+
 ### R12: `asdlc task stop <slug>/<task>` runs the checks in the task's worktree
 
-It reads `.asdlc/checks` from the remote's `main`, not from the branch. It takes no command line from whoever runs it. Each line is run through `sh -c`, in order, and all of them are run.
+It reads `.asdlc/checks` from the remote's `main`, not from the branch. It takes no command line from whoever runs it. Each line is run through `sh -c`, in order, and all of them are run. When `main` has no checks, the command exits 1 and says so, and runs, pushes and posts nothing.
 
 ### R13: `task stop` adds one comment to the pull request, holding what each check printed
 
 For each check the comment holds the command line, the exit status and what it printed. The output is as printed, except that the worktree's path, the main checkout's path and the home folder are each replaced by a short stand-in. Output longer than the comment can hold is cut from the top, and the comment says how many lines were cut. The comment also holds the commit the checks ran on, each file the guard marked with the message of the commit that changed it, and the text of `--message` when one is given.
 
-### R14: `task stop` refuses a worktree with uncommitted changes
+### R14: `task stop` refuses a worktree with uncommitted changes, and a branch that changes no file
 
-Exit 1, and nothing is run, pushed or posted.
+Untracked files count as uncommitted. Exit 1, and nothing is run, pushed or posted.
 
 ### R15: `task stop` merges the remote's `main` into the branch before it runs the checks
 
@@ -75,7 +74,7 @@ When `main` has nothing new it does nothing. When the merge is clean it commits 
 
 ### R16: `task stop` pushes the branch, unless the guard denies a file the branch changed
 
-On a denial it prints the guard's lines, exits 1, and pushes and posts nothing. Otherwise it pushes whether or not the checks passed, so the pull request shows the commit the comment is about.
+On a denial it prints the guard's lines, exits 1, and pushes and posts nothing. Otherwise it pushes whether or not the checks passed, so the pull request shows the commit the comment is about. When the remote refuses the push because its branch has a commit the worktree lacks, the command exits 1, posts nothing, and says that `task start --resume` brings the worktree up.
 
 ### R17: `task stop` marks the pull request ready for review only when every check passed, and makes it a draft when one failed
 
@@ -87,9 +86,9 @@ Merge commits are passed over.
 
 ### R19: `task stop` leaves a draft when the first commit after the start of a task of size 8 is not its own plan alone
 
-That commit has to add `intent/<slug>/tasks/<task>/plan.md` and change nothing else. Merge commits are passed over.
+That commit has to add `intent/<slug>/tasks/<task>/plan.md` and change nothing else. Merge commits are passed over. The size is the one in the `task.md` on the remote's `main`, here and in R20.
 
-In R18 and R19 the comment says which rule failed. A later commit cannot mend either, because the commits are already pushed. Such a draft ends when a person marks it ready on GitHub or closes it.
+In R18 and R19, when the commit at fault is not on the remote yet, the command refuses as R16 does on a denial: it names the commit, exits 1 and pushes nothing, so the builder can make the commit again. When the commit is already on the remote, the comment says which rule failed, and the draft ends when a person marks it ready on GitHub or closes it.
 
 ### R20: For a task of size 8 whose branch holds only its plan, `task stop` pushes and leaves the draft for a person to read
 
@@ -145,6 +144,10 @@ For a draft it says what failed.
 
 ### R35: The skill has an eval case where it must act and one where it must stay out
 
+### R36: `asdlc task show` gives the task's pull request
+
+A `pull-request` line holding the link, and a `pull_request` field under `--json`. Both are empty for a task with none.
+
 ## Design
 
 Skills applied: `authoring-kit:choosing-extension-types`, `authoring-kit:authoring-skills` and `authoring-kit:authoring-hooks`.
@@ -165,8 +168,8 @@ Two verbs from the closed set, on the noun that exists: `task start` and `task s
 
 `task start <slug>/<task>` does these in order:
 
-1. Fetch. Refuse a repository with no remote, a `gh` that cannot open a pull request here, and a `main` with no `.asdlc/checks` (R4). Work out the task's state from the remote's `main`, the remote's branches and the pull requests, and refuse unless it is `ready` (R5).
-2. Make `task/<slug>/<task>` at the remote's `main` with `--no-track`: by switching the worktree it stands in, when that is a clean linked one, or in a new worktree, `.worktrees/<slug>/<task>` (R1). That folder is added to `.git/info/exclude`, which worktrees share, so no tracked file changes.
+1. Fetch. Refuse a repository with no remote, a `gh` that cannot open a pull request here, and a `main` with no checks (R4). Work out the task's state from the remote's `main`, the remote's branches and the pull requests, and refuse unless it is `ready` (R5).
+2. Make `task/<slug>/<task>` at the remote's `main` with `--no-track`, in a new worktree, `.worktrees/<slug>/<task>` (R1). That folder is added to `.git/info/exclude`, which worktrees share, so no tracked file changes.
 3. Make the empty start commit (R2), with `commit_empty` in `src/asdlc/io/git.py`.
 4. Push with `git push --porcelain -u --force-with-lease=task/<slug>/<task>: origin task/<slug>/<task>`. An empty lease means "only if the remote has no such branch". The start won only when the line for the branch begins with `*`, which is a branch the push made. `=` is "up to date" and lost (R6).
 5. Open the draft pull request (R3). When that fails, delete the remote's branch with a lease on this start's own commit, and remove what was made here (R7).
@@ -177,7 +180,7 @@ Tried in a throwaway repository while this was revised: a branch made from `orig
 
 1. Refuse uncommitted changes (R14). Fetch, and merge the remote's `main` (R15).
 2. For a size 8 with only its plan: push, comment, print `plan` and stop (R20).
-3. Ask the guard about the branch, and refuse on a denial (R16). Work out R18 and R19 from the branch's commits and the files each changed.
+3. Ask the guard about the branch, and refuse on a denial (R16). Work out R18 and R19 from the branch's commits and the files each changed, and refuse when the commit at fault is not on the remote yet.
 4. Read `.asdlc/checks` from the remote's `main`, run each line in the worktree, and keep its output and exit status (R12).
 5. Push (R16), add the comment (R13), and mark the pull request ready or a draft (R17).
 
@@ -193,18 +196,21 @@ By layer:
 - `src/asdlc/io/git.py` gains the fetch with its limit, the worktree, the push, the leased delete, the merge, reading a file at a ref, the commits of a branch with the files each changed, and whether a worktree is clean.
 - `src/asdlc/io/github.py` gains the pull request of a branch (number, link, draft or not), opening a draft, adding a comment, and marking ready or draft. `open_pull_branches` there gives branch names only today.
 - `src/asdlc/io/checks.py` (new) runs one command line in a folder and gives back what it printed and its exit status.
-- `src/asdlc/presentation/pull.py` (new) words the pull request's description and the comment.
+- `src/asdlc/presentation/pull.py` (new) words the pull request's description and the comment. `src/asdlc/presentation/text.py` and `src/asdlc/presentation/data.py` gain the pull request on a task (R36).
 
 ### How tasks and their states are read
 
-`_state` in `src/asdlc/domain/tasks.py` does not change: done when merged, in review when its branch has an open pull request, claimed when its branch exists, otherwise ready or waiting. What changes is what `src/asdlc/cli.py` hands it, for the four `task` commands:
+`_state` in `src/asdlc/domain/tasks.py` does not change: done when merged, in review when its branch has an open pull request, claimed when its branch exists, otherwise ready or waiting. What changes is what `src/asdlc/cli.py` hands it.
+
+Wherever a state is shown, a branch whose pull request is a draft is passed as a branch that exists and not as one with an open pull request (R11). `_tasks` has four callers, `task list`, `task show`, `intent list` and `intent show`, and this is in `_tasks`, so the four agree. `Task` gains the pull request's link (R36).
+
+For the four `task` commands only:
 
 - The documents come from the remote's `main` (R9). Today `_library` reads the working tree, so a clone that has not pulled the tasks' merge lists none of them.
 - They fetch first, with `git fetch --prune origin`, `GIT_TERMINAL_PROMPT=0` and a time limit (R10).
-- A branch whose pull request is a draft is passed as a branch that exists and not as one with an open pull request (R11).
 - `task start` is handed the remote's branches only (R5). `task list` and `task show` are handed local and remote branches together, as today, so a branch made with `asdlc branch new` and never pushed still reads `claimed` in the clone that has it.
 
-`_tasks` has four callers. `asdlc intent list`, `intent show` and `requirement list` keep reading the working tree and do not fetch (C3). `asdlc branch new` is not changed.
+`asdlc intent list`, `intent show` and `requirement list` keep reading the working tree's documents and do not fetch (C3). `asdlc branch new` is not changed.
 
 ### The skill
 
@@ -219,12 +225,12 @@ By layer:
 With the skill loaded the builder works in this order:
 
 1. Run `asdlc task start <slug>/<task>`, with `--resume` when the person asked for a started task to be picked up (R22). On a refusal, or with no id, say why and stop (R23).
-2. Change into the worktree the command printed, once (R24). Every later command and edit is there, so `asdlc`, git and a search all default to the worktree.
+2. Change into the worktree the command printed, once (R24). Every later command and edit is there, so `asdlc`, git and a search all default to the worktree. A session that was started in a worktree of the product's own, such as one from `claude --worktree`, gets this second one and works in it (C9).
 3. Read the task's `task.md`, the intent's `plan.md` and `spec.md`, and the files the task names.
 4. For a size 8 with no plan yet: run `asdlc plan new <slug>/<task>`, write the plan, commit it alone, run `asdlc task stop` and stop (R26).
 5. Build what "What to build" says (R25). When the work departs from the intent's plan, change `plan.md` in that commit and say why in its message (R27, R28).
 6. Run the repository's checks while working, and fix the code when one fails (R32).
-7. Commit, and run `asdlc task stop <slug>/<task>` (R30). When it names files in conflict, resolve them, commit the merge and run it again (R29). When it prints `draft` and the failure can be fixed, fix it and run it again. When it cannot, run it once more with `--message` and stop (R33).
+7. Commit, and run `asdlc task stop <slug>/<task>` (R30). When it names files in conflict, resolve them, commit the merge and run it again (R29). When it refuses a commit under R18 or R19, make the commit again and run it again. When it prints `draft` and the failure can be fixed, fix it and run it again. When it cannot, run it once more with `--message` and stop (R33).
 8. Answer with the link and what the command printed (R34).
 
 The body says never to merge and never to run `gh pr ready` (R31).
@@ -233,12 +239,12 @@ The body says never to merge and never to run `gh pr ready` (R31).
 
 Four cases under `plugins/asdlc/evals/` (each a new `case.yaml` and `scaffold.sh`), in the format the cases there use. `tests/test_evals.py` finds them and lints what each scaffold builds.
 
-Each scaffold makes a bare repository under `.git/` and names it `origin`, so a fetch and a push need no network. It writes a stand-in for `gh` under `.git/`, sets `asdlc.gh` to it, and puts `.asdlc/checks` on `main`. The stand-in appends each call to a file at a fixed path, so "opened a draft", "marked ready", "the comment holds the output" and "nothing merged" are patterns on that file. The check is a shell script, because `plugins/asdlc/scripts/install` says an eval run cannot start the machine's Python. The requester's pilot showed that graders see tool calls.
+Each scaffold makes a bare repository under `.git/` and names it `origin`, so a fetch and a push need no network. It writes a stand-in for `gh` under `.git/`, sets `asdlc.gh` to it, and puts `.asdlc/checks` on `main`. Both paths are absolute: a relative one fails from inside a worktree. The stand-in appends each call to a file at a fixed path, so "opened a draft", "marked ready", "the comment holds the output" and "nothing merged" are patterns on that file. The commands read through `gh` before they refuse, so a case that stays out checks for no call that changes anything: no create, comment, ready or merge. The check is a shell script, because `plugins/asdlc/scripts/install` says an eval run cannot start the machine's Python. The requester's pilot showed that graders see tool calls.
 
 - `build-a-ready-task` acts. `main` holds an intent, its spec, its plan and one task of size 1 that changes one line of one file. Patterns check that the file under `.worktrees/` holds the new line and the main checkout's copy does not (R24), that no branch or worktree was made by hand (R22), and that the stand-in's record has a draft opened, a comment, a `ready` and no merge (R30, R31).
-- `build-with-a-check-that-fails` acts. The task cannot pass the check without changing a file the task says to leave alone. Patterns check that the file is unchanged in the worktree (R32), and that the record has a comment, no `ready` and no merge (R31, R33).
-- `build-waits-for-the-merge` stays out. The task is on `tasks/<slug>` and not on `main`. Patterns check that there is no `.worktrees/` folder, that no `task/` branch exists, that the record is empty, and that the answer says the task waits for a merge (R23).
-- `a-question-about-a-ready-task` stays out. A task is ready, and the prompt asks what it would involve. Patterns check that there is no `.worktrees/` folder, that no `task/` branch exists and that the record is empty. This is the wrong load C5 accepts.
+- `build-with-a-check-that-fails` acts. The task cannot pass the check without changing a file the task says to leave alone. Patterns check that the file is unchanged in the worktree (R32), and that the record has a comment, no `pr ready` other than `pr ready --undo`, and no merge (R31, R33).
+- `build-waits-for-the-merge` stays out. The task is on `tasks/<slug>` and not on `main`. Patterns check that there is no `.worktrees/` folder, that no `task/` branch exists, that the record has no call that changes anything, and that the answer says the task waits for a merge, which is the reason R5 gives (R23).
+- `a-question-about-a-ready-task` stays out. A task is ready, and the prompt asks what it would involve. Patterns check that there is no `.worktrees/` folder, that no `task/` branch exists and that the record has no call that changes anything. This is the wrong load C5 accepts.
 
 Besides those: `README.md` gains the two commands, the skill and `.asdlc/checks`.
 
@@ -247,7 +253,7 @@ Besides those: `README.md` gains the two commands, the skill and `.asdlc/checks`
 | Constraint | Met by |
 |---|---|
 | The guard for a task's branch does not break. | The guard is not changed. `task stop` asks it about the branch before it pushes (R16), and CI asks it again on the pull request. |
-| The task states are read as they are read today. | Met in part. The five states and the rule that picks one are unchanged. R9 and R10 read the remote, and R11 reads a draft pull request as `claimed`, which today reads `in review` (C3). |
+| The task states are read as they are read today. | Met in part. The five states and the rule that picks one are unchanged. R9 and R10 read the remote for the `task` commands, and R11 reads a draft pull request as `claimed` everywhere, which today reads `in review` (C3). |
 | `asdlc branch new` does not break. | Not changed. `task start` is a new verb, and a branch made with `branch new` reads as it does today. |
 | The tasks already on `main` do not break. | The task format and lint are not changed. The ten tasks on `main` are merged and read `done` from the merge commits, as today. R19 applies only when `task stop` is run. |
 | Anything Claude loads lands with an eval case where it acts and one where it stays out. | R35. |
@@ -265,7 +271,7 @@ Besides those: `README.md` gains the two commands, the skill and `.asdlc/checks`
 ### Q1: Should a task be linked to a pull request to show when it is in progress?
 - answer: answered
 
-From the requester, when the spec was asked for. Yes, and it is enforced by the command and is what happens with no flag. `task start` opens the draft pull request before any work (R3), and a start that cannot open one is undone (R7). The draft reads as `claimed` (R11).
+From the requester, when the spec was asked for. Yes, and it is enforced by the command and is what happens with no flag. `task start` opens the draft pull request before any work (R3), and a start that cannot open one is undone (R7). The draft reads as `claimed` (R11), and `task show` gives the link (R36).
 
 ### Q2: Should `asdlc task` give a way to create a branch and a pull request from the task?
 - answer: answered
@@ -323,7 +329,9 @@ The intent says the task states are read as they are read today. Three things ch
 - Which tasks exist comes from the remote's `main` (R9), decided by the owner on 2026-11-18. The cost: tasks on a `tasks/<slug>` branch that is checked out and not merged are no longer listed.
 - The `task` commands fetch each time (R10), so they are slower, and warn when the remote cannot be reached.
 
-`intent list`, `intent show` and `requirement list` still read the working tree and do not fetch. In a clone that is behind, they can disagree with `task list`. Proposed: leave them for a later change.
+`intent list`, `intent show` and `requirement list` still read the working tree's documents and do not fetch. In a clone that is behind, they can disagree with `task list` about which tasks exist. Proposed: leave them for a later change.
+
+`asdlc task list --root examples/claims` lists the example's tasks today. That root is inside a repository with a `main`, so R9 as written reads this repository's `main` and not the example. The plan has to say what a `--root` below the repository's root reads.
 
 ### C4: The builder cannot choose a weaker check, and can still change what a check runs
 - owner: Bruk Habtu
@@ -331,6 +339,10 @@ The intent says the task states are read as they are read today. Three things ch
 Skill: `authoring-kit:choosing-extension-types`.
 
 The intent quotes "An agent fixing code must not be able to weaken the check on that code". R12 takes the command lines from `.asdlc/checks` on `main`, so the builder gives `task stop` none. But a task may rightly change a test, and whether a change weakens one needs a rubric and not an assertion, so by `choosing-extension-types` it is not code. A branch can still change the tests, the `justfile` and the CI workflow. What is left: the skill says never (R32), CI runs on the pull request whatever the builder ran, and the reviewer sees every such change in the diff.
+
+Two routes to a weaker check do not show in a diff: the environment `task stop` is run with, and files git does not show. Only CI covers them.
+
+A task whose job is to change the checks cannot pass `main`'s old lines once they stop working. It stays a draft that a person ends.
 
 `.asdlc/checks` is also a new thing for a repository to adopt. No task can be started until it is on `main` (R4).
 
@@ -342,6 +354,8 @@ Skill: `authoring-kit:authoring-skills`.
 `authoring-skills` says to set `disable-model-invocation` on anything that must never fire on Claude's judgment. `task start` pushes a branch, claims the task and opens a pull request. The intent has the skill load when a person asks, and needs a case where it stays out. The later agent is to preload it, and a skill with that field set cannot be preloaded.
 
 Proposed, and what the design does: the field is not set, and `task start` is not pre-approved, so a wrong load meets a permission prompt before anything is published. `a-question-about-a-ready-task` measures the wrong load. The cost is one prompt for each start, in a session that has not allowed it.
+
+The four skills on `main` have `Bash(asdlc *)`, which now pre-approves `task start` and `task stop` in a turn that loaded one of them. This spec does not change them.
 
 ### C6: A task cannot be started without GitHub
 - owner: Bruk Habtu
@@ -358,9 +372,13 @@ Decided by the owner, Bruk Habtu, on 2026-11-18: R13 takes the checkout's path o
 
 Not known: whether a scaffold's remote under `.git/`, and its stand-in set through `asdlc.gh`, work inside an eval run's sandbox. The plan pilots `build-a-ready-task` with one run before any other grader is written.
 
+Not checked by anyone: that GitHub opens a draft pull request on a branch whose only commit is empty, which R2 and R3 rest on. The plan tries it first.
+
 No case checks R25, R26, R27, R28, R29, the `--resume` half of R22, or the split R33 proposes. R1 to R20 are code, and are checked by tests under `tests/` with a bare repository on disk and a stand-in for `gh`.
 
 ### C9: Nothing removes a task's worktree
 - owner: Bruk Habtu
 
 Each started task leaves its worktree and a local branch behind after its pull request is merged or closed. The intent does not ask for a cleanup and this spec adds none. A person removes one with `git worktree remove`, which needs `--force` once the worktree holds an untracked file.
+
+`task start` always makes its own worktree, so a session started in a worktree of the product's own ends up with two. Working with the product's worktrees is left for later, with the worker agent.
