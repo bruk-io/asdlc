@@ -1,0 +1,121 @@
+schema_version: "1.1"
+name: tasks-from-an-accepted-plan
+description: >-
+  An intent, its spec and its plan are on main: three small steps. Step 3 needs
+  what step 1 builds. Step 2 needs nothing from the others and changes files step
+  1 also changes. Graders read the asdlc task new command lines, the files the run
+  created and the answer. None opens a task.md, because the skill names the folder.
+tags: [generating-tasks, acts]
+context:
+  scaffold_script: scaffold.sh
+execution:
+  prompt: |
+    The claim-steps plan is merged. Please cut its tasks.
+  max_turns: 40
+  timeout_seconds: 900
+  allowed_tools: [Skill, Bash, Read, Write, Edit, Glob, Grep]
+runs: 3
+graders:
+  - name: skill-loaded
+    type: tool_used
+    tool: Skill
+    input_match: generating-tasks
+  - name: branch-made-by-the-command
+    type: tool_used
+    tool: Bash
+    input_match: asdlc branch new tasks/claim-steps
+    arm: both
+  # The harness matches input_match against the tool's input as JSON, where a line
+  # break inside a command is the two characters backslash and n. So "the rest of
+  # this command" is spelled out below: any escape but \n, a wrapped line (\\ then
+  # \n), or a character that is not a quote, a backslash, a line break, ; & or |.
+  # The lookaheads tie a command to its own flags and stop where the command ends.
+  - name: step-1-has-a-task-with-a-size-on-the-scale
+    type: tool_used
+    tool: Bash
+    input_match: 'asdlc task new(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--step[ =](?:\\")?1\b)(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--size[ =](?:\\")?(?:1|2|3|5|8)\b)'
+    arm: both
+  - name: step-2-has-a-task-with-a-size-on-the-scale
+    type: tool_used
+    tool: Bash
+    input_match: 'asdlc task new(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--step[ =](?:\\")?2\b)(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--size[ =](?:\\")?(?:1|2|3|5|8)\b)'
+    arm: both
+  - name: step-3-has-a-task-with-a-size-on-the-scale
+    type: tool_used
+    tool: Bash
+    input_match: 'asdlc task new(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--step[ =](?:\\")?3\b)(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--size[ =](?:\\")?(?:1|2|3|5|8)\b)'
+    arm: both
+  - name: no-size-off-the-scale
+    type: tool_used
+    tool: Bash
+    input_match: 'asdlc task new(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--size[ =](?!(?:\\")?(?:1|2|3|5|8)\b)'
+    min: 0
+    max: 0
+    arm: both
+  - name: step-3-depends-on-a-task
+    type: tool_used
+    tool: Bash
+    input_match: 'asdlc task new(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--step[ =](?:\\")?3\b)(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--depends[ =])'
+    arm: both
+  # Steps 1 and 2 change the same files, and a shared file is not a dependency.
+  - name: step-2-depends-on-nothing
+    type: tool_used
+    tool: Bash
+    input_match: 'asdlc task new(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--step[ =](?:\\")?2\b)(?=(?:\\\\\\n|\\[^n]|[^"\\\n;&|])*--depends[ =])'
+    min: 0
+    max: 0
+    arm: both
+  - name: at-least-three-task-files
+    type: regex
+    target: files
+    pattern: '(?:^intent/claim-steps/tasks/[^/\n]+/task\.md$[\s\S]*?){3}'
+    flags: m
+  - name: no-fourth-task-file
+    type: regex
+    target: files
+    pattern: '(?:^intent/claim-steps/tasks/[^/\n]+/task\.md$[\s\S]*?){4}'
+    flags: m
+    match: not_contains
+  - name: nothing-else-written
+    type: regex
+    target: files
+    pattern: ^(?!intent/claim-steps/tasks/[^/\n]+/task\.md$)(?!\.git/)(?!(.*/)?__pycache__/).+$
+    flags: m
+    match: not_contains
+  - name: draft-shows-three-bodies
+    type: regex
+    pattern: '(?:## What to build[\s\S]*?## Done when[\s\S]*?){3}'
+  - name: draft-shows-each-tasks-frontmatter
+    type: regex
+    pattern: '(?:^kind: task\s*$[\s\S]*?){3}'
+    flags: m
+  - name: draft-has-a-line-for-each-step
+    type: regex
+    pattern: '^(?=[\s\S]*\bstep 1\b)(?=[\s\S]*\bstep 2\b)(?=[\s\S]*\bstep 3\b)'
+    flags: i
+  - name: no-placeholder-left
+    type: regex
+    pattern: '<(Enough that someone who never saw|a criterion a reviewer can judge|what gets built>)'
+    match: not_contains
+  - name: no-size-given-in-time
+    type: regex
+    pattern: '\b(\d+(\.\d+)?|one|two|three|four|five|half an?|a few|several)[- ](hour|day|week)s?\b'
+    flags: i
+    match: not_contains
+  - name: nothing-pushed
+    type: tool_used
+    tool: Bash
+    input_match: git push|gh pr
+    min: 0
+    max: 0
+    arm: both
+  - name: a-stranger-could-build-from-each-task
+    type: llm
+    criteria: |
+      The message shows a draft of tasks cut from a plan. Each task has a part headed "What to build" and a part headed "Done when".
+
+      Pass only if both are true of every task shown:
+      1. Its "What to build" names at least one file and at least one function it changes or adds, so that an engineer who has the repository and this task, and was never in the conversation that produced it, could start. A task that says only "implement step 2" or "as the plan says" is a fail.
+      2. Every line under its "Done when" is a statement a reviewer could answer yes or no to by looking at the code or running a command. A line such as "the code is clean" or "works well" is a fail.
+
+      If the message shows no task with those two parts, that is a fail.
