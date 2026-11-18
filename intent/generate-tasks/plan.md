@@ -28,7 +28,7 @@ All five scaffolds build their repository with plain git and write their documen
 
 No grader opens a `task.md`, because the skill chooses each task's folder name. Graders read three things:
 
-- the `asdlc task new` command lines, with `tool_used` graders on `Bash`. A pattern that ties two flags to one command keeps to that command with `[^\n;&|]*` between them, because a run may chain several commands in one call;
+- the `asdlc task new` command lines, with `tool_used` graders on `Bash`. A pattern that ties two flags to one command has to stop where that command ends, because a run may put several commands in one call. The harness matches a pattern against the tool's input as JSON, where a line break inside a command is the two characters backslash and n, so `[^\n;&|]*` does not stop there and runs on into the next command. `plugins/asdlc/evals/tasks-from-an-accepted-plan/case.yaml` spells out the class that does, with a comment, and the other cases copy it from there;
 - the files the run created, with `target: files` patterns. That target is one path to a line, so "exactly three" is one pattern that finds `^intent/claim-steps/tasks/[^/\n]+/task\.md$` three times and one, with `match: not_contains`, that finds it four times;
 - the answer, with a `regex` grader that has no target.
 
