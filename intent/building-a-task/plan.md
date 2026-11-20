@@ -68,7 +68,7 @@ Four things hold for every step:
 - "The remote's `main`" is the ref `origin/main`, which `base` in `src/asdlc/io/git.py` already prefers. With no remote it is the local `main`.
 - No command reads a branch's upstream. Each names the remote's branch, `origin/task/<slug>/<task>`, outright, because a sandboxed session may not be able to record one.
 - A decision goes in `src/asdlc/domain/build.py` as a function that takes data and returns data. `tests/test_layers.py` fails a domain module that imports `subprocess`, so every git and `gh` call is in `src/asdlc/io/`, and `src/asdlc/cli.py` wires them.
-- The tests for steps 1 to 5 run on a real repository with a bare repository on disk as `origin`, and never reach the network. `tests/conftest.py` gains two fixtures, and step 1 builds both. `remote` gives a clone whose `origin` is a bare repository beside it, with `user.name` and `user.email` set, and whose `main` holds an intent, its spec, its plan, two tasks (one of size 2, one of size 8) and `.asdlc/checks`. `gh` gives a stand-in for `gh`: a shell script the fixture writes, set through the git config key `asdlc.gh`, that keeps the open pull requests in a JSON file, appends each call to a record, and can be told to fail on one subcommand. Step 1 uses only its `pr list`. Steps 2 and 4 use the rest.
+- The tests for steps 1 to 5 run on a real repository with a bare repository on disk as `origin`, and never reach the network. `tests/conftest.py` gains two fixtures, and step 1 builds both. `remote` gives a clone whose `origin` is a bare repository beside it, with `user.name` and `user.email` set, and whose `main` holds an intent, its spec, its plan, two tasks (one of size 2, one of size 8) and `.asdlc/checks`. `gh` gives a stand-in for `gh`: a shell script the fixture writes, set through the git config key `asdlc.gh`, that keeps the open pull requests in a JSON file, appends each call to a record, and can be told to fail on one subcommand. The script, the JSON file and the record are beside the clone and not inside its working tree, where they would be untracked files that R4 and R14 refuse. Step 1 uses only its `pr list`. Steps 2 and 4 use the rest.
 
 ### Step 1: Read tasks from the remote's `main`, a draft as `claimed`, and the pull request on a task
 - delivers: R9, R10, R11, R36
@@ -173,9 +173,14 @@ R4 can tell beforehand that `gh` is missing, signed out or has no GitHub remote,
 - The same from a linked worktree made with `git worktree add`, and the main checkout is not touched.
 - The draft's title, base and description, read from the stand-in's record.
 - Each refusal of R4 leaves no new branch and the checkout where it was: no remote, a failing `gh`, no checks on `main`, a changed tracked file, an untracked file, which the reason names, a checkout on the branch of another task that is claimed, and a task whose branch a second worktree holds, which the reason names. An ignored file does not refuse. A checkout on the branch of a task that is in review does not refuse.
-- A failure after the switch that R6 and R7 do not name leaves the checkout where it was and no task branch: a clone with no `user.name`, so git refuses the start commit, and a remote that is gone by the time of the push.
+- A failure after the switch that R6 and R7 do not name leaves the checkout where it was and no task branch: a clone where git cannot tell who is committing, staged with `user.useConfigOnly` as `tests/test_cli.py` already stages it, so git refuses the start commit, and a remote that is gone by the time of the push.
 - Each state of R5, the task that waits for its merge, and exit 3. The leftover branch used again, and one with work on it refused.
-- **R6, with the race staged after the fetch.** A start run from a second clone after the first has finished is refused by R5 and never reaches the push, so that is not the test. The second clone gets a `pre-push` hook, which git runs before it sends anything. The hook clears git's own `GIT_*` variables and runs the first clone's `task start`, with the interpreter the tests run under. So the first start finishes whole between the second's fetch and its push. Two cases: with both start commits pinned to one instant through `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE`, so they are one commit and the push answers `=`; and unpinned, so it answers `!`. In both the second start exits 1, its checkout is back where it was with no local task branch, the remote's branch is the first's commit, the stand-in holds one pull request, and the reason names it.
+- **R6, with the race staged after the fetch.** A start run from a second clone after the first has finished is refused by R5 and never reaches the push, so that is not the test. The first clone's whole `task start` is run from a git hook in the second clone. The hook clears git's own `GIT_*` variables and uses the interpreter the tests run under. So the first start finishes whole after the second's fetch. Two cases, and a reviewer ran both stagings in a throwaway repository:
+
+  - From a `post-checkout` hook, which fires at the second start's switch, with both start commits pinned to one instant through `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE`. They are one commit, the remote has it when the second's push begins, and the push answers `=`.
+  - From a `pre-push` hook, which fires as the push begins. The push answers `!`, pinned or not.
+
+  In both the second start exits 1, its checkout is back where it was with no local task branch, the remote's branch is the first's commit, the stand-in holds one pull request, and the reason names it.
 - `gh` failing on `pr create` leaves no branch on the remote, the checkout where it was and no local branch. A second test moves the remote's branch first and shows it is not deleted. A third has the stand-in move the bare repository away as it fails, so the remote's branch cannot be deleted either, and the message says it is left there and names `--resume`.
 - A fetch that fails exits 1. A `--root` below the top exits 2.
 - `asdlc plan new <slug>/<task>`, run on the task's branch after the start, writes `intent/<slug>/tasks/<task>/plan.md` and makes no branch (R26's command).
@@ -193,7 +198,7 @@ Needs step 2. It is a step of its own because `task start` with it would be more
 
 **`src/asdlc/cli.py`**: `task start` gains the switch `--resume`. With it, in the order the spec's Design gives:
 
-1. Steps 1 to 3 of the list in step 2 above, with `refusal` asked for a resume. Before the refusal of an uncommitted change: when the checkout is on the task's branch and `merging` says a merge is in progress, print `conflicts` and exit 1, which is R15's answer.
+1. Steps 1 to 3 of the list in step 2 above, with `refusal` asked for a resume. Before the refusal of an uncommitted change: when the checkout is on the task's branch and `merging` says a merge is in progress, give R15's answer and exit 1: print `conflicts`, or say that the merge is to be committed when no file is left in conflict.
 2. Switch the checkout to the task's branch. `switch_from_remote` when the clone has no local branch, or one that `leftover` accepts, so a start that was cut short does not add a second start commit. `switch` otherwise.
 3. `open_draft` when the branch has no pull request, and `set_ready(..., ready=False)` when it has one that is ready.
 4. When `origin/<branch>` has a commit the local branch lacks, `merge` it in. When that conflicts, leave the merge as git left it, print `conflicts`, exit 1.
@@ -207,7 +212,8 @@ When 3 fails, the command switches back, and deletes the local branch when this 
 
 - a clone with no local branch gets one at the remote's commit;
 - a clone with a branch left by a start that was cut short gets the remote's in its place, and the branch holds one start commit;
-- a merge already in progress on the task's branch prints the files in conflict and exits 1;
+- a merge already in progress on the task's branch prints the files in conflict and exits 1, and one with no file left in conflict is told to commit the merge;
+- a checkout on the branch of another task that is claimed is refused, as it is without `--resume`;
 - a task whose pull request was lost gets a draft opened;
 - a ready pull request becomes a draft;
 - a local branch that is behind is brought up;
@@ -224,7 +230,7 @@ Needs step 2: the task's branch, the checks file and the pull request are what `
 
 **`src/asdlc/io/checks.py`** (new): `run(line, folder)` runs one command line as `sh -c <line>` in a folder and gives back its exit status and what it printed, stdout and stderr together in the order they came.
 
-**`src/asdlc/io/git.py`** gains: `file_at(root, ref, path)`, a file's text at a ref or `None`; `push(root, branch)`, which is `git push origin <branch>` and says whether the remote refused it for a commit the checkout lacks; `head(root)`; `messages(root, range, path)`, the message of each commit in a range that changed a path; and `main_checkout(root)`, the root of the main checkout, from `git rev-parse --path-format=absolute --git-common-dir`.
+**`src/asdlc/io/git.py`** gains: `file_at(root, ref, path)`, a file's text at a ref or `None`; `push(root, branch)`, which is `git push --porcelain origin <branch>` and says whether the push was taken, and when it was not, whether that was for a commit the checkout lacks, with git's own reason; any `!` on the branch's line is a push that was not taken; `head(root)`; `messages(root, range, path)`, the message of each commit in a range that changed a path; and `main_checkout(root)`, the root of the main checkout, from `git rev-parse --path-format=absolute --git-common-dir`.
 
 **`src/asdlc/io/github.py`** gains `comment(root, number, body)`, which is `pr comment <number> --body-file -` with the body on stdin.
 
@@ -239,16 +245,16 @@ Needs step 2: the task's branch, the checks file and the pull request are what `
 **`src/asdlc/cli.py`** gains `task stop <slug>/<task>` with `--message <text>`. It is run in the checkout that is on the task's branch. In order:
 
 1. `_split` the target. Refuse a `--root` that is not the top of its repository, and a `--message` over 10,000 characters, exit 2. `_fetched(options, must=True)` (R10). A target that names no task on the remote's `main` exits 3.
-2. Refuse, exit 1 (R14): a task that is not started, which is one whose branch is not on the remote or has no open pull request; and a checkout that is not on `task/<slug>/<task>`, naming the branch it is on.
-3. When `merging` says a merge is in progress, print `conflicts` and exit 1 (R15). Otherwise refuse a checkout where `uncommitted` gives any path (R14).
+2. Refuse, exit 1 (R14): `open_pulls` giving `None`, as R4 has it, which is not read as a task with no pull request; a task that is not started, which is one whose branch is not on the remote or has no open pull request, with the reason R14 gives for each; and a checkout that is not on `task/<slug>/<task>`, naming the branch it is on.
+3. When `merging` says a merge is in progress, give R15's answer and exit 1: print `conflicts`, or say that the merge is to be committed when no file is left in conflict. Otherwise refuse a checkout where `uncommitted` gives any path (R14).
 4. Read `.asdlc/checks` with `file_at(root, "origin/main", ".asdlc/checks")`. When `check_lines` gives none, exit 1 and say so (R12). This is ahead of every merge so that nothing at all is run or pushed.
 5. When `origin/task/<slug>/<task>` has a commit the checkout lacks, `merge` it in. When it conflicts, leave the merge as git left it, print `conflicts`, exit 1 (R15).
 6. Refuse a branch that changes no file against `origin/main` (R14).
 7. Ask `guard` from `src/asdlc/domain/guard.py` about `changed_since(root, "origin/main")`. On a denial print the rulings with `text.ruling_line`, exit 1 (R16).
 8. `merge` `origin/main`. When it conflicts, leave the merge as git left it, print `conflicts`, exit 1 (R15).
 9. Run every line with `checks.run` in the checkout, in order, all of them (R12). Then ask `uncommitted` again. Any path it gives was left by the checks, and counts as a failure (R17).
-10. `push`. When the remote refuses it for a commit the checkout lacks, which the remote's branch gained after the fetch, exit 1, post nothing, and say to run the command again (R16).
-11. Post `comment` (R13). It is added and never edited. When it cannot be added, say so and exit 1, with the pull request left a draft or ready as it was.
+10. `push`. When the remote refuses it for a commit the checkout lacks, which the remote's branch gained after the fetch, exit 1, post nothing, and say to run the command again (R16). A push that is not taken for any other reason exits 1 with git's reason, and nothing is posted.
+11. Post `comment` (R13). It is added and never edited. When it cannot be added, say so and exit 1: make the pull request a draft when `outcome` says `draft`, and never mark it ready.
 12. `set_ready` by `outcome`. Print the link and `ready` or `draft`, tab-separated. Exit 0 for `ready` and 1 for `draft` (R17).
 
 This is the order the spec's Design gives. The guard is asked before `main` is merged, so that a refusal leaves no merge of `main` on top of the commit the builder has to make again.
@@ -261,11 +267,12 @@ This is the order the spec's Design gives. The guard is asked before `main` is m
 - A failing check gives `draft` and exit 1, with the branch pushed and the comment posted. A later failing run makes a ready pull request a draft again.
 - The checks are read from `main` when the branch's copy of `.asdlc/checks` says `true`. Every line runs when the first fails. No checks on `main` runs, pushes and posts nothing.
 - Refused, with nothing run, pushed or posted: a task that was never started, on a branch that `asdlc plan new <slug>/<task>` made; a started task whose pull request was closed; a checkout on another branch, named in the reason; a changed tracked file; an untracked file; a branch with no change.
-- `main` moved with no conflict is merged and committed. A conflict prints the files and leaves the merge. A second run with that merge still in progress prints the files again, and after the merge is committed it goes on.
+- `main` moved with no conflict is merged and committed. A conflict prints the files and leaves the merge. A second run with that merge still in progress prints the files again. With the files resolved and staged and the merge not committed, it says the merge is to be committed. After the merge is committed it goes on.
 - A branch that changes `intent/<slug>/spec.md` prints the guard's line, pushes nothing, and has no merge commit added.
-- The remote's branch ahead of the checkout, with a commit on each side, is merged in and the run goes on. When the remote's branch gains a commit between the fetch and the push, staged through a `pre-push` hook as in step 2, the run exits 1, posts nothing and says to run it again.
+- The remote's branch ahead of the checkout, with a commit on each side, is merged in and the run goes on. When the remote's branch gains a commit between the fetch and the push, the run exits 1, posts nothing and says to run it again. That is staged with a check line that pushes a commit from a second clone, because the checks run between the fetch and the push.
 - A check that changes a tracked file, and one that leaves an untracked file, each give `draft` with the file named in the comment.
-- A comment that cannot be added exits 1 after the push, and a pull request that was ready stays ready.
+- A comment that cannot be added exits 1 after the push. With a failing check, a pull request that was ready becomes a draft. With passing checks, a draft is not marked ready.
+- A `gh` that fails exits 1, and is not read as a task with no pull request.
 - Run in a linked worktree, the posted output has `<checkout>`, `<repository>` and `~`. Run in the main checkout it has `<checkout>` and `~`.
 - An output cut from the top with its count. A long `--message` and a long commit message still give a comment under GitHub's limit. A `--message` over the limit exits 2.
 - A marked `plan.md` in the comment with its commit's message. `--message` in the comment.
@@ -321,7 +328,7 @@ Its body is the seven steps of the spec's Design under numbered headings, as the
 - `.asdlc/checks` on `main`, one line, `sh check.sh`. `check.sh` is a shell script on `main`, because `plugins/asdlc/scripts/install` says an eval run cannot start the machine's Python.
 - `.gitignore` on `main`, two lines, `.claude/` and `__pycache__/`, so that nothing the eval harness puts in the first, and no run of the scaffold's tests, counts as uncommitted.
 - A bare repository at `.git/origin.git`, added as `origin` by its absolute path, with every branch pushed to it.
-- A stand-in for `gh` at `.git/gh`, with `git config asdlc.gh` set to its absolute path. It keeps the open pull requests in a JSON file, answers `pr list` from it, and appends each call to `.git/gh-calls`, which the scaffold makes empty. It also touches an empty file named for the kind of call, under `.git/gh-called/`: `create-draft`, `comment`, `ready`, `ready-undo`.
+- A stand-in for `gh` at `.git/gh`, with `git config asdlc.gh` set to its absolute path. It keeps the open pull requests in a JSON file under `.git/`, answers `pr list` from it, and appends each call to `.git/gh-calls`, which the scaffold makes empty. Nothing of the stand-in is in the working tree, where it would be an untracked file. It also touches an empty file named for the kind of call, under `.git/gh-called/`: `create-draft`, `comment`, `ready`, `ready-undo`.
 
 The record shows what `asdlc task start` and `asdlc task stop` called. It cannot show a `gh` the builder ran by hand, which is the one on `PATH`. So every "the builder did not run this" below is a `tool_used` grader on Bash, as in `plugins/asdlc/evals/plan-waits-for-the-merge/case.yaml`. A `files` pattern and `file_exists` see only the paths a run created, so what a file holds is always a `regex` with `source: file` at its exact path.
 
@@ -340,7 +347,7 @@ The record shows what `asdlc task start` and `asdlc task stop` called. It cannot
 
 **Pilot before any other grader.** Write this case with the `skill-loaded` grader alone and run `just eval --case build-a-ready-task --runs 1 --ablation none`. Read what the run wrote. It settles what C8 says is not tried: that `asdlc task start` and `asdlc task stop` themselves run inside an eval run, that the run's folder still reads as clean to R14 once the model has written a file, and what the sandbox does to the push with `-u`. When the commands cannot run there, stop and say so in the pull request: the cases cannot be written as designed, and that is C8's owner's to decide.
 
-**`build-waits-for-the-merge`**, tagged `building-a-task` and `stays-out`. The task is committed on `tasks/claim-steps`, pushed, and not merged. The prompt asks for it to be built. Graders: `.git/HEAD` names the branch the scaffold left it on; no `git worktree add` and no `git switch`, `git checkout` or `git branch` that names `task/` ran, and the run created no path under `.git/refs/heads/task/`; no `git merge` and no `gh pr merge` ran; nothing was built, which is that the run created no path outside `.git/` and `portal/adjuster_view.py` holds what the scaffold wrote; the record has no create, comment or ready, each a `file_exists` with `exists: false` on its marker; the answer says "merge" (R23). It follows `plugins/asdlc/evals/tasks-wait-for-the-merge/case.yaml` grader for grader where they match.
+**`build-waits-for-the-merge`**, tagged `building-a-task` and `stays-out`. The task is committed on `tasks/claim-steps`, pushed, and not merged. The prompt asks for it to be built. Graders: `.git/HEAD` names the branch the scaffold left it on; no `git worktree add` and no `git switch`, `git checkout` or `git branch` that names `task/` ran, and the run created no path under `.git/refs/heads/task/`; no `git merge` and no `gh pr merge` ran; nothing was built, which is that the run created no path outside `.git/`, apart from `__pycache__/` as `tasks-from-an-accepted-plan` passes over it, and `portal/adjuster_view.py` holds what the scaffold wrote; the record has no create, comment or ready, each a `file_exists` with `exists: false` on its marker; the answer says "merge" (R23). It follows `plugins/asdlc/evals/tasks-wait-for-the-merge/case.yaml` grader for grader where they match.
 
 **`README.md`**: the table under "Skills and their evals" gains a row for `building-a-task`. Under "What is built, and what is not", "Four skills" becomes five, the built list gains `task start`, `task stop` and `.asdlc/checks`, and the line "**The other skills.**" is rewritten to say what is still not built: a hook that refuses a merge (C2), a worker agent that gives each task a worktree and a fresh context (C1, C9), and starting several tasks at once.
 
@@ -353,7 +360,7 @@ Needs step 6's skill and its scaffold. Adds two cases, both tagged `building-a-t
 
 **`build-with-a-check-that-fails`**, tagged `acts`. The task says to change `portal/adjuster_view.py` and to leave `claims_gateway.py` alone, and `check.sh` cannot pass unless `claims_gateway.py` changes. Graders: `claims_gateway.py` and `check.sh` each still hold what the scaffold wrote, a `regex` with `source: file` at each exact path (R32); `asdlc task stop` ran with `--message` (R33); no `gh pr merge` and no `gh pr ready` ran (R31); the record has a comment and no `ready` other than `ready-undo` (R33); the answer says `draft` and what failed.
 
-**`a-question-about-a-ready-task`**, tagged `stays-out`. The scaffold of `build-a-ready-task`, and the prompt asks what building the task would involve. Graders: `.git/HEAD` names the branch the scaffold left it on; `asdlc task start` did not run; the run created no path outside `.git/`, and `portal/adjuster_view.py` holds what the scaffold wrote; the record has no create, comment or ready. This is the wrong load C5 accepts.
+**`a-question-about-a-ready-task`**, tagged `stays-out`. The scaffold of `build-a-ready-task`, and the prompt asks what building the task would involve. Graders: `.git/HEAD` names the branch the scaffold left it on; `asdlc task start` did not run; the run created no path outside `.git/`, apart from `__pycache__/`, and `portal/adjuster_view.py` holds what the scaffold wrote; the record has no create, comment or ready. This is the wrong load C5 accepts.
 
 When a pilot run shows the skill's wording does not hold, this step changes `plugins/asdlc/skills/building-a-task/SKILL.md` too.
 
@@ -381,7 +388,7 @@ When a pilot run shows the skill's wording does not hold, this step changes `plu
 - **R3.** `tests/test_task_start.py`: the stand-in's record holds `pr create --draft --base main` with the title and the description, and the remote has the branch at the start commit. Against GitHub: pull request #101, and the draft pull requests of the tasks for steps 6 and 7.
 - **R4.** `tests/test_task_start.py`: no remote, a failing `gh`, no checks on `main`, a changed file, an untracked file, a checkout on a claimed task's branch and a branch a second worktree holds, each with exit 1, no new branch and the checkout where it was.
 - **R5.** `tests/test_task_start.py`: each of the four states refused with its reason, the task that waits for its merge, exit 3, and both leftover branches. `tests/domain/test_build.py`: `refusal` and `leftover`.
-- **R6.** `tests/test_task_start.py`: the race staged through the second clone's `pre-push` hook, once answered `=` and once `!`. The second start exits 1 and leaves its checkout as it was, the remote's branch is the first's, and one pull request exists. `tests/domain/test_build.py`: `claimed` on `*`, `=` and `!`.
+- **R6.** `tests/test_task_start.py`: the race staged through a hook in the second clone, answered `=` from a `post-checkout` hook and `!` from a `pre-push` hook. The second start exits 1 and leaves its checkout as it was, the remote's branch is the first's, and one pull request exists. `tests/domain/test_build.py`: `claimed` on `*`, `=` and `!`.
 - **R7.** `tests/test_task_start.py`: the stand-in fails on `pr create`, and the remote has no branch, and the clone no local branch. A second test moves the remote's branch first and shows it is not deleted. A third makes the delete fail and reads the message.
 - **R8.** `tests/test_task_start.py`: the tests step 3 lists.
 - **R9.** `tests/test_cli.py`: a task on a checked-out, unmerged `tasks/<slug>` branch is not listed; a clone whose `main` is behind lists what the remote has; a repository with no remote reads the local `main`; a folder that is no repository reads its files; a `--root` below the top.
