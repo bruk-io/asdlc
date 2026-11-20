@@ -1,7 +1,10 @@
+import time
+
 import pytest
 
 from asdlc.domain.documents import Kind, parse
 from asdlc.io import files, git, github
+from tests.conftest import ACCEPTED, commit_files, second_clone
 from tests.conftest import git as run_git
 
 
@@ -148,3 +151,54 @@ def test_an_empty_commit_is_refused_when_git_cannot_tell_who_commits(
     run_git(repository, "config", "user.useConfigOnly", "true")
     assert git.commit_empty(repository, "Start intent new") is False
     assert git.ahead(repository, "main") == 0
+
+
+def test_a_repository_knows_whether_it_has_a_remote(repository, remote):
+    assert git.has_remote(repository) is False
+    assert git.has_remote(remote) is True
+
+
+def test_a_fetch_brings_in_what_another_clone_pushed_and_prunes_what_it_deleted(
+    remote,
+):
+    other = second_clone(remote)
+    run_git(other, "push", "-q", "origin", "main:task/claims/01-endpoint")
+    assert git.remote_branches(remote) == {"main"}
+
+    assert git.fetch(remote) is True
+    assert git.remote_branches(remote) == {"main", "task/claims/01-endpoint"}
+
+    run_git(other, "push", "-q", "origin", ":task/claims/01-endpoint")
+    assert git.fetch(remote) is True
+    assert git.remote_branches(remote) == {"main"}
+
+
+def test_a_fetch_that_cannot_reach_the_remote_says_so(remote):
+    run_git(remote, "remote", "set-url", "origin", str(remote.parent / "gone.git"))
+    assert git.fetch(remote) is False
+
+
+def test_a_fetch_gives_up_at_its_limit(remote, monkeypatch):
+    run_git(remote, "remote", "set-url", "origin", "ssh://nowhere.invalid/claims.git")
+    monkeypatch.setenv("GIT_SSH_COMMAND", "sh -c 'sleep 5'")
+    began = time.monotonic()
+    assert git.fetch(remote, limit=0.5) is False
+    assert time.monotonic() - began < 4
+
+
+def test_documents_are_read_at_a_ref_and_not_from_the_working_tree(remote):
+    (remote / "intent" / "claims" / "spec.md").write_text("changed, not committed\n")
+    read = git.document_texts_at(remote, "origin/main")
+    documents = sorted(path for path in ACCEPTED if path.endswith(".md"))
+    assert [path for path, _ in read] == documents
+    assert dict(read)["intent/claims/spec.md"] == ACCEPTED["intent/claims/spec.md"]
+
+
+def test_documents_below_a_prefix_come_with_paths_from_that_prefix(remote):
+    intent = "---\nkind: intent\nauthor: a\n---\n"
+    commit_files(remote, {"examples/demo/intent/x/intent.md": intent}, "an example")
+    assert git.document_texts_at(remote, "main", "examples/demo/") == (
+        ("intent/x/intent.md", intent),
+    )
+    assert git.document_texts_at(remote, "origin/main", "examples/demo/") == ()
+    assert git.document_texts_at(remote, "no-such-ref") == ()
