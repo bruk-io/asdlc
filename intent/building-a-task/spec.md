@@ -7,11 +7,11 @@ kind: spec
 
 R1 to R8 are about starting a task, R9 to R11 about how tasks and their states are read, R12 to R20 about stopping, R21 to R34 about the skill, R35 about the eval cases, and R36 about the link `task show` gives. This spec changes no hook.
 
-Four words are used throughout. The **builder** is Claude with the `building-a-task` skill loaded. A task is **started** when its branch is on the remote with a pull request. The **checks** are the command lines in `.asdlc/checks` on the remote's `main`, one to a line. A file with no command line in it counts as missing. A **branch of the loop** is one named `intent/<slug>`, `spec/<slug>`, `plan/<slug>`, `tasks/<slug>`, `task/<slug>/<task>` or `change/<slug>`.
+Five words are used throughout. The **builder** is Claude with the `building-a-task` skill loaded. The **checkout** is the working tree a command is run in: the main one or a linked worktree, whoever made it. A task is **started** when its branch is on the remote with a pull request. The **checks** are the command lines in `.asdlc/checks` on the remote's `main`, one to a line. A file with no command line in it counts as missing. A **branch of the loop** is one named `intent/<slug>`, `spec/<slug>`, `plan/<slug>`, `tasks/<slug>`, `task/<slug>/<task>` or `change/<slug>`.
 
-### R1: `asdlc task start <slug>/<task>` puts the branch `task/<slug>/<task>`, made from the remote's `main`, in a worktree of its own
+### R1: `asdlc task start <slug>/<task>` puts the checkout it is run in on the branch `task/<slug>/<task>`, made from the remote's `main`
 
-The worktree is always a new one, `.worktrees/<slug>/<task>` under the root of the main checkout. The checkout or worktree the command was run from is left as it was, on its branch. The branch is made with no upstream. The command prints one line: the worktree's path, the branch and the pull request's link.
+It makes no worktree. The checkout may be on any branch when the command is run, and that branch is left as it was. The task's branch is made with no upstream. The command prints one line: the branch and the pull request's link.
 
 ### R2: The branch's first commit is an empty one that records when the task was started
 
@@ -23,7 +23,7 @@ The push sets the branch's upstream to its own branch on the remote. The pull re
 
 ### R4: `task start` makes nothing when it can tell beforehand that it cannot finish
 
-Before it makes a branch it refuses, with exit 1 and the reason: a repository with no remote, a `gh` that cannot open a pull request in this repository, and a remote `main` with no checks.
+Before it makes a branch it refuses, with exit 1 and the reason: a repository with no remote, a `gh` that cannot open a pull request in this repository, a remote `main` with no checks, and a checkout with uncommitted changes. An untracked file counts as uncommitted unless git ignores it, here and in R14, and the reason names the files.
 
 ### R5: `task start` starts only a task that reads as `ready`, judged from the remote alone
 
@@ -31,18 +31,19 @@ It fetches first. It refuses, with exit 1 and the reason, a task that is `waitin
 
 ### R6: When one task is started from two clones, at most one start succeeds, and the other changes nothing on the remote
 
-The push is the claim, and it counts only when it made the branch on the remote. A push the remote rejects, or answers as already up to date, lost. The start that lost removes the worktree and the local branch it made, and nothing else, and names the pull request of the one that won when there is one.
+The push is the claim, and it counts only when it made the branch on the remote. A push the remote rejects, or answers as already up to date, lost. The start that lost puts the checkout back where it was and deletes the local branch it made, and nothing else, and names the pull request of the one that won when there is one.
 
 ### R7: When the pull request cannot be opened after the push, `task start` undoes the start
 
-It deletes the branch from the remote only while the remote still holds this start's own commit, removes the worktree and the local branch it made, says why on stderr and exits 1. When the undoing fails too, it says what is left and that `task start --resume` finishes the start.
+It deletes the branch from the remote only while the remote still holds this start's own commit, puts the checkout back where it was and deletes the local branch it made, says why on stderr and exits 1. When the undoing fails too, it says what is left and that `task start --resume` finishes the start.
 
-### R8: `task start --resume` gives a worktree on a task that is already started
+### R8: `task start --resume` puts the checkout on the branch of a task that is already started
 
+- It refuses a checkout with uncommitted changes, as R4 does, a task whose branch is not on the remote, and a task that is `done`. It refuses a branch that another worktree of the clone has checked out, and names that worktree.
+- When the clone has no local branch for the task, it makes one from the remote's branch, with that as its upstream.
 - It opens the draft pull request when the branch has none.
 - It makes a pull request that was ready a draft again.
-- When the task's worktree is already there and clean, it brings it up to the remote's branch. When it cannot, it says why and changes nothing.
-- It refuses a task whose branch is not on the remote, and a task that is `done`.
+- When the remote's branch has a commit the local one lacks, it merges the remote's branch into the local one. When that merge conflicts it leaves it as git left it, prints the files in conflict and exits 1, as R15 does.
 
 ### R9: `asdlc task list`, `task show` and `task start` read which tasks exist from the `task.md` files on the remote's `main`
 
@@ -56,17 +57,17 @@ So a task started from another clone shows as `claimed` without anyone running `
 
 This holds wherever a task's state is shown: `task list`, `task show`, `intent list` and `intent show`.
 
-### R12: `asdlc task stop <slug>/<task>` runs the checks in the task's worktree
+### R12: `asdlc task stop <slug>/<task>` runs the checks in the checkout it is run in
 
 It reads `.asdlc/checks` from the remote's `main`, not from the branch. It takes no command line from whoever runs it. Each line is run through `sh -c`, in order, and all of them are run. When `main` has no checks, the command exits 1 and says so, and runs, pushes and posts nothing.
 
 ### R13: `task stop` adds one comment to the pull request, holding what each check printed
 
-For each check the comment holds the command line, the exit status and what it printed. The output is as printed, except that the worktree's path, the main checkout's path and the home folder are each replaced by a short stand-in. Output longer than the comment can hold is cut from the top, and the comment says how many lines were cut. The comment also holds the commit the checks ran on, each file the guard marked with the message of the commit that changed it, and the text of `--message` when one is given.
+For each check the comment holds the command line, the exit status and what it printed. The output is as printed, except that the checkout's path, the main checkout's path when the checkout is a linked worktree, and the home folder are each replaced by a short stand-in. Output longer than the comment can hold is cut from the top, and the comment says how many lines were cut. The comment also holds the commit the checks ran on, each file the guard marked with the message of the commit that changed it, and the text of `--message` when one is given.
 
-### R14: `task stop` refuses a worktree with uncommitted changes, and a branch that changes no file
+### R14: `task stop` refuses a checkout that is not on the task's branch or has uncommitted changes, and a branch that changes no file
 
-Untracked files count as uncommitted. Exit 1, and nothing is run, pushed or posted.
+Untracked files count as uncommitted, as R4 says. Exit 1, and nothing is run, pushed or posted. For a checkout on another branch the reason names that branch.
 
 ### R15: `task stop` merges the remote's `main` into the branch before it runs the checks
 
@@ -74,7 +75,7 @@ When `main` has nothing new it does nothing. When the merge is clean it commits 
 
 ### R16: `task stop` pushes the branch, unless the guard denies a file the branch changed
 
-On a denial it prints the guard's lines, exits 1, and pushes and posts nothing. Otherwise it pushes whether or not the checks passed, so the pull request shows the commit the comment is about. When the remote refuses the push because its branch has a commit the worktree lacks, the command exits 1, posts nothing, and says that `task start --resume` brings the worktree up.
+On a denial it prints the guard's lines, exits 1, and pushes and posts nothing. Otherwise it pushes whether or not the checks passed, so the pull request shows the commit the comment is about. When the remote refuses the push because its branch has a commit the checkout lacks, the command exits 1, posts nothing, and says that `task start --resume` merges that commit in.
 
 ### R17: `task stop` marks the pull request ready for review only when every check passed, and makes it a draft when one failed
 
@@ -106,7 +107,9 @@ It passes `--resume` only when the person asked for a started task to be picked 
 
 With no task named it gives the tasks that read as `ready` and starts none. With a refusal it repeats the reason.
 
-### R24: The builder changes into the task's worktree once, and changes files only there
+### R24: The builder works in the checkout the session is in, and changes files only there
+
+It runs `task start` and `task stop` in that checkout and makes no worktree. A person who wants a task built apart from their own checkout starts the session in a worktree of Claude Code's, with `claude --worktree`.
 
 ### R25: The builder builds what the task's "What to build" says, and reports anything else it found instead of doing it
 
@@ -120,7 +123,7 @@ It starts the plan with `asdlc plan new <slug>/<task>`. The plan talks through t
 
 The task's own `plan.md` and the intent's `plan.md` are the only files under `intent/` it writes. It does not edit the task's `task.md`, and it cuts no task.
 
-### R29: When `task stop` names files in conflict, the builder resolves them on the branch and commits the merge
+### R29: When `task stop` or `task start --resume` names files in conflict, the builder resolves them on the branch and commits the merge
 
 ### R30: The builder ends with `asdlc task stop`
 
@@ -156,11 +159,29 @@ Skills applied: `authoring-kit:choosing-extension-types`, `authoring-kit:authori
 
 `choosing-extension-types` asks first whether the model should do a thing at all, and has the earliest answer win.
 
-- Making the branch and the worktree, recording the start, pushing, opening the pull request, merging `main` when it merges cleanly, running the checks and posting their output are each "given X, produce Y". They are the `asdlc` command (R1 to R20). The model picks the moment and does none of it by hand (R22, R30).
+- Making the branch, recording the start, pushing, opening the pull request, merging `main` when it merges cleanly, running the checks and posting their output are each "given X, produce Y". They are the `asdlc` command (R1 to R20). The model picks the moment and does none of it by hand (R22, R30).
 - What is left needs judgment: reading the task, writing the code, deciding whether a failure can be fixed, resolving a conflict, proposing a split. That is a procedure, so it is a skill (R21 to R34).
 - "Never merges" is enforcement, so by the same skill it is a hook. The requester moved the hooks to an intent of their own. Here it is the skill's wording (R31, C2).
 
 The same skill's litmus, "if you could write an assertion for it, write code", is why R14 to R20 are in the command. Each is decided from git alone.
+
+### Where a task is built
+
+On the checkout `task start` is run in. asdlc makes no worktree, by the owner's decision of 2026-11-19 (C9).
+
+The first version of this spec had `task start` make a worktree for each task, under `.worktrees/`. Three findings ended that:
+
+- An audit found that it closed off Claude Code's own worktrees.
+- A review reproduced its clean-up removing a worktree it had not made.
+- A pilot found that `git worktree add` is refused inside an eval run, so the skill's acting cases could not have been built.
+
+Claude Code makes worktrees itself. Its documentation, read on 2026-11-19, says:
+
+- `claude --worktree <name>` starts a session in `.claude/worktrees/<name>/`, on a new branch `worktree-<name>` made from the default branch on the remote.
+- A subagent with `isolation: worktree` gets a worktree of its own.
+- When such a session ends with the worktree on a branch other than the one Claude Code made for it, and that branch has commits of its own, the person is asked whether to keep or remove the worktree, and either answer keeps that branch and its commits.
+
+`task start` does the same thing in such a worktree as in the main checkout: it needs a checkout with nothing uncommitted, and it moves that checkout to the task's branch. So one checkout holds one task at a time, and several tasks at once are several sessions, each started in a worktree (C9).
 
 ### The command
 
@@ -168,20 +189,29 @@ Two verbs from the closed set, on the noun that exists: `task start` and `task s
 
 `task start <slug>/<task>` does these in order:
 
-1. Fetch. Refuse a repository with no remote, a `gh` that cannot open a pull request here, and a `main` with no checks (R4). Work out the task's state from the remote's `main`, the remote's branches and the pull requests, and refuse unless it is `ready` (R5).
-2. Make `task/<slug>/<task>` at the remote's `main` with `--no-track`, in a new worktree, `.worktrees/<slug>/<task>` (R1). That folder is added to `.git/info/exclude`, which worktrees share, so no tracked file changes.
+1. Fetch. Refuse a repository with no remote, a `gh` that cannot open a pull request here, a `main` with no checks, and a checkout with uncommitted changes (R4). Work out the task's state from the remote's `main`, the remote's branches and the pull requests, and refuse unless it is `ready` (R5).
+2. Switch the checkout to a new branch, `task/<slug>/<task>`, made at the remote's `main` with `--no-track` (R1). Git carries an uncommitted change along on a switch when nothing clashes, which is why step 1 refuses one.
 3. Make the empty start commit (R2), with `commit_empty` in `src/asdlc/io/git.py`.
 4. Push with `git push --porcelain -u --force-with-lease=task/<slug>/<task>: origin task/<slug>/<task>`. An empty lease means "only if the remote has no such branch". The start won only when the line for the branch begins with `*`, which is a branch the push made. `=` is "up to date" and lost (R6).
-5. Open the draft pull request (R3). When that fails, delete the remote's branch with a lease on this start's own commit, and remove what was made here (R7).
+5. Open the draft pull request (R3). When that fails, delete the remote's branch with a lease on this start's own commit, switch the checkout back and delete the local branch (R7).
 
 Tried in a throwaway repository while this was revised: a branch made from `origin/main` without `--no-track` takes `origin/main` as its upstream, and a bare `git push` then fails and suggests `git push origin HEAD:main`; with `--no-track` and `-u` the upstream is the branch's own; a second push of the same commit prints `=`; the leased delete removes the branch.
 
-`task stop <slug>/<task> --message <text>` finds the task's worktree and does these in order:
+Tried again on 2026-11-19 with `git switch -c` in place of a worktree. The upstream and the claiming push behave the same. A switch carries along a tracked change and an untracked file. Switching back and deleting the branch leaves the checkout as it was, from a branch and from a detached commit. A branch that another worktree has checked out is refused, with that worktree's path. When the local and the remote branch each have a commit the other lacks, the push is rejected, and after a merge of the remote's branch it is taken.
 
-1. Refuse uncommitted changes (R14). Fetch, and merge the remote's `main` (R15).
+`task start --resume <slug>/<task>` does these in order:
+
+1. Fetch, and refuse as R8 says.
+2. Switch the checkout to the task's branch, making it from the remote's when the clone has none.
+3. Open the draft pull request, or make a ready one a draft.
+4. Merge the remote's branch in. This is last, so that a merge left in conflict still leaves the task reading `claimed`.
+
+`task stop <slug>/<task> --message <text>` is run in the checkout that is on the task's branch, and does these in order:
+
+1. Refuse a checkout on another branch, and uncommitted changes (R14). Fetch, and merge the remote's `main` (R15).
 2. For a size 8 with only its plan: push, comment, print `plan` and stop (R20).
 3. Ask the guard about the branch, and refuse on a denial (R16). Work out R18 and R19 from the branch's commits and the files each changed, and refuse when the commit at fault is not on the remote yet.
-4. Read `.asdlc/checks` from the remote's `main`, run each line in the worktree, and keep its output and exit status (R12).
+4. Read `.asdlc/checks` from the remote's `main`, run each line in the checkout, and keep its output and exit status (R12).
 5. Push (R16), add the comment (R13), and mark the pull request ready or a draft (R17).
 
 The comment is added and never edited, so a failed run stays on the pull request after a later one passes.
@@ -193,7 +223,7 @@ The comment is added and never edited, so a failed run stays on the pull request
 By layer:
 
 - `src/asdlc/domain/build.py` (new) decides: whether a task can be started and the reason when it cannot, whether a push claimed the branch, R18 to R20 from a list of commits and their files, which paths to replace in an output and where to cut it, and `ready`, `draft` or `plan`. It takes data and returns data.
-- `src/asdlc/io/git.py` gains the fetch with its limit, the worktree, the push, the leased delete, the merge, reading a file at a ref, the commits of a branch with the files each changed, and whether a worktree is clean.
+- `src/asdlc/io/git.py` gains the fetch with its limit, switching the checkout to a branch and back, the push, the leased delete, the merge, reading a file at a ref, the commits of a branch with the files each changed, and whether a checkout is clean.
 - `src/asdlc/io/github.py` gains the pull request of a branch (number, link, draft or not), opening a draft, adding a comment, and marking ready or draft. `open_pull_branches` there gives branch names only today.
 - `src/asdlc/io/checks.py` (new) runs one command line in a folder and gives back what it printed and its exit status.
 - `src/asdlc/presentation/pull.py` (new) words the pull request's description and the comment. `src/asdlc/presentation/text.py` and `src/asdlc/presentation/data.py` gain the pull request on a task (R36).
@@ -216,37 +246,36 @@ For the four `task` commands only:
 
 `plugins/asdlc/skills/building-a-task/SKILL.md` (new) (R21). Its frontmatter, by `authoring-skills`, where every field is a deviation to justify:
 
-- `description`: what it does first, then when to load it, then what Claude gets wrong without it. It names the activity (building a task, starting work on one, picking up a task's pull request) and no file. The traps it names: making the branch by hand, building in the main checkout, saying the checks pass without showing their output, editing a failing test, marking the pull request ready by hand, and merging.
+- `description`: what it does first, then when to load it, then what Claude gets wrong without it. It names the activity (building a task, starting work on one, picking up a task's pull request) and no file. The traps it names: making the branch or a worktree by hand, saying the checks pass without showing their output, editing a failing test, marking the pull request ready by hand, and merging.
 - `context`: not set. The skill runs inline, by the requester's decision after a pilot of a fork (C1).
 - `argument-hint: <slug>/<task>`.
-- `allowed-tools`: `asdlc task show`, `asdlc task list`, `asdlc plan new` and `asdlc task stop`. Not `asdlc task start`: it pushes, claims the task and opens a pull request, and the skill loads on Claude's judgment, so the person is asked (C5). `task stop` is pre-approved because it runs only the command lines a person merged to `main`, and pushes only to the branch of a task the person already let start.
+- `allowed-tools`: `asdlc task show`, `asdlc task list`, `asdlc plan new` and `asdlc task stop`. Not `asdlc task start`: it moves the checkout to another branch, pushes, claims the task and opens a pull request, and the skill loads on Claude's judgment, so the person is asked (C5). `task stop` is pre-approved because it runs only the command lines a person merged to `main`, and pushes only to the branch of a task the person already let start.
 - `disable-model-invocation`: not set (C5). `hooks`: not set.
 
 With the skill loaded the builder works in this order:
 
-1. Run `asdlc task start <slug>/<task>`, with `--resume` when the person asked for a started task to be picked up (R22). On a refusal, or with no id, say why and stop (R23).
-2. Change into the worktree the command printed, once (R24). Every later command and edit is there, so `asdlc`, git and a search all default to the worktree. A session that was started in a worktree of the product's own, such as one from `claude --worktree`, gets this second one and works in it (C9).
-3. Read the task's `task.md`, the intent's `plan.md` and `spec.md`, and the files the task names.
-4. For a size 8 with no plan yet: run `asdlc plan new <slug>/<task>`, write the plan, commit it alone, run `asdlc task stop` and stop (R26).
-5. Build what "What to build" says (R25). When the work departs from the intent's plan, change `plan.md` in that commit and say why in its message (R27, R28).
-6. Run the repository's checks while working, and fix the code when one fails (R32).
-7. Commit, and run `asdlc task stop <slug>/<task>` (R30). When it names files in conflict, resolve them, commit the merge and run it again (R29). When it refuses a commit under R18 or R19, make the commit again and run it again. When it prints `draft` and the failure can be fixed, fix it and run it again. When it cannot, run it once more with `--message` and stop (R33).
-8. Answer with the link and what the command printed (R34).
+1. Run `asdlc task start <slug>/<task>`, with `--resume` when the person asked for a started task to be picked up (R22). On a refusal, or with no id, say why and stop (R23). When `--resume` names files in conflict, resolve them and commit the merge (R29).
+2. Read the task's `task.md`, the intent's `plan.md` and `spec.md`, and the files the task names.
+3. For a size 8 with no plan yet: run `asdlc plan new <slug>/<task>`, write the plan, commit it alone, run `asdlc task stop` and stop (R26).
+4. Build what "What to build" says (R25). When the work departs from the intent's plan, change `plan.md` in that commit and say why in its message (R27, R28).
+5. Run the repository's checks while working, and fix the code when one fails (R32).
+6. Commit, and run `asdlc task stop <slug>/<task>` (R30). When it names files in conflict, resolve them, commit the merge and run it again (R29). When it refuses a commit under R18 or R19, make the commit again and run it again. When it prints `draft` and the failure can be fixed, fix it and run it again. When it cannot, run it once more with `--message` and stop (R33).
+7. Answer with the link and what the command printed (R34).
 
-The body says never to merge and never to run `gh pr ready` (R31).
+`task start` leaves the session's checkout on the task's branch, so the builder changes folder nowhere: every command and edit after step 1 is already in the right place (R24). The body says to make no worktree, never to merge and never to run `gh pr ready` (R22, R31).
 
 ### The eval cases
 
 Four cases under `plugins/asdlc/evals/` (each a new `case.yaml` and `scaffold.sh`), in the format the cases there use. `tests/test_evals.py` finds them and lints what each scaffold builds.
 
-Each scaffold makes a bare repository under `.git/` and names it `origin`, so a fetch and a push need no network. It writes a stand-in for `gh` under `.git/`, sets `asdlc.gh` to it, and puts `.asdlc/checks` on `main`. Both paths are absolute: a relative one fails from inside a worktree. The stand-in appends each call to a file at a fixed path, so "opened a draft", "marked ready", "the comment holds the output" and "nothing merged" are patterns on that file. The commands read through `gh` before they refuse, so a case that stays out checks for no call that changes anything: no create, comment, ready or merge. The check is a shell script, because `plugins/asdlc/scripts/install` says an eval run cannot start the machine's Python. The requester's pilot showed that graders see tool calls.
+Each scaffold makes a bare repository under `.git/` and names it `origin`, so a fetch and a push need no network. It writes a stand-in for `gh` under `.git/`, sets `asdlc.gh` to it, and puts `.asdlc/checks` on `main`. Both paths are absolute. The stand-in appends each call to a file at a fixed path, so "opened a draft", "marked ready", "the comment holds the output" and "nothing merged" are patterns on that file. The commands read through `gh` before they refuse, so a case that stays out checks for no call that changes anything: no create, comment, ready or merge. The check is a shell script, because `plugins/asdlc/scripts/install` says an eval run cannot start the machine's Python. The requester's pilot showed that graders see tool calls. A second pilot, on 2026-11-18, showed each part of this working inside an eval run (C8).
 
-- `build-a-ready-task` acts. `main` holds an intent, its spec, its plan and one task of size 1 that changes one line of one file. Patterns check that the file under `.worktrees/` holds the new line and the main checkout's copy does not (R24), that no branch or worktree was made by hand (R22), and that the stand-in's record has a draft opened, a comment, a `ready` and no merge (R30, R31).
-- `build-with-a-check-that-fails` acts. The task cannot pass the check without changing a file the task says to leave alone. Patterns check that the file is unchanged in the worktree (R32), and that the record has a comment, no `pr ready` other than `pr ready --undo`, and no merge (R31, R33).
-- `build-waits-for-the-merge` stays out. The task is on `tasks/<slug>` and not on `main`. Patterns check that there is no `.worktrees/` folder, that no `task/` branch exists, that the record has no call that changes anything, and that the answer says the task waits for a merge, which is the reason R5 gives (R23).
-- `a-question-about-a-ready-task` stays out. A task is ready, and the prompt asks what it would involve. Patterns check that there is no `.worktrees/` folder, that no `task/` branch exists and that the record has no call that changes anything. This is the wrong load C5 accepts.
+- `build-a-ready-task` acts. `main` holds an intent, its spec, its plan and one task of size 1 that changes one line of one file. Patterns check that the file holds the new line and that the checkout is on the task's branch (R1, R24), that no branch or worktree was made by hand (R22), and that the stand-in's record has a draft opened, a comment, a `ready` and no merge (R30, R31).
+- `build-with-a-check-that-fails` acts. The task cannot pass the check without changing a file the task says to leave alone. Patterns check that the file is unchanged (R32), and that the record has a comment, no `pr ready` other than `pr ready --undo`, and no merge (R31, R33).
+- `build-waits-for-the-merge` stays out. The task is on `tasks/<slug>` and not on `main`. Patterns check that the checkout is on the branch it started on, that no `task/` branch exists, that the record has no call that changes anything, and that the answer says the task waits for a merge, which is the reason R5 gives (R23).
+- `a-question-about-a-ready-task` stays out. A task is ready, and the prompt asks what it would involve. Patterns check that the checkout is on the branch it started on, that no `task/` branch exists and that the record has no call that changes anything. This is the wrong load C5 accepts.
 
-Besides those: `README.md` gains the two commands, the skill and `.asdlc/checks`.
+Besides those: `README.md` gains the two commands, the skill and `.asdlc/checks`. `.gitignore` gains `.claude/worktrees/`, where Claude Code puts its worktrees, and `.DS_Store`. Without the first, a main checkout with such a worktree under it never reads as clean to R4 and R14. Without the second, neither does a checkout on a Mac that has been opened in Finder.
 
 ## How each constraint in the intent is met
 
@@ -258,7 +287,7 @@ Besides those: `README.md` gains the two commands, the skill and `.asdlc/checks`
 | The tasks already on `main` do not break. | The task format and lint are not changed. The ten tasks on `main` are merged and read `done` from the merge commits, as today. R19 applies only when `task stop` is run. |
 | Anything Claude loads lands with an eval case where it acts and one where it stays out. | R35. |
 | It stays as close as it can to Anthropic's AI-native SDLC course. | The rows below. C1, C2 and C4 say where it falls short. |
-| The course's lesson on parallel sessions says "Each parallel task gets its own worktree" and "Each independent session knows nothing about the others, and the engineer steering them is the only thing they share." | R1 for the worktree. R21: the skill runs inline, one session for each task, and the person steers it. A session knows nothing of another's, and the remote is where one sees that a task is taken (R5). |
+| The course's lesson on parallel sessions says "Each parallel task gets its own worktree" and "Each independent session knows nothing about the others, and the engineer steering them is the only thing they share." | Met in part. asdlc makes no worktree (R1, C9). A person who builds tasks side by side starts each session with `claude --worktree`, and `task start` does there what it does in the main checkout. R21: the skill runs inline, one session for each task, and the person steers it. A session knows nothing of another's, and the remote is where one sees that a task is taken (R5). |
 | The same lesson says "A subagent runs inside a single session as a scoped helper with its own context window and tool limits and suits jobs that recur in multiple tasks, such as verifying the app runs as expected." | R21. The builder is the session, and no subagent builds. |
 | The course's lesson on the feedback loop says "Run the tests before reporting a task complete, and show the output.", "If a test fails, fix the code, not the test." and "An agent fixing code must not be able to weaken the check on that code." | R12, R13 and R17 for the first: the command runs the checks and posts what they printed, and it marks the pull request ready only when they passed. R32 for the second. Met in part for the third: R12 takes the command lines from `main`, so the builder cannot choose a weaker one, and it can still change what those lines run (C4). |
 | The course's lesson on plan mode says "When implementation departs from the plan, update `plan.md` in the same commit." | R27, and R18 holds the pull request as a draft when the plan changed in a commit with no code. |
@@ -309,7 +338,7 @@ Decided by the owner, Bruk Habtu, on 2026-11-18, after a pilot. What follows say
 
 The outcome says the work is done by something that was given the task and nothing else. `choosing-extension-types` offers `context: fork` for work that need not see the conversation, and a fork is the only thing that gives "nothing else" in a session that has talked about other things. The pilot showed what a fork costs here: it starts in the session's own folder, its `cd` does not carry to the next call, and the person reads the main session's rewrite of its result.
 
-Decided, and what R21 requires: inline, one session for each task. The builder changes into the worktree once (R24), and the person can steer it. The cost is that the outcome rests on the person: a session that has already talked about other work builds with all of that in view. A fresh context for each task comes with the later worker agent. `authoring-skills` notes that a preloaded skill's `allowed-tools` does not carry into an agent, so that agent states its own.
+Decided, and what R21 requires: inline, one session for each task. The builder works in the session's checkout (R24), and the person can steer it. Since C9's decision the builder changes folder nowhere, so the first two of a fork's costs no longer apply. The third stands, and the decision is not reopened here. The cost is that the outcome rests on the person: a session that has already talked about other work builds with all of that in view. A fresh context for each task comes with the later worker agent. `authoring-skills` notes that a preloaded skill's `allowed-tools` does not carry into an agent, so that agent states its own.
 
 ### C2: Nothing stops the builder merging, or marking its own pull request ready by hand
 - owner: Bruk Habtu
@@ -351,7 +380,7 @@ A task whose job is to change the checks cannot pass `main`'s old lines once the
 
 Skill: `authoring-kit:authoring-skills`.
 
-`authoring-skills` says to set `disable-model-invocation` on anything that must never fire on Claude's judgment. `task start` pushes a branch, claims the task and opens a pull request. The intent has the skill load when a person asks, and needs a case where it stays out. The later agent is to preload it, and a skill with that field set cannot be preloaded.
+`authoring-skills` says to set `disable-model-invocation` on anything that must never fire on Claude's judgment. `task start` moves the checkout to another branch, pushes that branch, claims the task and opens a pull request. The intent has the skill load when a person asks, and needs a case where it stays out. The later agent is to preload it, and a skill with that field set cannot be preloaded.
 
 Proposed, and what the design does: the field is not set, and `task start` is not pre-approved, so a wrong load meets a permission prompt before anything is published. `a-question-about-a-ready-task` measures the wrong load. The cost is one prompt for each start, in a session that has not allowed it.
 
@@ -367,18 +396,28 @@ Today `gh` is optional: without it no task reads `in review` and everything else
 
 Decided by the owner, Bruk Habtu, on 2026-11-18: R13 takes the checkout's path out of the output and posts the rest as printed. Replacing the home folder as well is this spec's addition. Anything else a check prints is posted: a user name in another path, a host name, a value from the environment. A repository whose checks print such things has to quieten them itself.
 
-### C8: Some requirements have no eval case, and one thing about running the cases is not known
+### C8: Some requirements have no eval case, and the commands have not been run inside an eval
 - owner: Bruk Habtu
 
-Not known: whether a scaffold's remote under `.git/`, and its stand-in set through `asdlc.gh`, work inside an eval run's sandbox. The plan pilots `build-a-ready-task` with one run before any other grader is written.
+The two things the first version of this spec did not know were tried on 2026-11-18.
 
-Not checked by anyone: that GitHub opens a draft pull request on a branch whose only commit is empty, which R2 and R3 rest on. The plan tries it first.
+- A pilot inside an eval run, with a throwaway plugin. A scaffold's remote under `.git/` takes a fetch and a push, a stand-in set through git config is run, and graders read the stand-in's record there. `git worktree add` is refused, which is one of the reasons for C9.
+- A trial against GitHub, pull request #101, now closed. GitHub opens a draft pull request on a branch whose only commit is empty, which R2 and R3 rest on. The claiming push printed `*` and then `=`, and the leased delete removed the branch.
+
+Not tried: `asdlc task start` and `task stop` themselves inside an eval run, since they are not built. One thing could stop them there: R4 refuses a checkout with an untracked file, and nobody has looked at whether an eval run's folder holds one that the scaffold did not make. The plan pilots `build-a-ready-task` with one run before any other grader is written.
 
 No case checks R25, R26, R27, R28, R29, the `--resume` half of R22, or the split R33 proposes. R1 to R20 are code, and are checked by tests under `tests/` with a bare repository on disk and a stand-in for `gh`.
 
-### C9: Nothing removes a task's worktree
+### C9: asdlc makes no worktree, so a task is built on the checkout the session is in
 - owner: Bruk Habtu
 
-Each started task leaves its worktree and a local branch behind after its pull request is merged or closed. The intent does not ask for a cleanup and this spec adds none. A person removes one with `git worktree remove`, which needs `--force` once the worktree holds an untracked file.
+Decided by the owner, Bruk Habtu, on 2026-11-19: `task start` makes the task's branch in the checkout it is run in, and worktrees are left to Claude Code. "Where a task is built", in the Design, says what ended the first version, where `task start` made a worktree for each task.
 
-`task start` always makes its own worktree, so a session started in a worktree of the product's own ends up with two. Working with the product's worktrees is left for later, with the worker agent.
+The intent's outcome is "The work is done in a worktree of its own, so several tasks can be built at once." asdlc no longer brings that about. It holds when the person starts the session with `claude --worktree`, and nothing here checks that they did. What it costs:
+
+- A session in the main checkout moves that checkout to the task's branch and leaves it there when the task is stopped. The person switches back.
+- One checkout holds one task at a time. Two tasks at once need two sessions, each started in a worktree.
+- `task start` and `task stop` refuse a checkout with an untracked file that git does not ignore (R4, R14). A stray file stops a start until it is ignored or removed.
+- Nothing removes a task's local branch after its pull request is merged or closed. The intent does not ask for a cleanup and this spec adds none. A worktree that Claude Code made is Claude Code's to remove.
+
+Not tried: `task start` in a session started with `claude --worktree`, and what Claude Code asks when that session ends. The Design gives what its documentation says. Giving each task a worktree and a fresh context without the person arranging it is left for the later worker agent.
