@@ -11,7 +11,7 @@ Five words are used throughout. The **builder** is Claude with the `building-a-t
 
 ### R1: `asdlc task start <slug>/<task>` puts the checkout it is run in on the branch `task/<slug>/<task>`, made from the remote's `main`
 
-It makes no worktree. The checkout may be on any branch when the command is run, and that branch is left as it was. The task's branch is made with no upstream. The command prints one line: the branch and the pull request's link.
+It makes no worktree. The checkout may be on any branch that R4 does not refuse, and that branch is left as it was. The task's branch is made with no upstream. The command prints one line: the branch and the pull request's link.
 
 When the command fails after it has moved the checkout, whatever the cause, it puts the checkout back where it was and deletes the local branch it made. A merge that R8 leaves in conflict is the one exception.
 
@@ -74,17 +74,24 @@ It reads `.asdlc/checks` from the remote's `main`, not from the branch. It takes
 
 For each check the comment holds the command line, the exit status and what it printed. The output is as printed, except that the checkout's path, the main checkout's path when the checkout is a linked worktree, and the home folder are each replaced by a short stand-in. Output longer than the comment can hold is cut from the top, and the comment says how many lines were cut. The comment also holds the commit the checks ran on, each file the checks left changed or untracked, each file the guard marked with the message of the commit that changed it, and the text of `--message` when one is given.
 
-When the comment cannot be added, the command says so and exits 1, and does not change whether the pull request is a draft.
+When the comment cannot be added, the command says so and exits 1. It never marks the pull request ready without the comment, and it still makes it a draft when a check failed.
 
 ### R14: `task stop` refuses a task that is not started, a checkout that is not on the task's branch or has uncommitted changes, and a branch that changes no file
 
-Untracked files count as uncommitted, as R4 says. Exit 1, and nothing is run, pushed or posted. For a task that is not started the reason says so: a branch made some other way, such as with `asdlc plan new`, is not a start. For a checkout on another branch the reason names that branch.
+Untracked files count as uncommitted, as R4 says. Exit 1, and nothing is run, pushed or posted. For a checkout on another branch the reason names that branch.
+
+For a task that is not started the reason says which way it is not:
+
+- The task's branch is not on the remote. It was never started, and a branch made some other way, such as with `asdlc plan new`, is not a start.
+- The branch is on the remote with no open pull request. The reason is the one R5 gives: `task start --resume` opens one, or the task is `done`.
+
+A `gh` that fails is refused as R4 refuses it, and is not read as a task with no pull request.
 
 ### R15: `task stop` merges the remote's branch for the task, and then the remote's `main`, into the branch before it runs the checks
 
 When neither has anything new it does nothing. When a merge is clean it commits it. When one conflicts it leaves the merge as git left it, prints the files in conflict, exits 1, and runs, pushes and posts nothing.
 
-A merge that is already in progress when `task stop` or `task start --resume` is run gets the same answer, the files in conflict and exit 1, and is not refused as an uncommitted change.
+A merge that is already in progress when `task stop` or `task start --resume` is run is not refused as an uncommitted change. The command prints the files still in conflict, or, when none is left, says that the merge is to be committed, and exits 1.
 
 ### R16: `task stop` pushes the branch, unless the guard denies a file the branch changed
 
@@ -178,7 +185,7 @@ Skills applied: `authoring-kit:choosing-extension-types`, `authoring-kit:authori
 - What is left needs judgment: reading the task, writing the code, deciding whether a failure can be fixed, resolving a conflict, proposing a split. That is a procedure, so it is a skill (R21 to R34).
 - "Never merges" is enforcement, so by the same skill it is a hook. The requester moved the hooks to an intent of their own. Here it is the skill's wording (R31, C2).
 
-The same skill's litmus, "if you could write an assertion for it, write code", is why R14 to R20 are in the command. Each is decided from git alone.
+The same skill's litmus, "if you could write an assertion for it, write code", is why R14 to R20 are in the command. Each is decided from git and the pull requests alone.
 
 ### Where a task is built
 
@@ -227,8 +234,8 @@ Tried again on 2026-11-19 with `git switch -c` in place of a worktree. The upstr
 
 `task stop <slug>/<task> --message <text>` is run in the checkout that is on the task's branch, and does these in order:
 
-1. Refuse a task that is not started, a checkout on another branch, uncommitted changes, and a `main` with no checks (R12, R14). Fetch. A merge that is already in progress gets R15's answer.
-2. Merge the remote's branch for the task, when it has a commit the checkout lacks (R15). Refuse a branch that changes no file (R14).
+1. Fetch. Refuse a task that is not started, a checkout on another branch, uncommitted changes, and a `main` with no checks (R12, R14). A merge that is already in progress gets R15's answer.
+2. Merge the remote's branch for the task, when it has a commit the checkout lacks (R15). Refuse a branch that changes no file (R14). A merge made here can end up on top of a commit that step 3 sends back under R18 or R19. That takes an unpushed commit at fault and a new commit on the remote's branch at the same time, and it is left as it is.
 3. Ask the guard about the branch, and refuse on a denial (R16). Work out R18 and R19 from the branch's commits and the files each changed, and refuse when the commit at fault is not on the remote yet.
 4. Merge the remote's `main` (R15). This comes after step 3, so that a refusal there leaves no merge of `main` on top of the commit the builder has to make again. The guard's answer is the same before the merge and after it, because it reads from where the branch left `main`.
 5. For a size 8 with only its plan: push, comment, print `plan` and stop (R20).
@@ -275,7 +282,7 @@ For the four `task` commands only:
 
 With the skill loaded the builder works in this order:
 
-1. Run `asdlc task start <slug>/<task>`, with `--resume` when the person asked for a started task to be picked up (R22). On a refusal, or with no id, say why and stop (R23). When `--resume` names files in conflict, resolve them and commit the merge (R29).
+1. Run `asdlc task start <slug>/<task>`, with `--resume` when the person asked for a started task to be picked up (R22). On a refusal, or with no id, say why and stop (R23). When `--resume` names files in conflict, resolve them, commit the merge and run it again (R29).
 2. Read the task's `task.md`, the intent's `plan.md` and `spec.md`, and the files the task names.
 3. For a size 8 with no plan yet: run `asdlc plan new <slug>/<task>`, write the plan, commit it alone, run `asdlc task stop` and stop (R26).
 4. Build what "What to build" says (R25). When the work departs from the intent's plan, change `plan.md` in that commit and say why in its message (R27, R28).
