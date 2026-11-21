@@ -150,6 +150,11 @@ def user_name(root: Path) -> str:
     return (_git(root, "config", "user.name") or "").strip()
 
 
+def setting(root: Path, key: str) -> str:
+    """Give what git's configuration holds for a key; empty when it is not set."""
+    return (_git(root, "config", "--get", key) or "").strip()
+
+
 def has_branch(root: Path, branch: str) -> bool:
     return _git(root, "rev-parse", "--verify", "--quiet", branch) is not None
 

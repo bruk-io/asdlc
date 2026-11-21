@@ -86,6 +86,21 @@ def test_a_branch_claims_a_pull_request_reviews_a_merge_finishes():
     )
 
 
+def test_a_task_carries_the_link_of_its_pull_request_and_none_is_empty():
+    link = "https://example.invalid/pull/7"
+    links = {"task/claims/01-a": link, "spec/claims": "https://example.invalid/pull/2"}
+    first, second = tasks(documents(), links=links)
+    assert (first.pull_request, second.pull_request) == (link, "")
+    assert [task.pull_request for task in tasks(documents())] == ["", ""]
+
+
+def test_a_link_does_not_change_a_state():
+    branch = frozenset({"task/claims/01-a"})
+    links = {"task/claims/01-a": "https://example.invalid/pull/7"}
+    assert tasks(documents(), links=links)[0].state is State.READY
+    assert tasks(documents(), branches=branch, links=links)[0].state is State.CLAIMED
+
+
 def test_a_claimed_task_is_claimed_even_while_it_waits():
     assert states(branches=frozenset({"task/claims/02-b"}))["02-b"] is State.CLAIMED
 

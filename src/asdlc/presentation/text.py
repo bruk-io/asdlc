@@ -61,6 +61,7 @@ def task_record(task: Task) -> str:
         ("step", task.step),
         ("size", task.size),
         ("branch", task.branch),
+        ("pull-request", task.pull_request),
         ("own-plan", "yes" if task.has_plan else "no"),
         *(("delivers", ref) for ref in task.delivers),
         *(("depends", other) for other in task.depends),

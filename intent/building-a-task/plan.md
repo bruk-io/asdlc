@@ -86,7 +86,7 @@ Four things hold for every step:
 
 **`src/asdlc/cli.py`**:
 
-- `_tasks` calls `open_pulls`. It passes the branches whose pull request is not a draft as `open_pulls`, and every pull request's link as `links`. A draft's branch is in `branches` already, so `_state` gives `claimed` (R11). `_tasks` has four callers, `task list`, `task show`, `intent list` and `intent show`, so the four agree.
+- `_tasks` calls `open_pulls`. It passes the branches whose pull request is not a draft as `open_pulls`, and every pull request's link as `links`. It adds each draft's branch to `branches`, so `_state` gives `claimed` (R11). A clone that has fetched has that branch already, but `intent list` and `intent show` do not fetch, so the branch is named outright. `_tasks` has four callers, `task list`, `task show`, `intent list` and `intent show`, so the four agree.
 - A new `_fetched(options, must)` fetches when the repository has a remote. When the fetch fails it says so on stderr. With `must` it then exits 1, and without it the command carries on with what was last fetched (R10). A repository with no remote is not fetched, and that is not a failure.
 - A new `_remote_library(options)` gives the documents the `task` commands read. In a repository with a `main` it calls `document_texts_at` with the ref from `git.base`. Otherwise it calls `_library`, which reads the files, as today (R9).
 - `task list` and `task show` call `_fetched(options, must=False)` and then `_remote_library`. `intent list`, `intent show`, `requirement list` and `document check` keep `_library` and do not fetch.

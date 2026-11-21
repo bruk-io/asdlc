@@ -46,6 +46,7 @@ def task(found: Task) -> dict[str, object]:
         "step": found.step,
         "size": found.size,
         "branch": found.branch,
+        "pull_request": found.pull_request or None,
         "own_plan": found.has_plan,
         "delivers": list(found.delivers),
         "depends": list(found.depends),

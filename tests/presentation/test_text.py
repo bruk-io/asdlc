@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 from asdlc.domain.documents import Finding
 from asdlc.domain.guard import Ruling, Verdict
@@ -208,11 +209,22 @@ def test_a_task_in_full():
         "step\t2",
         "size\t5",
         "branch\ttask/claims/02-panel",
+        "pull-request\t",
         "own-plan\tyes",
         "delivers\tR1",
         "delivers\tR3",
         "depends\tclaims/01-endpoint",
     ]
+
+
+def test_a_task_gives_its_pull_request_and_is_empty_with_none():
+    link = "https://example.invalid/pull/7"
+    opened = replace(TASK, state=State.CLAIMED, pull_request=link)
+    assert f"pull-request\t{link}" in text.task_record(opened).split("\n")
+    assert data.task(opened)["pull_request"] == link
+    assert data.task(TASK)["pull_request"] is None
+    assert text.task_line(opened).split("\t")[:2] == ["claims/02-panel", "claimed"]
+    assert link not in text.task_line(opened)
 
 
 def test_an_intent_is_slug_stage_parent_title():

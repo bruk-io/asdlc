@@ -169,18 +169,30 @@ def _merged(options: Options) -> frozenset[str]:
 
 
 def _tasks(options: Options, documents: tuple[Document, ...]) -> tuple[Task, ...]:
-    """Every task with its state, from the branches, pull requests and merges."""
+    """Every task with its state, from the branches, pull requests and merges.
+
+    A draft's branch is handed over as a branch that exists and not as one with
+    an open pull request, so its task reads as claimed. It is named among the
+    branches outright, because a clone that has not fetched may not have it yet.
+    """
     found = _main(options)
     if found is None:
         return tasks(documents, merged=_merged(options))
-    pulls = github.open_pull_branches(found[0])
-    if pulls is None:
-        _note(options, "gh listed no pull requests, so no task reads as in review")
+    listed = github.open_pulls(found[0])
+    if listed is None:
+        program = github.program(found[0])
+        _note(
+            options,
+            f"{program} listed no pull requests, so no task reads as in review",
+        )
+    pulls = listed or ()
+    drafts = frozenset(pull.branch for pull in pulls if pull.draft)
     return tasks(
         documents,
-        branches=git.branches(found[0]),
-        open_pulls=pulls or frozenset(),
+        branches=git.branches(found[0]) | drafts,
+        open_pulls=frozenset(pull.branch for pull in pulls if not pull.draft),
         merged=_merged(options),
+        links={pull.branch: pull.link for pull in pulls},
     )
 
 

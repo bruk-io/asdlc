@@ -1,11 +1,12 @@
 """Tasks and intents as they stand now, worked out from documents and from git.
 
 Nothing here is stored. A task is claimed because its branch exists, in review
-because that branch has an open pull request, and done because it was merged.
+because that branch has an open pull request that is not a draft, and done
+because it was merged.
 """
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -43,6 +44,7 @@ class Task:
     branch: str
     has_plan: bool
     state: State
+    pull_request: str = ""  # the link of its open pull request; empty with none
 
 
 @dataclass(frozen=True)
@@ -97,12 +99,16 @@ def tasks(
     branches: frozenset[str] = frozenset(),
     open_pulls: frozenset[str] = frozenset(),
     merged: frozenset[str] = frozenset(),
+    links: Mapping[str, str] | None = None,
 ) -> tuple[Task, ...]:
-    """List every task with its state.
+    """List every task with its state and the link of its pull request.
 
     `branches` are the branches that exist, `open_pulls` those with an open pull
-    request, and `merged` those merged into main. The caller reads them from git.
+    request that is not a draft, and `merged` those merged into main. `links`
+    gives the link of each branch's open pull request, draft or not. The caller
+    reads all four from git and from GitHub.
     """
+    links = links or {}
     own_plans = {(d.slug, d.task) for d in of_kind(documents, Kind.PLAN, own_plan=True)}
     found = []
     for document in of_kind(documents, Kind.TASK):
@@ -126,6 +132,7 @@ def tasks(
                 branch=branch_of(id),
                 has_plan=(document.slug, document.task) in own_plans,
                 state=_state(branch_of(id), blocked, branches, open_pulls, merged),
+                pull_request=links.get(branch_of(id), ""),
             )
         )
     return tuple(found)

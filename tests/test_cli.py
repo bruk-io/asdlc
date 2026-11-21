@@ -9,7 +9,16 @@ import pytest
 from click.testing import CliRunner
 
 from asdlc.cli import cli
-from tests.conftest import ACCEPTED, commit_files, git, second_clone, task_text
+from tests.conftest import (
+    ACCEPTED,
+    calls,
+    commit_files,
+    git,
+    pull_row,
+    second_clone,
+    task_text,
+    write_pulls,
+)
 
 
 def run(*args: object, input: str | None = None):
@@ -448,3 +457,117 @@ def test_only_the_task_commands_fetch(remote, command):
     assert git(remote, "branch", "-r", "--list", "origin/task/*").strip() == ""
     run("task", "list", "--root", remote)
     assert git(remote, "branch", "-r", "--list", "origin/task/*").strip() != ""
+
+
+ENDPOINT = "task/claims/01-endpoint"
+LINK = "https://example.invalid/pull/7"
+
+
+def shown_json(root, *command: str):
+    done = run(*command, "--json", "--root", root)
+    assert done.exit_code == 0, done.output
+    return json.loads(done.stdout)
+
+
+def states_shown(root, id: str = "claims/01-endpoint") -> dict[str, str]:
+    """Give a task's state in each of the four places a state is shown."""
+    intent = run("intent", "show", "claims", "--root", root).stdout.splitlines()
+    row = f"task\t{id}\t"
+    return {
+        "intent show": next(
+            line.removeprefix(row) for line in intent if line.startswith(row)
+        ),
+        "intent list": next(
+            task["state"]
+            for task in shown_json(root, "intent", "list")[0]["tasks"]
+            if task["id"] == id
+        ),
+        "task list": next(
+            task["state"]
+            for task in shown_json(root, "task", "list")
+            if task["id"] == id
+        ),
+        "task show": shown_json(root, "task", "show", id)["state"],
+    }
+
+
+def everywhere(state: str) -> dict[str, str]:
+    return dict.fromkeys(
+        ("intent show", "intent list", "task list", "task show"), state
+    )
+
+
+def test_a_draft_reads_as_claimed_and_a_ready_pull_request_as_in_review(remote, gh):
+    git(remote, "push", "-q", "origin", f"main:{ENDPOINT}")
+    assert states_shown(remote) == everywhere("claimed")
+
+    write_pulls(gh, pull_row(ENDPOINT, 7, draft=True))
+    assert states_shown(remote) == everywhere("claimed")
+
+    write_pulls(gh, pull_row(ENDPOINT, 7))
+    assert states_shown(remote) == everywhere("in review")
+    assert states_shown(remote, "claims/02-panel") == everywhere("ready")
+
+    write_pulls(gh, pull_row(ENDPOINT, 7, draft=True))
+    assert states_shown(remote) == everywhere("claimed")
+
+
+def test_a_draft_reads_as_claimed_in_a_clone_that_has_not_fetched_its_branch(
+    remote, gh
+):
+    git(second_clone(remote), "push", "-q", "origin", f"main:{ENDPOINT}")
+    write_pulls(gh, pull_row(ENDPOINT, 7, draft=True))
+
+    shown = run("intent", "show", "claims", "--root", remote)
+    assert "task\tclaims/01-endpoint\tclaimed" in shown.stdout.splitlines()
+    listed = shown_json(remote, "intent", "list")
+    assert listed[0]["tasks"][0] == {"id": "claims/01-endpoint", "state": "claimed"}
+    assert git(remote, "branch", "--all", "--list", "*task/*").strip() == ""
+
+
+def test_task_show_gives_the_pull_request_and_is_empty_for_a_task_with_none(remote, gh):
+    write_pulls(gh, pull_row(ENDPOINT, 7, draft=True))
+
+    shown = run("task", "show", "claims/01-endpoint", "--root", remote)
+    assert f"pull-request\t{LINK}" in shown.stdout.splitlines()
+    assert shown_json(remote, "task", "show", "claims/01-endpoint")["pull_request"] == (
+        LINK
+    )
+
+    none = run("task", "show", "claims/02-panel", "--root", remote)
+    assert "pull-request\t" in none.stdout.splitlines()
+    assert shown_json(remote, "task", "show", "claims/02-panel")["pull_request"] is None
+    assert [row["pull_request"] for row in shown_json(remote, "task", "list")] == [
+        LINK,
+        None,
+    ]
+
+
+def test_the_program_the_key_names_is_what_the_commands_run(remote, gh):
+    assert task_ids(remote) == ["claims/01-endpoint", "claims/02-panel"]
+    asked = "pr list --state open --limit 500 --json headRefName,isDraft,number,url"
+    assert calls(gh) == [asked.split(" ")]
+    assert run("intent", "list", "--root", remote).exit_code == 0
+    assert calls(gh) == [asked.split(" ")] * 2
+
+
+def test_with_a_gh_that_fails_or_is_missing_the_tasks_are_listed_and_none_is_in_review(
+    remote, gh
+):
+    git(remote, "push", "-q", "origin", f"main:{ENDPOINT}")
+    write_pulls(gh, pull_row(ENDPOINT, 7))
+    assert states_shown(remote) == everywhere("in review")
+
+    gh.fail.write_text("list\n")
+    assert states_shown(remote) == everywhere("claimed")
+    listed = run("task", "list", "--root", remote, "-v")
+    assert (listed.exit_code, listed.stdout.count("\n")) == (0, 2)
+    assert "listed no pull requests, so no task reads as in review" in listed.stderr
+    assert shown_json(remote, "task", "show", "claims/01-endpoint")["pull_request"] is (
+        None
+    )
+
+    gh.fail.unlink()
+    git(remote, "config", "asdlc.gh", str(gh.program.parent / "no-such-program"))
+    assert states_shown(remote) == everywhere("claimed")
+    assert task_ids(remote) == ["claims/01-endpoint", "claims/02-panel"]
