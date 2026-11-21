@@ -103,12 +103,20 @@ def test_an_intent_goes_from_a_spec_to_built(repository, tmp_path_factory, monke
 
     with monkeypatch.context() as patched:
         folder = tmp_path_factory.mktemp("bin")
-        rows = '[{"headRefName": "task/claims/01-endpoint"}]'
-        files.write_program(folder / "gh", f"#!/bin/sh\necho '{rows}'\n")
         patched.setenv(
             "PATH", f"{folder}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
         )
-        assert task_states(repository)["claims/01-endpoint"] == "in review"
+        for draft, state in (("true", "claimed"), ("false", "in review")):
+            row = (
+                '{"headRefName": "task/claims/01-endpoint", '
+                f'"isDraft": {draft}, "number": 4, "url": "https://example.invalid/4"}}'
+            )
+            files.write_program(folder / "gh", f"#!/bin/sh\necho '[{row}]'\n")
+            assert task_states(repository)["claims/01-endpoint"] == state
+            shown = json.loads(
+                run(repository, "task", "show", "claims/01-endpoint", "--json")
+            )
+            assert shown["pull_request"] == "https://example.invalid/4"
 
     (repository / "endpoint.py").write_text("status = 'received'\n")
     accept(repository, "task/claims/01-endpoint", 4)

@@ -1,4 +1,7 @@
+import json
+import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -101,3 +104,181 @@ def remote(tmp_path_factory: pytest.TempPathFactory) -> Path:
     commit_files(seed, ACCEPTED, "claims, accepted")
     git(seed, "push", "-q", str(origin), "main")
     return clone_of(origin, base / "clone")
+
+
+# A stand-in for `gh`, as a shell script: it answers the `pr` calls asdlc makes
+# and no others. It is plain sh with sed, grep and sort, so that a copy can go
+# into an eval case's scaffold, where no Python can be started.
+GH_STAND_IN = r"""#!/bin/sh
+# A stand-in for gh. Its files are beside it:
+#   pulls.json  the open pull requests, as a JSON array with one row to a line
+#   calls       one line for each call: its arguments, tab-separated, and for a
+#               comment read from stdin, the comment as one more field
+#   fail        when it holds the name of a subcommand (list, create, comment
+#               or ready), that subcommand fails
+here=$(dirname "$0")
+pulls="$here/pulls.json"
+tab=$(printf '\t')
+
+flat() {
+    # Put any text on one line: a backslash, a tab and a newline each become
+    # two characters.
+    printf '%s\n' "$1" |
+        sed -e 's/\\/\\\\/g' -e "s/$tab/\\\\t/g" |
+        sed -e ':a' -e '$!N' -e '$!ba' -e 's/\n/\\n/g'
+}
+
+rows() {
+    [ -f "$pulls" ] || return 0
+    sed -n -e 's/,$//' -e '/^{/p' "$pulls"
+}
+
+save() {
+    {
+        printf '[\n'
+        sed -e '$!s/$/,/'
+        printf ']\n'
+    } >"$pulls.new" && mv "$pulls.new" "$pulls"
+}
+
+refuse() {
+    echo "gh stand-in: $1" >&2
+    exit 1
+}
+
+line=
+for argument in "$@"; do
+    line="${line:+$line$tab}$(flat "$argument")"
+done
+if [ "$1 $2" = "pr comment" ]; then
+    case " $* " in
+    *" --body-file - "*) line="$line$tab$(flat "$(cat)")" ;;
+    esac
+fi
+printf '%s\n' "$line" >>"$here/calls"
+
+if [ -f "$here/fail" ] && [ "$(cat "$here/fail")" = "$2" ]; then
+    refuse "told to fail on $2"
+fi
+[ "$1" = pr ] || refuse "no answer for: $*"
+
+case "$2" in
+list)
+    cat "$pulls"
+    ;;
+create)
+    shift 2
+    draft=false
+    head=
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --draft) draft=true ;;
+        --head)
+            head=$2
+            shift
+            ;;
+        --base | --title | --body) shift ;;
+        esac
+        shift
+    done
+    [ -n "$head" ] || refuse "pr create needs --head"
+    if rows | grep -F -q "\"headRefName\": \"$head\""; then
+        refuse "a pull request for $head is already open"
+    fi
+    last=$(rows | sed -n 's/.*"number": \([0-9][0-9]*\).*/\1/p' | sort -n | tail -1)
+    number=$((${last:-0} + 1))
+    link="https://example.invalid/pull/$number"
+    {
+        rows
+        printf '{"headRefName": "%s", "isDraft": %s, "number": %s, "url": "%s"}\n' \
+            "$head" "$draft" "$number" "$link"
+    } | save
+    printf '%s\n' "$link"
+    ;;
+comment | ready)
+    number=$3
+    mine="\"number\": ${number}[,}]"
+    rows | grep -q "$mine" || refuse "no open pull request $number"
+    if [ "$2" = ready ]; then
+        draft=false
+        case " $* " in
+        *" --undo "*) draft=true ;;
+        esac
+        rows | sed -e "/$mine/s/\"isDraft\": [a-z]*/\"isDraft\": $draft/" | save
+    fi
+    ;;
+*)
+    refuse "no answer for: $*"
+    ;;
+esac
+"""
+
+
+@dataclass(frozen=True)
+class Gh:
+    """Where the stand-in for `gh` keeps its files: all beside the clone."""
+
+    program: Path
+    pulls: Path  # the open pull requests, as JSON
+    calls: Path  # one line for each call it took
+    fail: Path  # names the subcommand that is to fail, when there is one
+
+
+def pull_row(branch: str, number: int, draft: bool = False) -> dict[str, object]:
+    """Give an open pull request as `gh pr list --json` gives one."""
+    link = f"https://example.invalid/pull/{number}"
+    return {"headRefName": branch, "isDraft": draft, "number": number, "url": link}
+
+
+def write_pulls(gh: Gh, *rows: dict[str, object]) -> None:
+    """Set the open pull requests the stand-in holds, one row to a line."""
+    lines = ",\n".join(json.dumps(row) for row in rows)
+    gh.pulls.write_text(f"[\n{lines}\n]\n" if rows else "[\n]\n")
+
+
+def held_pulls(gh: Gh) -> list[dict[str, object]]:
+    """Read the open pull requests the stand-in holds."""
+    return json.loads(gh.pulls.read_text())
+
+
+_PLAIN = {"\\\\": "\\", "\\t": "\t", "\\n": "\n"}
+
+
+def calls(gh: Gh) -> list[list[str]]:
+    """Give each call the stand-in took, oldest first: its arguments as given.
+
+    A comment read from stdin is one more argument at the end, without the
+    newlines it ended with.
+    """
+    lines = gh.calls.read_bytes().decode().split("\n")[:-1]
+    return [
+        [
+            re.sub(r"\\[\\tn]", lambda found: _PLAIN[found[0]], field)
+            for field in line.split("\t")
+        ]
+        for line in lines
+    ]
+
+
+@pytest.fixture
+def gh(remote: Path) -> Gh:
+    """A stand-in for `gh` that the `remote` clone runs, through `asdlc.gh`.
+
+    It holds no pull request to begin with. Its script, its JSON file and its
+    record are in a folder beside the clone, so the clone's working tree stays
+    clean. Another clone runs it once its own `asdlc.gh` names `program`.
+    """
+    folder = remote.parent / "gh"
+    folder.mkdir()
+    stand_in = Gh(
+        program=folder / "gh",
+        pulls=folder / "pulls.json",
+        calls=folder / "calls",
+        fail=folder / "fail",
+    )
+    stand_in.program.write_text(GH_STAND_IN)
+    stand_in.program.chmod(0o755)
+    stand_in.calls.write_text("")
+    write_pulls(stand_in)
+    git(remote, "config", "asdlc.gh", str(stand_in.program))
+    return stand_in

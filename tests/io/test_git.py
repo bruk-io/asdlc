@@ -3,7 +3,7 @@ import time
 import pytest
 
 from asdlc.domain.documents import Kind, parse
-from asdlc.io import files, git, github
+from asdlc.io import files, git
 from tests.conftest import ACCEPTED, commit_files, second_clone
 from tests.conftest import git as run_git
 
@@ -104,29 +104,6 @@ def test_a_new_file_is_written_once(repository):
     assert path.read_text() == "first"
 
 
-def fake_gh(folder, monkeypatch, script: str) -> None:
-    files.write_program(folder / "gh", f"#!/bin/sh\n{script}\n")
-    monkeypatch.setenv("PATH", f"{folder}:/usr/bin:/bin")
-
-
-def test_open_pull_requests_are_read_through_gh(
-    repository, tmp_path_factory, monkeypatch
-):
-    rows = '[{"headRefName": "task/claims/01-a"}, {"headRefName": "spec/x"}]'
-    fake_gh(tmp_path_factory.mktemp("bin"), monkeypatch, f"echo '{rows}'")
-    assert github.open_pull_branches(repository) == {"task/claims/01-a", "spec/x"}
-
-
-def test_gh_failing_or_missing_is_no_answer_not_an_empty_one(
-    repository, tmp_path_factory, monkeypatch
-):
-    folder = tmp_path_factory.mktemp("bin")
-    fake_gh(folder, monkeypatch, "exit 1")
-    assert github.open_pull_branches(repository) is None
-    monkeypatch.setenv("PATH", str(tmp_path_factory.mktemp("empty")))
-    assert github.open_pull_branches(repository) is None
-
-
 def test_an_empty_commit_changes_no_file_and_leaves_what_is_staged(repository):
     run_git(repository, "config", "user.name", "t")
     run_git(repository, "config", "user.email", "t@example.com")
@@ -151,6 +128,14 @@ def test_an_empty_commit_is_refused_when_git_cannot_tell_who_commits(
     run_git(repository, "config", "user.useConfigOnly", "true")
     assert git.commit_empty(repository, "Start intent new") is False
     assert git.ahead(repository, "main") == 0
+
+
+def test_a_setting_is_read_from_gits_configuration_and_is_empty_when_not_set(
+    repository,
+):
+    assert git.setting(repository, "asdlc.gh") == ""
+    run_git(repository, "config", "asdlc.gh", "/somewhere/with a space/gh")
+    assert git.setting(repository, "asdlc.gh") == "/somewhere/with a space/gh"
 
 
 def test_a_repository_knows_whether_it_has_a_remote(repository, remote):
