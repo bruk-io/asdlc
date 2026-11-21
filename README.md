@@ -69,6 +69,7 @@ The grammar is the one steg's command uses: a singular noun, a verb from a close
 | `asdlc plan new` | An intent's slug, or `<slug>/<task>` | Starts the intent's plan, or a task's own plan |
 | `asdlc task new` | `<slug>/<task>` | Cuts a task from a plan step. `--step`, `--size`, `--depends`; what it delivers is copied from the step |
 | `asdlc task list`, `task show` | An intent's slug, or none; `<slug>/<task>` | The tasks and their state: waiting, ready, claimed, in review, done |
+| `asdlc task start` | `<slug>/<task>` | Starts a ready task: moves the checkout it is run in to the task's branch, pushes it, and opens a draft pull request |
 | `asdlc document check` | An intent's slug, or none for all | Lint: everything wrong in and between the documents |
 | `asdlc requirement list` | none | The requirements in force. `--all` adds replaced and retired ones |
 | `asdlc requirement show` | A requirement id | One requirement in full, with what it replaced and what replaced it |
@@ -98,6 +99,21 @@ State is never stored. A task is claimed because its branch `task/<slug>/<task>`
 Lint judges the documents and reads only files. The guard judges a change: the branch, the files it touched and what is on `main`. Neither runs a model, and both give the same answer every time. A gate, in this project, is a person's decision recorded as a merge; the guard is what stops work getting ahead of one.
 
 Try them on the worked example: `uv run asdlc requirement list --all --root examples/claims`.
+
+## Starting a task
+
+`asdlc task start <slug>/<task>` starts a task that reads as ready on the remote. In order:
+
+1. It fetches, and moves the checkout it is run in to a new branch, `task/<slug>/<task>`, made from the remote's `main`. It makes no worktree.
+2. It makes an empty commit, `Start task <slug>/<task>`, so git holds when the task began.
+3. It pushes the branch. The push is the claim: from then on the task reads as claimed in every clone.
+4. It opens a draft pull request against `main`, and prints the branch and the pull request's link.
+
+It starts nothing in a checkout with uncommitted changes, and nothing it can tell it could not finish: with no remote, with a `gh` that cannot reach the repository's pull requests, or with no checks on `main`. When it fails part way, it puts the checkout back where it was.
+
+The checks are the command lines in `.asdlc/checks` on the remote's `main`, one to a line, with `#` for a comment. They are what a task has to pass before its pull request is marked ready. In this repository the file holds one line, `just check`. No command runs them yet, but no task is started without them.
+
+One checkout holds one task at a time. To build tasks side by side, give each a session of its own in a worktree of its own, started with `claude --worktree <name>`, and run `asdlc task start` there.
 
 ## Install
 
@@ -147,7 +163,7 @@ Built: the document format and its lint, scaffold commands for each document, ta
 
 Not built yet:
 
-- **The other skills.** Sizing and cutting tasks is a skill now. Building a task is still done by hand, because there is no worker yet.
+- **The other skills.** Sizing and cutting tasks is a skill now. `asdlc task start` starts a task. The rest of building one is still done by hand: nothing runs the checks or ends the task yet, and there is no skill for it.
 - **The measures.** Nothing reads merge commits or pull requests yet.
 - **Making CI required.** `.github/workflows/ci.yml` runs lint, the tests and the guard on every pull request, but branch protection and `CODEOWNERS` are not set up, so nothing yet stops a merge.
 - **Commit order.** The guard judges which files a branch changed, not that a plan was committed before the code.

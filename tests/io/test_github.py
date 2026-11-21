@@ -196,3 +196,54 @@ def test_the_stand_in_answers_nothing_it_was_not_built_for(gh):
         done = stand_in(gh, *args)
         assert (done.returncode, done.stdout) == (1, ""), args
     assert held_pulls(gh) == []
+
+
+def test_a_draft_is_opened_against_main_and_its_link_is_what_comes_back(remote, gh):
+    body = "Builds `intent/claims/tasks/01-endpoint/task.md`.\n\n- claims.R1\n"
+    opened = github.open_draft(remote, DRAFT, "Task: the endpoint", body)
+
+    assert (opened.ok, opened.out, opened.err) == (
+        True,
+        "https://example.invalid/pull/1",
+        "",
+    )
+    assert held_pulls(gh) == [pull_row(DRAFT, 1, draft=True)]
+    assert calls(gh) == [
+        [
+            *("pr", "create", "--draft", "--base", "main", "--head", DRAFT),
+            *("--title", "Task: the endpoint", "--body", body),
+        ]
+    ]
+
+
+def test_a_draft_that_cannot_be_opened_gives_what_the_program_said(remote, gh):
+    gh.fail.write_text("create\n")
+    failed = github.open_draft(remote, DRAFT, "Task: the endpoint", "a body")
+    assert (failed.ok, failed.out) == (False, "")
+    assert failed.err == "gh stand-in: told to fail on create"
+
+    run_git(remote, "config", "asdlc.gh", str(gh.program.parent / "no-such-program"))
+    missing = github.open_draft(remote, DRAFT, "Task: the endpoint", "a body")
+    assert (missing.ok, missing.out) == (False, "")
+    assert "could not be run" in missing.err
+
+
+def test_a_program_that_opens_a_draft_and_prints_no_link_did_not_open_one(
+    repository, tmp_path_factory, monkeypatch
+):
+    fake_gh(tmp_path_factory.mktemp("bin"), monkeypatch, "exit 0")
+    opened = github.open_draft(repository, DRAFT, "Task: the endpoint", "a body")
+    assert (opened.ok, opened.out, "no link" in opened.err) == (False, "", True)
+
+
+def test_a_pull_request_is_marked_ready_and_made_a_draft_again(remote, gh):
+    write_pulls(gh, pull_row(DRAFT, 3, draft=True))
+
+    assert github.set_ready(remote, 3, ready=True).ok is True
+    assert held_pulls(gh) == [pull_row(DRAFT, 3)]
+    assert github.set_ready(remote, 3, ready=False).ok is True
+    assert held_pulls(gh) == [pull_row(DRAFT, 3, draft=True)]
+    assert calls(gh) == [["pr", "ready", "3"], ["pr", "ready", "3", "--undo"]]
+
+    gone = github.set_ready(remote, 9, ready=True)
+    assert (gone.ok, gone.err) == (False, "gh stand-in: no open pull request 9")

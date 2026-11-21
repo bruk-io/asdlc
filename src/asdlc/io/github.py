@@ -9,22 +9,13 @@ on 2026-11-18, with pull request #101.
 
 import json
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 
+from asdlc.domain.tasks import Pull
 from asdlc.io import git
+from asdlc.io.git import Ran
 
 _FIELDS = "headRefName,isDraft,number,url"
-
-
-@dataclass(frozen=True)
-class Pull:
-    """An open pull request."""
-
-    branch: str
-    number: int
-    link: str
-    draft: bool
 
 
 def program(root: Path) -> str:
@@ -32,15 +23,20 @@ def program(root: Path) -> str:
     return git.setting(root, "asdlc.gh") or "gh"
 
 
+def _run(root: Path, *args: str) -> Ran:
+    """Run the program in the repository, and give how it ended."""
+    try:
+        named = program(root)
+        done = subprocess.run([named, *args], capture_output=True, text=True, cwd=root)
+    except OSError as problem:
+        return Ran(False, "", f"the program for GitHub could not be run: {problem}")
+    return Ran(done.returncode == 0, done.stdout, done.stderr.strip())
+
+
 def _answer(root: Path, *args: str) -> str | None:
     """Run the program and give what it printed; None when it is missing or fails."""
-    try:
-        done = subprocess.run(
-            [program(root), *args], capture_output=True, text=True, cwd=root
-        )
-    except OSError:
-        return None
-    return done.stdout if done.returncode == 0 else None
+    ran = _run(root, *args)
+    return ran.out if ran.ok else None
 
 
 def _pull(row: object) -> Pull | None:
@@ -81,3 +77,26 @@ def open_pulls(root: Path) -> tuple[Pull, ...] | None:
         root, "pr", "list", "--state", "open", "--limit", "500", "--json", _FIELDS
     )
     return None if answer is None else _pulls(answer)
+
+
+def open_draft(root: Path, branch: str, title: str, body: str) -> Ran:
+    """Open a draft pull request for a branch, against main.
+
+    When it worked, `out` is the pull request's link and nothing else. When it
+    did not, `err` is what the program said.
+    """
+    ran = _run(
+        root,
+        *("pr", "create", "--draft", "--base", "main", "--head", branch),
+        *("--title", title, "--body", body),
+    )
+    link = (ran.out.split() or [""])[-1]
+    if ran.ok and not link:
+        return Ran(False, "", f"{program(root)} opened it and printed no link")
+    return Ran(ran.ok, link if ran.ok else "", ran.err)
+
+
+def set_ready(root: Path, number: int, ready: bool) -> Ran:
+    """Mark a pull request ready for review, or make it a draft again."""
+    undo = () if ready else ("--undo",)
+    return _run(root, "pr", "ready", str(number), *undo)

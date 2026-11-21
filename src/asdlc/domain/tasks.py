@@ -48,6 +48,16 @@ class Task:
 
 
 @dataclass(frozen=True)
+class Pull:
+    """An open pull request."""
+
+    branch: str
+    number: int
+    link: str
+    draft: bool
+
+
+@dataclass(frozen=True)
 class Intent:
     slug: str
     title: str
@@ -136,6 +146,31 @@ def tasks(
             )
         )
     return tuple(found)
+
+
+def stated(
+    documents: Sequence[Document],
+    branches: frozenset[str],
+    pulls: Sequence[Pull],
+    merges: Iterable[str],
+) -> tuple[Task, ...]:
+    """List every task with its state, from what git and GitHub were read to say.
+
+    `branches` are the branches that exist, `pulls` the open pull requests and
+    `merges` the subjects of main's merge commits.
+
+    A draft's branch is counted as a branch that exists and not as one with an
+    open pull request, so its task reads as claimed. It is counted outright,
+    because a clone that has not fetched may not have the branch yet.
+    """
+    drafts = frozenset(pull.branch for pull in pulls if pull.draft)
+    return tasks(
+        documents,
+        branches=branches | drafts,
+        open_pulls=frozenset(pull.branch for pull in pulls if not pull.draft),
+        merged=merged_branches(merges),
+        links={pull.branch: pull.link for pull in pulls},
+    )
 
 
 def done(known: Iterable[Task]) -> frozenset[str]:

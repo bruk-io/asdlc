@@ -18,22 +18,28 @@ from pathlib import Path
 
 import click
 
-from asdlc.domain import scaffold
+from asdlc.domain import build, scaffold
 from asdlc.domain.documents import Document, Finding, Kind, Mark, step_delivers
 from asdlc.domain.guard import Verdict, guard, waiting
 from asdlc.domain.lint import library
 from asdlc.domain.requirements import Requirement, Standing, lineage, requirements
 from asdlc.domain.shell import push_folder
-from asdlc.domain.tasks import Task, done, intents, merged_branches, tasks
-from asdlc.io import files, git, github
+from asdlc.domain.tasks import Task, done, intents, merged_branches, stated, tasks
+from asdlc.io import checkout, files, git, github
 from asdlc.io.hook import read_file_write, read_shell_command
-from asdlc.presentation import data, output, text
+from asdlc.presentation import data, output, pull, text
 from asdlc.presentation import hook as hook_text
 
 FAILED = 1
 NO_TARGET = 3
 NO_REPOSITORY = 4
 INTERRUPTED = 130
+
+_STOPS = {
+    build.Stop.REFUSED: FAILED,
+    build.Stop.NO_TASK: NO_TARGET,
+    build.Stop.NO_MAIN: NO_REPOSITORY,
+}
 
 _SETTINGS = {"help_option_names": ["-h", "--help"]}
 
@@ -169,31 +175,20 @@ def _merged(options: Options) -> frozenset[str]:
 
 
 def _tasks(options: Options, documents: tuple[Document, ...]) -> tuple[Task, ...]:
-    """Every task with its state, from the branches, pull requests and merges.
-
-    A draft's branch is handed over as a branch that exists and not as one with
-    an open pull request, so its task reads as claimed. It is named among the
-    branches outright, because a clone that has not fetched may not have it yet.
-    """
+    """Every task with its state, from the branches, pull requests and merges."""
     found = _main(options)
     if found is None:
         return tasks(documents, merged=_merged(options))
-    listed = github.open_pulls(found[0])
+    root, ref = found
+    listed = github.open_pulls(root)
     if listed is None:
-        program = github.program(found[0])
+        program = github.program(root)
         _note(
             options,
             f"{program} listed no pull requests, so no task reads as in review",
         )
-    pulls = listed or ()
-    drafts = frozenset(pull.branch for pull in pulls if pull.draft)
-    return tasks(
-        documents,
-        branches=git.branches(found[0]) | drafts,
-        open_pulls=frozenset(pull.branch for pull in pulls if not pull.draft),
-        merged=_merged(options),
-        links={pull.branch: pull.link for pull in pulls},
-    )
+    merges = git.merge_subjects(root, ref)
+    return stated(documents, git.branches(root), listed or (), merges)
 
 
 def _requirements(options: Options) -> tuple[Requirement, ...]:
@@ -271,6 +266,78 @@ def _title_of(root: Path, slug: str) -> str:
     return next(
         (d.title for d in documents if d.slug == slug and d.kind is Kind.INTENT), ""
     )
+
+
+def _top(options: Options) -> Path:
+    """Give the checkout a start acts on: `--root` has to be its top folder."""
+    root = git.repository(options.root)
+    if root is None:
+        raise _fail(f"{options.root} is not a git repository", NO_REPOSITORY)
+    if files.inside(options.root, root) != ".":
+        raise click.UsageError(
+            f"--root has to be the top of its checkout, which is {root}"
+        )
+    return root
+
+
+def _carry_out(root: Path, start: build.Start) -> str:
+    """Do what a start decided: the branch, the start commit, the push, the draft.
+
+    Give the pull request's link. When any of it fails this raises, and the
+    caller puts the checkout back.
+    """
+    task = start.task
+    if start.reuse:
+        moved = git.switch(root, task.branch)
+    else:
+        moved = git.switch_new(root, task.branch, git.REMOTE_MAIN)
+    if not moved:
+        raise _fail(f"git would not switch to '{task.branch}'", FAILED)
+    recorded = start.started or git.commit_empty(root, build.start_subject(task.id))
+    if not recorded:
+        raise _fail(
+            f"git would not record the start of '{task.branch}'. It makes a commit, "
+            "so git has to know who is committing: set user.name and user.email",
+            FAILED,
+        )
+    pushed = git.push_claim(root, task.branch)
+    if not build.claimed(pushed.out, task.branch):
+        if pushed.err.strip():
+            click.echo(pushed.err.strip(), err=True)
+        raise _fail(
+            f"the push did not make '{task.branch}' on the remote, so {task.id} "
+            "is not started",
+            FAILED,
+        )
+    opened = github.open_draft(
+        root, task.branch, pull.title(task), pull.description(task)
+    )
+    if not opened.ok:
+        if opened.err:
+            click.echo(opened.err, err=True)
+        raise _fail(
+            f"the pull request for '{task.branch}' could not be opened. The branch "
+            "is on the remote",
+            FAILED,
+        )
+    return opened.out
+
+
+def _put_back(root: Path, position: str, start: build.Start) -> None:
+    """Undo a start that failed after it moved the checkout.
+
+    The checkout goes back where it was, and the local branch goes unless it
+    was there before this run.
+    """
+    branch = start.task.branch
+    if position == branch:
+        return
+    if not git.switch_back(root, position):
+        click.echo(
+            text.warning(f"could not put the checkout back on '{position}'"), err=True
+        )
+    elif not start.reuse:
+        git.delete_branch(root, branch)
 
 
 @click.group(context_settings=_SETTINGS)
@@ -502,6 +569,50 @@ def task_show(options: Options, id: str) -> None:
             text=text.task_record(match),
             identifier=match.id,
             document=data.task(match),
+            as_json=options.json,
+            quiet=options.quiet,
+        )
+    )
+
+
+@task.command("start", context_settings=_SETTINGS)
+@click.argument("id")
+@universal
+def task_start(options: Options, id: str) -> None:
+    """Start a task. Prints its branch and the link of its pull request.
+
+    The target is <slug>/<task>. The checkout the command is run in moves to
+    the branch task/<slug>/<task>, made from the remote's main. The branch is
+    pushed, which claims the task, and a draft pull request is opened for it.
+
+    Only a task that reads as ready on the remote is started, in a checkout
+    with nothing uncommitted. When the start fails part way, the checkout is
+    put back where it was.
+    """
+    _, name = _split(id)
+    if name is None:
+        raise click.UsageError("a task is named <slug>/<task>")
+    root = _top(options)
+    _fetched(options, must=True)
+    found = checkout.found(root, id)
+    documents, findings = library(found.texts)
+    _note(options, f"read {len(documents)} documents at {git.REMOTE_MAIN}")
+    _warn_of(findings)
+    decided = build.start(id, found, documents)
+    if isinstance(decided, build.Refused):
+        raise _fail(decided.reason, _STOPS[decided.stop])
+    position = git.position(root)
+    try:
+        link = _carry_out(root, decided)
+    except BaseException:
+        _put_back(root, position, decided)
+        raise
+    branch = decided.task.branch
+    _emit(
+        output.single(
+            text=f"{branch}\t{link}",
+            identifier=branch,
+            document={"branch": branch, "pull_request": link},
             as_json=options.json,
             quiet=options.quiet,
         )

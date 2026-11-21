@@ -2,9 +2,22 @@
 
 import os
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
+from asdlc.domain.build import Commit
+
 FETCH_LIMIT = 20.0
+REMOTE_MAIN = "origin/main"
+
+
+@dataclass(frozen=True)
+class Ran:
+    """How a program ended: whether it exited 0, and what it printed."""
+
+    ok: bool
+    out: str
+    err: str
 
 
 def _git(root: Path, *args: str) -> str | None:
@@ -163,3 +176,123 @@ def changed_since(root: Path, ref: str, branch: str = "HEAD") -> tuple[str, ...]
     """List the files a branch changed since it left `ref`."""
     listed = _git(root, "diff", "--name-only", f"{ref}...{branch}") or ""
     return tuple(line for line in listed.split("\n") if line)
+
+
+def file_at(root: Path, ref: str, path: str) -> str | None:
+    """Give a file's text at a ref; None when the ref has no such file."""
+    return _git(root, "show", f"{ref}:{path}")
+
+
+def uncommitted(root: Path) -> tuple[str, ...]:
+    """List the paths with a change that is not committed.
+
+    Untracked files are among them, and files git ignores are not. An empty
+    answer is a clean checkout.
+    """
+    entries = (_git(root, "status", "--porcelain", "-z") or "").split("\0")
+    paths: list[str] = []
+    renamed_from = False
+    for entry in entries:
+        if not renamed_from and len(entry) > 3:
+            paths.append(entry[3:])
+        # After a rename or a copy, the next entry is the path it came from.
+        renamed_from = not renamed_from and bool(set(entry[:2]) & set("RC"))
+    return tuple(paths)
+
+
+def position(root: Path) -> str:
+    """Give where the checkout is: its branch, or its commit when it is on none."""
+    return current_branch(root) or (_git(root, "rev-parse", "HEAD") or "").strip()
+
+
+def switch_back(root: Path, position: str) -> bool:
+    """Put the checkout back where `position` found it; False when git refuses."""
+    if has_branch(root, f"refs/heads/{position}"):
+        return switch(root, position)
+    return _git(root, "switch", "--quiet", "--detach", position) is not None
+
+
+def checked_out(root: Path) -> dict[str, Path]:
+    """Give each branch a worktree of the clone has checked out, and that worktree."""
+    listed = _git(root, "worktree", "list", "--porcelain") or ""
+    held = {}
+    for block in listed.split("\n\n"):
+        fields = dict(line.partition(" ")[::2] for line in block.splitlines())
+        branch = fields.get("branch", "")
+        if "worktree" in fields and branch.startswith("refs/heads/"):
+            held[branch.removeprefix("refs/heads/")] = Path(fields["worktree"])
+    return held
+
+
+def switch_new(root: Path, branch: str, ref: str) -> bool:
+    """Make a branch at `ref` with no upstream and switch to it; False when refused.
+
+    `create_branch` gives its branch the ref as an upstream. A task's branch is
+    pushed under its own name, so it must not take `origin/main` as one.
+    """
+    made = _git(root, "switch", "--quiet", "--no-track", "--create", branch, ref)
+    return made is not None
+
+
+def delete_branch(root: Path, branch: str) -> bool:
+    """Delete a local branch, merged or not; False when git refuses."""
+    return _git(root, "branch", "--quiet", "-D", branch) is not None
+
+
+def push_claim(root: Path, branch: str) -> Ran:
+    """Push a branch to the remote, only if the remote has no branch of that name.
+
+    The empty lease is what says "only if". `out` is what `git push --porcelain`
+    printed, for `claimed` in `domain/build.py` to read: a push can exit 0 and
+    have claimed nothing. Git is told not to ask for credentials.
+    """
+    lease = f"--force-with-lease={branch}:"
+    done = subprocess.run(
+        ["git", "-C", str(root), "push", "--porcelain", "-u", lease, "origin", branch],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+    return Ran(done.returncode == 0, done.stdout, done.stderr)
+
+
+def commits(root: Path, span: str) -> tuple[Commit, ...]:
+    """Give the commits of a range, oldest first, without merge commits.
+
+    Each comes with its id, its subject and the files it changed. A commit
+    always comes after the commits it was made on top of. Between two lines of
+    history that a merge joined, the order is git's.
+    """
+    listed = _git(
+        root,
+        *("-c", "core.quotePath=false", "log", "--reverse", "--topo-order"),
+        *("--no-merges", "--name-only", "--format=%x1e%H%x1f%s", span),
+    )
+    found = []
+    for record in (listed or "").split("\x1e")[1:]:
+        head, _, rest = record.partition("\n")
+        id, _, subject = head.partition("\x1f")
+        found.append(
+            Commit(id, subject, tuple(line for line in rest.split("\n") if line))
+        )
+    return tuple(found)
+
+
+def merge(root: Path, ref: str) -> bool:
+    """Merge a ref into the checkout's branch; False when it did not merge cleanly.
+
+    A merge that conflicts is left as git left it.
+    """
+    return _git(root, "merge", "--quiet", "--no-edit", ref) is not None
+
+
+def conflicts(root: Path) -> tuple[str, ...]:
+    """List the files a merge left in conflict."""
+    listed = _git(root, "diff", "--name-only", "--diff-filter=U") or ""
+    return tuple(line for line in listed.split("\n") if line)
+
+
+def merging(root: Path) -> bool:
+    """Say whether a merge is in progress in the checkout."""
+    return _git(root, "rev-parse", "--verify", "--quiet", "MERGE_HEAD") is not None
