@@ -268,6 +268,28 @@ def push_claim(root: Path, branch: str) -> Ran:
     return Ran(done.returncode == 0, done.stdout, done.stderr)
 
 
+def head(root: Path) -> str:
+    """Give the commit the checkout is on."""
+    return (_git(root, "rev-parse", "HEAD") or "").strip()
+
+
+def delete_remote(root: Path, branch: str, commit: str) -> bool:
+    """Delete a branch from the remote, only while the remote has it at `commit`.
+
+    The lease is what says "only while": a branch that has moved is someone
+    else's by now, and is left. False when nothing was deleted.
+    """
+    lease = f"--force-with-lease={branch}:{commit}"
+    done = subprocess.run(
+        ["git", "-C", str(root), "push", "--quiet", lease, "origin", f":{branch}"],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+    return done.returncode == 0
+
+
 def commits(root: Path, span: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
     """Give the commits of a range, oldest first, without merge commits.
 

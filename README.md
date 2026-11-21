@@ -111,6 +111,8 @@ Try them on the worked example: `uv run asdlc requirement list --all --root exam
 
 It starts nothing in a checkout with uncommitted changes, and nothing it can tell it could not finish: with no remote, with a `gh` that cannot reach the repository's pull requests, or with no checks on `main`. When it fails part way, it puts the checkout back where it was.
 
+When two clones start one task at the same moment, one push makes the branch and the other start is undone and says whose pull request won. When the pull request cannot be opened, the start takes its branch off the remote again, so the task reads as ready. When the remote will not give the branch up, the start says that it is left there, and names `asdlc task start --resume` to finish it.
+
 The checks are the command lines in `.asdlc/checks` on the remote's `main`, one to a line, with `#` for a comment. They are what a task has to pass before its pull request is marked ready. In this repository the file holds one line, `just check`. No command runs them yet, but no task is started without them.
 
 One checkout holds one task at a time. To build tasks side by side, give each a session of its own in a worktree of its own, started with `claude --worktree <name>`, and run `asdlc task start` there.

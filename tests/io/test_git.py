@@ -298,6 +298,31 @@ def test_a_claiming_push_leaves_a_branch_the_remote_already_has_even_one_behind(
     assert run_git(origin, "rev-parse", branch) == there
 
 
+def test_a_branch_is_deleted_from_the_remote_only_while_it_is_at_the_commit_given(
+    remote,
+):
+    branch = "task/claims/01-endpoint"
+    origin = remote.parent / "origin.git"
+    git.switch_new(remote, branch, "origin/main")
+    git.commit_empty(remote, "Start task claims/01-endpoint")
+    mine = git.head(remote)
+    assert mine == run_git(remote, "rev-parse", "HEAD").strip()
+    git.push_claim(remote, branch)
+
+    other = second_clone(remote)
+    run_git(other, "switch", "-q", branch)
+    commit_files(other, {"api/status.py": "x = 1\n"}, "someone else's work")
+    run_git(other, "push", "-q", "origin", branch)
+    theirs = run_git(other, "rev-parse", "HEAD").strip()
+
+    assert git.delete_remote(remote, branch, mine) is False
+    assert run_git(origin, "rev-parse", branch).strip() == theirs
+
+    assert git.delete_remote(remote, branch, theirs) is True
+    assert run_git(origin, "branch", "--list", branch) == ""
+    assert git.delete_remote(remote, branch, theirs) is False
+
+
 def test_a_push_to_a_remote_that_is_gone_says_so_and_answers_nothing(remote):
     git.switch_new(remote, "task/claims/01-endpoint", "origin/main")
     run_git(remote, "remote", "set-url", "origin", str(remote.parent / "gone.git"))

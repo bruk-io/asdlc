@@ -326,11 +326,25 @@ def read_start(root: Path, id: str) -> build.Found:
     )
 
 
+def _after_losing(root: Path, flag: str) -> tuple[Pull, ...]:
+    """Read what another start left, once a push has lost to it.
+
+    The fetch is so the task reads as claimed here from now on, and the pull
+    requests are for the reason to name the one that won. Neither is read when
+    the remote gave no answer about the branch at all.
+    """
+    if flag not in ("=", "!"):
+        return ()
+    git.fetch(root)
+    return _pulls(root) or ()
+
+
 def _carry_out(root: Path, start: build.Start) -> str:
     """Do what a start decided: the branch, the start commit, the push, the draft.
 
     Give the pull request's link. When any of it fails this raises, and the
-    caller puts the checkout back.
+    caller puts the checkout back. A draft that cannot be opened also takes the
+    branch off the remote again, while the remote still has this start's commit.
     """
     task = start.task
     if start.reuse:
@@ -347,25 +361,19 @@ def _carry_out(root: Path, start: build.Start) -> str:
             FAILED,
         )
     pushed = git.push_claim(root, task.branch)
-    if not build.claimed(pushed.out, task.branch):
+    flag = build.answer(pushed.out, task.branch)
+    if flag != "*":
         if pushed.err.strip():
             click.echo(pushed.err.strip(), err=True)
-        raise _fail(
-            f"the push did not make '{task.branch}' on the remote, so {task.id} "
-            "is not started",
-            FAILED,
-        )
+        raise _fail(build.lost_claim(task.id, flag, _after_losing(root, flag)), FAILED)
     opened = github.open_draft(
         root, task.branch, pull.title(task), pull.description(task)
     )
     if not opened.ok:
         if opened.err:
             click.echo(opened.err, err=True)
-        raise _fail(
-            f"the pull request for '{task.branch}' could not be opened. The branch "
-            "is on the remote",
-            FAILED,
-        )
+        deleted = git.delete_remote(root, task.branch, git.head(root))
+        raise _fail(build.unopened(task.id, deleted), FAILED)
     return opened.out
 
 

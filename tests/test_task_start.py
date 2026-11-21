@@ -10,6 +10,7 @@ network.
 """
 
 import json
+import sys
 
 from click.testing import CliRunner
 
@@ -293,18 +294,118 @@ def test_when_the_push_fails_the_checkout_is_put_back_on_the_commit_it_was_on(
     assert opened(gh) == []
 
 
-def test_when_the_draft_cannot_be_opened_a_branch_that_was_there_before_is_kept(
+def test_when_the_draft_cannot_be_opened_the_start_is_undone_here_and_on_the_remote(
     remote, gh
 ):
+    gh.fail.write_text("create\n")
+    before = everything(remote, gh)
+
+    failed(
+        start(remote),
+        "told to fail on create",
+        "could not be opened",
+        "the branch is off the remote again",
+    )
+
+    assert everything(remote, gh) == before
+    assert len(opened(gh)) == 1
+
+
+def test_when_the_remote_will_not_give_the_branch_up_it_is_left_and_a_resume_is_named(
+    remote, gh
+):
+    # A remote that takes a new branch and refuses to delete one, as a
+    # protected branch does. The branch here was left by an earlier start.
+    hook = origin(remote) / "hooks" / "update"
+    hook.parent.mkdir(exist_ok=True)
+    hook.write_text(
+        '#!/bin/sh\ncase "$3" in *[!0]*) exit 0 ;; esac\n'
+        'echo "this remote keeps its branches" >&2\nexit 1\n'
+    )
+    hook.chmod(0o755)
     git(remote, "branch", "--no-track", BRANCH, "origin/main")
     gh.fail.write_text("create\n")
 
-    failed(start(remote), "told to fail on create", "could not be opened")
+    failed(
+        start(remote),
+        "could not be opened",
+        "could not be deleted from the remote, so it is left there",
+        f"asdlc task start --resume {ENDPOINT}",
+    )
 
     assert on(remote) == "main"
     assert git(remote, "status", "--porcelain") == ""
     assert git(remote, "log", "-1", "--format=%s", BRANCH).strip() == SUBJECT
+    assert commit(origin(remote), BRANCH) == commit(remote, BRANCH)
     assert held_pulls(gh) == []
+
+
+def racing(loser, winner, hook: str):
+    """Have a git hook in `loser` run the whole of a start in `winner`, once.
+
+    So the winner's start finishes after the loser's fetch and before its push
+    is taken, which no second start run afterwards could show: that one is
+    refused before it pushes. Give the file the winner's output goes to.
+    """
+    log = loser.parent / "the-other-start.log"
+    run_it = f'"{sys.executable}" -c "from asdlc.cli import main; main()"'
+    script = (
+        "#!/bin/sh\n"
+        f'[ -e "{log}" ] && exit 0\n'
+        "unset $(git rev-parse --local-env-vars)\n"
+        f'{run_it} task start {ENDPOINT} --root "{winner}" >"{log}" 2>&1\n'
+        "exit 0\n"
+    )
+    path = loser / ".git" / "hooks" / hook
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(script)
+    path.chmod(0o755)
+    return log
+
+
+def lost_to(winner, loser, gh, done, log, how: str) -> None:
+    """Check a start that lost: nothing of it is left, and it names the winner."""
+    assert log.read_text() == f"{BRANCH}\t{LINK}\n"
+    failed(
+        done,
+        f"another start claimed {ENDPOINT} first",
+        how,
+        f"Its pull request: {LINK}",
+    )
+    assert (on(loser), branches(loser)) == ("main", {"main"})
+    assert git(loser, "status", "--porcelain") == ""
+    assert commit(origin(loser), BRANCH) == commit(winner)
+    assert commit(loser, f"origin/{BRANCH}") == commit(winner)
+    assert held_pulls(gh) == [pull_row(BRANCH, 1, draft=True)]
+    assert len(opened(gh)) == 1
+
+
+def test_of_two_starts_at_one_instant_the_second_finds_the_branch_already_there(
+    remote, gh, monkeypatch
+):
+    # Pinned to one instant, the two start commits are one commit, so the
+    # second push is not refused: the remote answers that it is up to date.
+    monkeypatch.setenv("GIT_AUTHOR_DATE", "2026-11-18T12:00:00+00:00")
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2026-11-18T12:00:00+00:00")
+    winner = second_clone(remote)
+    git(winner, "config", "asdlc.gh", gh.program)
+    log = racing(remote, winner, "post-checkout")
+
+    done = start(remote)
+
+    lost_to(winner, remote, gh, done, log, "the remote had the branch already")
+
+
+def test_a_start_that_another_overtakes_as_it_pushes_is_refused_by_the_remote(
+    remote, gh
+):
+    winner = second_clone(remote)
+    git(winner, "config", "asdlc.gh", gh.program)
+    log = racing(remote, winner, "pre-push")
+
+    done = start(remote)
+
+    lost_to(winner, remote, gh, done, log, "the remote refused this one's push")
 
 
 def test_a_branch_a_start_left_is_used_again_with_the_start_commit_it_has(remote, gh):

@@ -137,6 +137,9 @@ Needs step 1's readers. R9 and R10 are here as well because they name `task star
 - `check_lines(text)`: the command lines of a checks file. A line that is empty or starts with `#` is no command line, and a file with none counts as missing.
 - `refusal(...)`: why a task cannot be started, or `None`. It takes the tasks on the remote's `main`, each with its state as the remote alone gives it and its pull request if any. A task that is not among them is one the command found in the checkout or on the remote's `tasks/<slug>`. It words each reason in R5. A claimed or in-review task's reason gives its pull request, or says it has none and that `--resume` opens one. A task that is not on the remote's `main` names the merge it waits for. It also takes the branch the checkout is on and which branches other worktrees hold, and words R4's two reasons about them: a checkout on the branch of another task that reads `claimed`, and a task whose branch another worktree has checked out.
 - `claimed(porcelain, branch)`: whether a push made the branch. True only when the line for `refs/heads/<branch>` in `git push --porcelain` output begins with `*`. `=` and `!` lost (R6).
+- `answer(porcelain, branch)`: the one character that line begins with, which `claimed` asks.
+- `lost_claim(id, flag, pulls)`: the reason for a start whose push claimed nothing. For `=` and `!` it says another start claimed the task first, which of the two the remote answered, and that start's pull request when it has one.
+- `unopened(id, deleted)`: the reason for a start whose pull request could not be opened: that the branch is off the remote again, or that it is left there and `asdlc task start --resume` finishes the start.
 - `leftover(commits)`: whether a local branch holds at most a start commit, so a start that was cut short can use it again (R5).
 - `Found`: the record the command decides from. The remote and its `main`, the open pull requests, the checks file and the documents on the remote's `main`, the remote's branches and the merges on its `main`, the uncommitted paths, the branch the checkout is on, the branches other worktrees hold, where the task's `task.md` was found, and what a local branch of the task's name holds.
 - `start(id, found, documents)`: what the command does. It gives a `Start`, which says whether a leftover branch is used again and whether it has its start commit, or a `Refused` with the reason and one of three endings: refused, a target that matched nothing, or no `main`. It holds the refusals of item 2 in the list below, and asks `refusal` and `leftover`.
@@ -152,6 +155,7 @@ Needs step 1's readers. R9 and R10 are here as well because they name `task star
 - `delete_branch(root, branch)`: `git branch -D`.
 - `push_claim(root, branch)`: `git push --porcelain -u --force-with-lease=<branch>: origin <branch>`. It gives back what the push printed.
 - `delete_remote(root, branch, commit)`: `git push --force-with-lease=<branch>:<commit> origin :<branch>`.
+- `head(root)`: the commit the checkout is on. The start hands it to `delete_remote` as its own commit.
 - `commits(root, range)`: the commits of a range oldest first, each with its id, its subject and the files it changed, without merge commits.
 - `merge(root, ref)`: `git merge --no-edit <ref>`. It gives back whether the merge was clean.
 - `conflicts(root)`: the files `git diff --name-only --diff-filter=U` lists.
@@ -208,8 +212,8 @@ The same file, on the same fixtures, for what the command does with git:
   - From a `post-checkout` hook, which fires at the second start's switch, with both start commits pinned to one instant through `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE`. They are one commit, the remote has it when the second's push begins, and the push answers `=`.
   - From a `pre-push` hook, which fires as the push begins. The push answers `!`, pinned or not.
 
-  In both the second start exits 1, its checkout is back where it was with no local task branch, the remote's branch is the first's commit, the stand-in holds one pull request, and the reason names it.
-- `gh` failing on `pr create` leaves no branch on the remote, the checkout where it was and no local branch. A second test moves the remote's branch first and shows it is not deleted. A third has the stand-in move the bare repository away as it fails, so the remote's branch cannot be deleted either, and the message says it is left there and names `--resume`.
+  In both the second start exits 1, its checkout is back where it was with no local task branch, the remote's branch is the first's commit, the stand-in holds one pull request, and the reason names it. The reason also says which of the two the remote answered, so each test shows what it got.
+- `gh` failing on `pr create` leaves no branch on the remote, the checkout where it was and no local branch. A second test has the bare repository refuse a delete through its `update` hook, as a protected branch does, so the remote's branch cannot be deleted, and the message says it is left there and names `--resume`. That a branch which has moved is not deleted is the lease's doing, and is a test of `delete_remote` in `tests/io/test_git.py`. The wording of both endings, and of a start that lost its claim, is a unit test of `unopened` and `lost_claim`.
 
 `tests/presentation/test_pull.py` covers `description`. `tests/io/test_git.py` and `tests/io/test_github.py` cover the new functions, `merge`, `conflicts` and `set_ready` among them.
 
@@ -256,7 +260,7 @@ Needs step 2: the task's branch, the checks file and the pull request are what `
 
 **`src/asdlc/io/checks.py`** (new): `run(line, folder)` runs one command line as `sh -c <line>` in a folder and gives back its exit status and what it printed, stdout and stderr together in the order they came.
 
-**`src/asdlc/io/git.py`** gains: `push(root, branch)`, which is `git push --porcelain origin <branch>` and says whether the push was taken, and when it was not, whether that was for a commit the checkout lacks, with git's own reason; any `!` on the branch's line is a push that was not taken; `head(root)`; `messages(root, range, path)`, the message of each commit in a range that changed a path; and `main_checkout(root)`, the root of the main checkout, from `git rev-parse --path-format=absolute --git-common-dir`.
+**`src/asdlc/io/git.py`** gains: `push(root, branch)`, which is `git push --porcelain origin <branch>` and says whether the push was taken, and when it was not, whether that was for a commit the checkout lacks, with git's own reason; any `!` on the branch's line is a push that was not taken; `messages(root, range, path)`, the message of each commit in a range that changed a path; and `main_checkout(root)`, the root of the main checkout, from `git rev-parse --path-format=absolute --git-common-dir`.
 
 **`src/asdlc/io/github.py`** gains `comment(root, number, body)`, which is `pr comment <number> --body-file -` with the body on stdin.
 
