@@ -11,7 +11,6 @@ kind: plan
 - src/asdlc/cli.py
 - src/asdlc/domain/build.py (new)
 - src/asdlc/domain/tasks.py
-- src/asdlc/io/checkout.py (new)
 - src/asdlc/io/checks.py (new)
 - src/asdlc/io/git.py
 - src/asdlc/io/github.py
@@ -21,7 +20,6 @@ kind: plan
 - tests/conftest.py
 - tests/domain/test_build.py (new)
 - tests/domain/test_tasks.py
-- tests/io/test_checkout.py (new)
 - tests/io/test_checks.py (new)
 - tests/io/test_git.py
 - tests/io/test_github.py (new)
@@ -29,8 +27,10 @@ kind: plan
 - tests/presentation/test_text.py
 - tests/test_cli.py
 - tests/test_evals.py
+- tests/test_layers.py
 - tests/test_task_start.py (new)
 - tests/test_task_stop.py (new)
+- tests/test_templates.py (new)
 - tests/test_walk.py
 - plugins/asdlc/skills/building-a-task/SKILL.md (new)
 - plugins/asdlc/evals/build-a-ready-task/case.yaml (new)
@@ -65,15 +65,16 @@ Three things were tried before this plan was accepted, so no step waits on them:
 
 This intent's own tasks cannot all be built with what it builds. The tasks for steps 1 to 5 are started by hand with `asdlc branch new task/building-a-task/<task>`, as the generate-tasks tasks were. The tasks for steps 6 and 7 are started with `asdlc task start` and ended with `asdlc task stop`, which is the first use of both against GitHub itself.
 
-Five things hold for every step:
+Six things hold for every step:
 
 - "The remote's `main`" is the ref `origin/main`, which `base` in `src/asdlc/io/git.py` already prefers. With no remote it is the local `main`.
 - No command reads a branch's upstream. Each names the remote's branch, `origin/task/<slug>/<task>`, outright, because a sandboxed session may not be able to record one.
 - A decision goes in `src/asdlc/domain/build.py` as a function that takes data and returns data. `tests/test_layers.py` fails a domain module that imports `subprocess`, so every git and `gh` call is in `src/asdlc/io/`, and `src/asdlc/cli.py` wires them.
-- A command reads once, decides, then acts. `found` in `src/asdlc/io/checkout.py` reads what the command needs into one record of plain data, with one call to git or to `gh` for each fact. A function in `src/asdlc/domain/build.py` turns that record into a refusal or into what to do. `src/asdlc/cli.py` then does it, and reads nothing more to decide by. So a command that refuses has made nothing, because it acts only on an answer that is not a refusal.
+- `src/asdlc/io/` and `src/asdlc/domain/` import nothing from each other, and `src/asdlc/cli.py` is the one module that imports from both. This is the requester's rule of 2026-11-21, made after step 2's first piece had `io` import three records and two functions from `domain`. `io` hands back plain values: a row for each commit and for each open pull request. `cli.py` turns them into the domain's records. `tests/test_layers.py` fails an `io` module that imports from `domain`, any module but `cli.py` that imports from both, a module outside the layers, a relative import, and a test under `tests/io` or `tests/domain` that imports the other layer.
+- A command reads once, decides, then acts. `read_start` in `src/asdlc/cli.py` reads what the command needs into one record of plain data, with one call into `io` for each fact. A function in `src/asdlc/domain/build.py` turns that record into a refusal or into what to do. `src/asdlc/cli.py` then does it, and reads nothing more to decide by. So a command that refuses has made nothing, because it acts only on an answer that is not a refusal.
 - A test is at the level of what it checks, and none reaches the network. This was changed on 2026-11-21, while step 2 was built: the plan had every test of steps 1 to 5 run a whole command on a real repository, and the suite went from 32 seconds to 60 on the requester's machine with about half of the new tests checking a decision.
   - A decision is a unit test on plain data in `tests/domain/`, with no git: every refusal, its reason and its exit status. Where a step below lists a test of a refusal or of a reason, this is what it means.
-  - What is read is checked once, in `tests/io/test_checkout.py`, in a real clone where every fact differs from its default.
+  - What is read is checked once, in `tests/test_task_start.py`, in a real clone where every fact differs from its default.
   - A test runs a whole command on a real repository only when git's own behaviour is what it checks: the branch a command makes, a push, a merge, a worktree, and a checkout put back after a step fails. These use a bare repository on disk as `origin`.
 
   `tests/conftest.py` gains two fixtures, and step 1 builds both. `remote` gives a clone whose `origin` is a bare repository beside it, with `user.name` and `user.email` set, and whose `main` holds an intent, its spec, its plan, two tasks (one of size 2, one of size 8) and `.asdlc/checks`. `gh` gives a stand-in for `gh`: a shell script the fixture writes, set through the git config key `asdlc.gh`, that keeps the open pull requests in a JSON file, appends each call to a record, and can be told to fail on one subcommand. The script, the JSON file and the record are beside the clone and not inside its working tree, where they would be untracked files that R4 and R14 refuse. Step 1 uses only its `pr list`. Steps 2 and 4 use the rest.
@@ -137,7 +138,7 @@ Needs step 1's readers. R9 and R10 are here as well because they name `task star
 - `refusal(...)`: why a task cannot be started, or `None`. It takes the tasks on the remote's `main`, each with its state as the remote alone gives it and its pull request if any. A task that is not among them is one the command found in the checkout or on the remote's `tasks/<slug>`. It words each reason in R5. A claimed or in-review task's reason gives its pull request, or says it has none and that `--resume` opens one. A task that is not on the remote's `main` names the merge it waits for. It also takes the branch the checkout is on and which branches other worktrees hold, and words R4's two reasons about them: a checkout on the branch of another task that reads `claimed`, and a task whose branch another worktree has checked out.
 - `claimed(porcelain, branch)`: whether a push made the branch. True only when the line for `refs/heads/<branch>` in `git push --porcelain` output begins with `*`. `=` and `!` lost (R6).
 - `leftover(commits)`: whether a local branch holds at most a start commit, so a start that was cut short can use it again (R5).
-- `Found`: the record `found` fills in. The remote and its `main`, the open pull requests, the checks file and the documents on the remote's `main`, the remote's branches and the merges on its `main`, the uncommitted paths, the branch the checkout is on, the branches other worktrees hold, where the task's `task.md` was found, and what a local branch of the task's name holds.
+- `Found`: the record the command decides from. The remote and its `main`, the open pull requests, the checks file and the documents on the remote's `main`, the remote's branches and the merges on its `main`, the uncommitted paths, the branch the checkout is on, the branches other worktrees hold, where the task's `task.md` was found, and what a local branch of the task's name holds.
 - `start(id, found, documents)`: what the command does. It gives a `Start`, which says whether a leftover branch is used again and whether it has its start commit, or a `Refused` with the reason and one of three endings: refused, a target that matched nothing, or no `main`. It holds the refusals of item 2 in the list below, and asks `refusal` and `leftover`.
 
 **`src/asdlc/io/git.py`** gains:
@@ -158,9 +159,9 @@ Needs step 1's readers. R9 and R10 are here as well because they name `task star
 
 `merge`, `conflicts` and `merging` are first called in steps 3 and 4. They land here so that those two steps can be built side by side without both adding them.
 
-**`src/asdlc/io/checkout.py`** (new) holds `found(root, id)`, which reads the record above. It decides nothing: the one thing it works out is which worktrees are not the one it was asked about.
+`read_start(root, id)` in `src/asdlc/cli.py` fills that record in, with one call into `io` for each fact. `src/asdlc/io/git.py` gains `held_elsewhere(root)` for it: the branches that worktrees other than this one hold.
 
-**`src/asdlc/domain/tasks.py`** gains `Pull`, the record of an open pull request, which `src/asdlc/io/github.py` had, and `stated(documents, branches, pulls, merges)`, which is the part of `_tasks` that hands a draft over as a branch that exists. `start` and `_tasks` both call it.
+**`src/asdlc/domain/tasks.py`** gains `Pull`, the record of an open pull request, which `cli.py` makes from each row `open_pulls` gives, and `stated(documents, branches, pulls, merges)`, which is the part of `_tasks` that hands a draft over as a branch that exists. `start` and `_tasks` both call it.
 
 **`src/asdlc/io/github.py`** gains `open_draft(root, branch, title, body)`, which is `pr create --draft --base main --head <branch> --title <title> --body <body>` and gives the link it prints, and `set_ready(root, number, ready)`, which is `pr ready <number>`, with `--undo` for a draft. `set_ready` is first called in steps 3 and 4, and is here for the same reason.
 
@@ -192,9 +193,9 @@ R4 can tell beforehand that `gh` is missing, signed out or has no GitHub remote,
 - A leftover branch is used again and keeps the start commit it has, and a local branch with work on it is refused and named.
 - `check_lines`, `refusal`, `claimed` and `leftover`.
 
-`tests/io/test_checkout.py`, on the `remote` and `gh` fixtures, for what `found` reads: the checks, the documents and the merges come from the remote's `main` and not from the checkout or the local `main`, the branches are the remote's and not the local ones, the worktree it is asked about is not among the others, and a `task.md` is found in the checkout and on the remote's `tasks/<slug>`. That an ignored file is not uncommitted is in `tests/io/test_git.py`.
+`tests/test_task_start.py`, on the `remote` and `gh` fixtures, for what `read_start` reads: the checks, the documents and the merges come from the remote's `main` and not from the checkout or the local `main`, the branches are the remote's and not the local ones, the worktree it is asked about is not among the others, and a `task.md` is found in the checkout and on the remote's `tasks/<slug>`. That an ignored file is not uncommitted is in `tests/io/test_git.py`.
 
-`tests/test_task_start.py`, on the same fixtures, for what the command does with git:
+The same file, on the same fixtures, for what the command does with git:
 
 - The checkout is on `task/<slug>/<task>`, which is `origin/main` and the start commit, in a clone whose local `main` is behind. The start commit has its subject and changes no file. The branch does not have `origin/main` as its upstream. The branch the checkout was on is as it was. The printed line holds the branch and the link. The draft's title, base and description are in the stand-in's record. `asdlc plan new <slug>/<task>`, run on the task's branch afterwards, writes `intent/<slug>/tasks/<task>/plan.md` and makes no branch (R26's command).
 - The same from a linked worktree made with `git worktree add`, and the main checkout is not touched.

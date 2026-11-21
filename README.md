@@ -155,7 +155,7 @@ The cases are in `plugins/asdlc/evals/`, in the format `claude plugin eval` read
 
 ## Code
 
-The repository is a marketplace with two parts. `plugins/asdlc/` is the Claude Code plugin: its manifest, its hooks and the script that installs `asdlc` when a session starts. `src/asdlc/` is a Python package in three layers: `domain` decides, `io` reads files and git, `presentation` words the answer, and `cli.py` wires them. `just check` runs `asdlc document check` on the example, formatting, ruff and the tests.
+The repository is a marketplace with two parts. `plugins/asdlc/` is the Claude Code plugin: its manifest, its hooks and the script that installs `asdlc` when a session starts. `src/asdlc/` is a Python package in three layers: `domain` decides, `io` reads and writes files, git and GitHub, and `presentation` words the answer. `domain` and `io` import nothing from each other. `cli.py` is the app layer that joins them, and a test fails if any other module does. `just check` runs `asdlc document check` on the example, formatting, ruff and the tests.
 
 ## What is built, and what is not
 
