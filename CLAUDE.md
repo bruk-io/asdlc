@@ -41,19 +41,21 @@ The repository is a marketplace holding one Python package and one plugin. `.cla
 `src/asdlc/` is the package, in three layers. `tests/test_layers.py` fails when one imports what it must not.
 
 - `src/asdlc/domain/` - decides. Pure functions over data: documents, requirements, lint, the guard, tasks and their state, scaffolding. Imports nothing else here, and no files, git or printing.
-- `src/asdlc/io/` - reads files, git, GitHub (through `gh`) and a hook's stdin. Decides nothing.
+- `src/asdlc/io/` - reads and writes files, git and GitHub (through `gh`), and reads a hook's stdin. It still decides nothing.
 - `src/asdlc/presentation/` - turns what the domain returned into text for a person or JSON for a hook.
 - `src/asdlc/cli.py` - the click command. The only module that imports all three.
 - `src/asdlc/templates/` - the four documents, shipped in the package. `examples/claims/` - a worked example the tests read.
 - `plugins/asdlc/` - the Claude Code plugin, and everything Claude Code loads: its manifest in `.claude-plugin/plugin.json`, its skills in `skills/`, their eval cases in `evals/`, and later its agents. `hooks/hooks.json` registers three hooks: `scripts/install` when a session starts, `asdlc hook run lint` after Claude writes a document, and `asdlc hook run guard` before Claude runs `git push`.
 - An installed plugin is a copy of `plugins/asdlc/` alone, without `src/`. So `scripts/install` installs the package at each session start: from the working tree in a checkout, and otherwise from the repository, once for each version of `plugin.json`. It installs into `${CLAUDE_PLUGIN_DATA}`, which the hooks call, and copies that to the session's temp folder, which goes first on `PATH`. Nothing else in the plugin may read a path above its own folder.
 - In a session, the hooks and `asdlc` on `PATH` are the copy made when the session started. After editing `src/asdlc`, `uv run asdlc` runs the working tree, and a new session refreshes the copy.
-- `tests/` - mirrors the layers. Domain tests touch no files; `test_example.py` and `test_cli.py` run on real files and a real git repository.
+- `tests/` - mirrors the layers. Domain tests touch no files and no git. `tests/io/` runs each git and `gh` call on a real repository. `test_example.py`, `test_cli.py` and `test_task_start.py` run whole commands on real files and a real git repository.
 
 ## Conventions
 
 - Python 3.15, run through uv. click is the only runtime dependency.
 - A new decision goes in `domain` as a function that takes data and returns data. Reading goes in `io`, wording in `presentation`.
+- A command that changes something reads once, decides, then acts. `io` reads what it needs into one record of plain data, a function in `domain` turns the record into a refusal or into what to do, and `cli.py` does it. `asdlc task start` is the one to copy: `found` in `io/checkout.py`, `start` in `domain/build.py`.
+- A test is at the level of what it checks. A decision, which is every refusal and its reason, is a unit test on plain data in `tests/domain`. A test runs real git only when git's own behaviour is what it checks: a branch, a push, a merge, a worktree, a checkout put back after a failure. When a decision can only be reached by running a command, it is in the wrong layer: move it to `domain` first, then test it there.
 - A hook says why it denied something, and never fails silently.
 - A skill lands with its eval cases: one tagged with the skill's name and `acts`, one with its name and `stays-out`, and in each a grader that is a pattern and not a judge. `tests/test_evals.py` fails `just check` otherwise. Pilot a case with one run before the full three, and read what the run wrote before changing a grader. A case's `scaffold.sh` writes its documents by hand, and a test lints what each scaffold builds.
 - Fix the code, not the check. Never weaken a check or a test to make it pass.

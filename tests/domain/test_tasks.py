@@ -1,7 +1,16 @@
 import pytest
 
 from asdlc.domain.lint import library
-from asdlc.domain.tasks import Stage, State, done, intents, merged_branches, tasks
+from asdlc.domain.tasks import (
+    Pull,
+    Stage,
+    State,
+    done,
+    intents,
+    merged_branches,
+    stated,
+    tasks,
+)
 
 INTENT = "---\nkind: intent\nauthor: a\n---\n# Intent: claims status\n"
 SPEC = "---\nkind: spec\n---\n# Spec: claims status\n### R1: one\n### R2: two\n"
@@ -99,6 +108,25 @@ def test_a_link_does_not_change_a_state():
     links = {"task/claims/01-a": "https://example.invalid/pull/7"}
     assert tasks(documents(), links=links)[0].state is State.READY
     assert tasks(documents(), branches=branch, links=links)[0].state is State.CLAIMED
+
+
+def test_a_draft_claims_its_task_and_a_ready_pull_request_puts_it_in_review():
+    link = "https://example.invalid/pull/7"
+    draft = Pull("task/claims/01-a", 7, link, True)
+    ready = Pull("task/claims/01-a", 7, link, False)
+    nothing: frozenset[str] = frozenset()
+
+    def first(*facts):
+        task = stated(documents(), *facts)[0]
+        return task.state, task.pull_request
+
+    assert first(nothing, (), ()) == (State.READY, "")
+    assert first(frozenset({"task/claims/01-a"}), (), ()) == (State.CLAIMED, "")
+    assert first(nothing, (draft,), ()) == (State.CLAIMED, link)
+    assert first(nothing, (ready,), ()) == (State.IN_REVIEW, link)
+    merged = ("Merge pull request #7 from owner/task/claims/01-a",)
+    assert first(nothing, (), merged) == (State.DONE, "")
+    assert stated(documents(), nothing, (), merged)[1].state is State.READY
 
 
 def test_a_claimed_task_is_claimed_even_while_it_waits():

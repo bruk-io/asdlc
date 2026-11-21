@@ -2,6 +2,7 @@ import time
 
 import pytest
 
+from asdlc.domain.build import claimed
 from asdlc.domain.documents import Kind, parse
 from asdlc.io import files, git
 from tests.conftest import ACCEPTED, commit_files, second_clone
@@ -187,3 +188,184 @@ def test_documents_below_a_prefix_come_with_paths_from_that_prefix(remote):
     )
     assert git.document_texts_at(remote, "origin/main", "examples/demo/") == ()
     assert git.document_texts_at(remote, "no-such-ref") == ()
+
+
+def test_a_file_is_read_at_a_ref_and_is_none_when_the_ref_has_none(remote):
+    (remote / ".asdlc" / "checks").write_text("true\n")
+    assert git.file_at(remote, "origin/main", ".asdlc/checks") == "echo checked\n"
+    assert git.file_at(remote, "origin/main", ".asdlc/nothing") is None
+    assert git.file_at(remote, "origin/no-such-branch", ".asdlc/checks") is None
+
+
+def test_a_clean_checkout_has_nothing_uncommitted(remote):
+    assert git.uncommitted(remote) == ()
+
+
+def test_what_is_uncommitted_is_changed_staged_and_untracked_and_not_ignored(remote):
+    (remote / ".git" / "info" / "exclude").write_text("scratch/\n")
+    (remote / "scratch").mkdir()
+    (remote / "scratch" / "notes.txt").write_text("ignored\n")
+    (remote / "intent" / "claims" / "spec.md").write_text("changed\n")
+    (remote / "a new file.py").write_text("x = 1\n")
+    (remote / "staged.py").write_text("y = 2\n")
+    run_git(remote, "add", "staged.py")
+    run_git(remote, "mv", "intent/claims/plan.md", "intent/claims/moved.md")
+    run_git(remote, "rm", "-q", ".asdlc/checks")
+
+    assert sorted(git.uncommitted(remote)) == [
+        ".asdlc/checks",
+        "a new file.py",
+        "intent/claims/moved.md",
+        "intent/claims/spec.md",
+        "staged.py",
+    ]
+
+
+def test_a_position_is_the_branch_or_the_commit_and_the_checkout_goes_back_to_it(
+    remote,
+):
+    assert git.position(remote) == "main"
+    assert git.switch_new(remote, "task/claims/01-endpoint", "origin/main") is True
+    assert git.switch_back(remote, "main") is True
+    assert git.current_branch(remote) == "main"
+
+    commit = run_git(remote, "rev-parse", "HEAD").strip()
+    run_git(remote, "switch", "-q", "--detach", "main")
+    assert git.position(remote) == commit
+    run_git(remote, "switch", "-q", "task/claims/01-endpoint")
+    assert git.switch_back(remote, commit) is True
+    assert (git.current_branch(remote), git.position(remote)) == ("", commit)
+    assert git.switch_back(remote, "no-such-branch") is False
+
+
+def test_a_new_branch_takes_no_upstream_and_one_from_create_branch_takes_main(remote):
+    assert git.switch_new(remote, "task/claims/01-endpoint", "origin/main") is True
+    assert git.current_branch(remote) == "task/claims/01-endpoint"
+    assert git.setting(remote, "branch.task/claims/01-endpoint.merge") == ""
+    assert git.switch_new(remote, "task/claims/01-endpoint", "origin/main") is False
+
+    assert git.create_branch(remote, "spec/other", "origin/main") is True
+    assert git.setting(remote, "branch.spec/other.merge") == "refs/heads/main"
+
+
+def test_a_local_branch_is_deleted_merged_or_not(remote):
+    git.switch_new(remote, "task/claims/01-endpoint", "origin/main")
+    commit_files(remote, {"api/status.py": "x = 1\n"}, "not merged anywhere")
+    assert git.delete_branch(remote, "task/claims/01-endpoint") is False
+    git.switch(remote, "main")
+    assert git.delete_branch(remote, "task/claims/01-endpoint") is True
+    assert git.has_branch(remote, "refs/heads/task/claims/01-endpoint") is False
+    assert git.delete_branch(remote, "task/claims/01-endpoint") is False
+
+
+def test_each_worktrees_branch_is_listed_with_its_folder(remote):
+    tree = remote.parent / "tree"
+    loose = remote.parent / "loose"
+    run_git(remote, "worktree", "add", "-q", "-b", "worktree-one", str(tree), "main")
+    run_git(remote, "worktree", "add", "-q", "--detach", str(loose), "main")
+    assert git.checked_out(remote) == {"main": remote, "worktree-one": tree}
+    assert git.checked_out(tree) == git.checked_out(remote)
+
+
+def test_only_the_push_that_makes_the_branch_on_the_remote_claims_it(remote):
+    branch = "task/claims/01-endpoint"
+    other = second_clone(remote)
+    for clone in (remote, other):
+        git.switch_new(clone, branch, "origin/main")
+        commit_files(clone, {"who.txt": f"{clone.name}\n"}, "Start")
+
+    first = git.push_claim(remote, branch)
+    assert (first.ok, claimed(first.out, branch)) == (True, True)
+    assert first.out.splitlines()[1].startswith("*\t")
+    assert git.setting(remote, f"branch.{branch}.merge") == f"refs/heads/{branch}"
+
+    again = git.push_claim(remote, branch)
+    assert (again.ok, claimed(again.out, branch)) == (True, False)
+    assert again.out.splitlines()[1].startswith("=\t")
+
+    late = git.push_claim(other, branch)
+    assert (late.ok, claimed(late.out, branch)) == (False, False)
+    assert late.out.splitlines()[1].startswith("!\t")
+    assert "rejected" in late.err or "rejected" in late.out
+    kept = run_git(remote.parent / "origin.git", "rev-parse", branch)
+    assert kept == run_git(remote, "rev-parse", "HEAD")
+
+
+def test_a_claiming_push_leaves_a_branch_the_remote_already_has_even_one_behind(
+    remote,
+):
+    branch = "task/claims/01-endpoint"
+    origin = remote.parent / "origin.git"
+    run_git(second_clone(remote), "push", "-q", "origin", f"main:{branch}")
+    there = run_git(origin, "rev-parse", branch)
+    git.switch_new(remote, branch, "origin/main")
+    git.commit_empty(remote, "Start task claims/01-endpoint")
+
+    late = git.push_claim(remote, branch)
+
+    assert (late.ok, claimed(late.out, branch)) == (False, False)
+    assert run_git(origin, "rev-parse", branch) == there
+
+
+def test_a_push_to_a_remote_that_is_gone_says_so_and_claims_nothing(remote):
+    git.switch_new(remote, "task/claims/01-endpoint", "origin/main")
+    run_git(remote, "remote", "set-url", "origin", str(remote.parent / "gone.git"))
+    pushed = git.push_claim(remote, "task/claims/01-endpoint")
+    assert (pushed.ok, claimed(pushed.out, "task/claims/01-endpoint")) == (False, False)
+    assert "gone.git" in pushed.err
+
+
+def test_the_commits_of_a_range_come_oldest_first_with_their_files_and_no_merges(
+    remote,
+):
+    git.switch_new(remote, "task/claims/01-endpoint", "origin/main")
+    assert git.commits(remote, "origin/main..HEAD") == ()
+    git.commit_empty(remote, "Start task claims/01-endpoint")
+    commit_files(
+        remote, {"api/status.py": "x = 1\n", "api/caf\u00e9 one.py": ""}, "the endpoint"
+    )
+    run_git(remote, "switch", "-q", "main")
+    commit_files(remote, {"README.md": "claims\n"}, "on main")
+    run_git(remote, "switch", "-q", "task/claims/01-endpoint")
+    run_git(remote, "merge", "-q", "--no-ff", "-m", "Merge main", "main")
+
+    found = git.commits(remote, "origin/main..HEAD")
+    by_subject = {commit.subject: commit for commit in found}
+    assert {subject: commit.files for subject, commit in by_subject.items()} == {
+        "Start task claims/01-endpoint": (),
+        "the endpoint": ("api/caf\u00e9 one.py", "api/status.py"),
+        "on main": ("README.md",),
+    }
+    assert len(found) == 3
+    subjects = [commit.subject for commit in found]
+    assert subjects.index("Start task claims/01-endpoint") < subjects.index(
+        "the endpoint"
+    )
+    for commit in found:
+        assert run_git(remote, "log", "-1", "--format=%s", commit.id).strip() == (
+            commit.subject
+        )
+    assert git.commits(remote, "no-such-ref..HEAD") == ()
+
+
+def test_a_merge_that_conflicts_is_left_and_its_files_are_listed(remote):
+    git.switch_new(remote, "task/claims/01-endpoint", "origin/main")
+    commit_files(remote, {"api/status.py": "status = 'here'\n"}, "here")
+    run_git(remote, "switch", "-q", "main")
+    commit_files(remote, {"api/status.py": "status = 'there'\n"}, "there")
+    commit_files(remote, {"README.md": "claims\n"}, "no clash")
+    run_git(remote, "switch", "-q", "task/claims/01-endpoint")
+    assert (git.merging(remote), git.conflicts(remote)) == (False, ())
+
+    assert git.merge(remote, "main~1") is False
+    assert (git.merging(remote), git.conflicts(remote)) == (True, ("api/status.py",))
+
+    (remote / "api" / "status.py").write_text("status = 'both'\n")
+    run_git(remote, "add", "api/status.py")
+    assert (git.merging(remote), git.conflicts(remote)) == (True, ())
+    run_git(remote, "commit", "-q", "--no-edit")
+    assert git.merging(remote) is False
+
+    assert git.merge(remote, "main") is True
+    assert (remote / "README.md").is_file()
+    assert run_git(remote, "status", "--porcelain") == ""
