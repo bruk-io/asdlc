@@ -121,6 +121,45 @@ def _repository(options: Options) -> tuple[Path, str]:
     return found
 
 
+def _fetched(options: Options, must: bool) -> None:
+    """Fetch from the remote before a `task` command reads what is on it.
+
+    A repository with no remote is not fetched, and that is no failure. When the
+    fetch fails the command says so. With `must` it stops there, and without it
+    it carries on with what was last fetched.
+    """
+    root = git.repository(options.root)
+    if root is None or not git.has_remote(root):
+        return
+    if git.fetch(root):
+        _note(options, "fetched from the remote")
+        return
+    failed = "could not fetch from the remote"
+    if must:
+        raise _fail(failed, FAILED)
+    click.echo(text.warning(f"{failed}, so this is as of the last fetch"), err=True)
+
+
+def _remote_library(
+    options: Options,
+) -> tuple[tuple[Document, ...], tuple[Finding, ...]]:
+    """Give the documents the `task` commands read: those on the remote's main.
+
+    A repository with no remote has its local main read. A `--root` below the top
+    of its repository reads that folder's `intent/` on main. Where there is no
+    repository with a main, the files are read, as `_library` reads them.
+    """
+    found = _main(options)
+    if found is None:
+        return _library(options)
+    root, ref = found
+    below = files.inside(options.root, root)
+    prefix = "" if below in (None, ".") else f"{below}/"
+    documents, findings = library(git.document_texts_at(root, ref, prefix))
+    _note(options, f"read {len(documents)} documents under {prefix}intent at {ref}")
+    return documents, findings
+
+
 def _merged(options: Options) -> frozenset[str]:
     found = _main(options)
     if found is None:
@@ -404,8 +443,10 @@ def task_list(options: Options, intent: str | None) -> None:
     """List the tasks: id, state, size, step, title.
 
     The target is one intent's slug. Without it, every intent's tasks are listed.
+    The tasks are those on the remote's main, read after a fetch.
     """
-    documents, found = _library(options)
+    _fetched(options, must=False)
+    documents, found = _remote_library(options)
     _warn_of(found)
     rows = _tasks(options, documents)
     if intent is not None:
@@ -431,8 +472,12 @@ def task_list(options: Options, intent: str | None) -> None:
 @click.argument("id")
 @universal
 def task_show(options: Options, id: str) -> None:
-    """Show one task in full. The target is <slug>/<task>."""
-    documents, found = _library(options)
+    """Show one task in full. The target is <slug>/<task>.
+
+    The task is read from the remote's main, after a fetch.
+    """
+    _fetched(options, must=False)
+    documents, found = _remote_library(options)
     _warn_of(found)
     match = next((row for row in _tasks(options, documents) if row.id == id), None)
     if match is None:

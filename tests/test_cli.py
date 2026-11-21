@@ -9,7 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from asdlc.cli import cli
-from tests.conftest import git
+from tests.conftest import ACCEPTED, commit_files, git, second_clone, task_text
 
 
 def run(*args: object, input: str | None = None):
@@ -337,3 +337,114 @@ def test_intent_new_writes_nothing_when_git_cannot_tell_who_commits(
     assert done.exit_code == 1
     assert "user.name and user.email" in done.stderr
     assert not (repository / "intent" / "slow-claims" / "intent.md").exists()
+
+
+EXPORT = {"intent/claims/tasks/03-export/task.md": task_text(2, "R2", 3, "the export")}
+
+
+def task_ids(root) -> list[str]:
+    done = run("task", "list", "--root", root)
+    assert done.exit_code == 0, done.output
+    return [line.split("\t")[0] for line in done.stdout.splitlines()]
+
+
+def test_what_the_remote_fixture_holds_lints_clean(remote):
+    done = run("document", "check", "--root", remote)
+    assert (done.exit_code, done.stdout) == (0, "")
+    assert task_ids(remote) == ["claims/01-endpoint", "claims/02-panel"]
+
+
+def test_a_task_on_a_branch_that_is_not_merged_is_not_listed(remote):
+    git(remote, "switch", "-q", "-c", "tasks/claims")
+    commit_files(remote, EXPORT, "Tasks: claims")
+    git(remote, "push", "-q", "origin", "tasks/claims")
+    assert task_ids(remote) == ["claims/01-endpoint", "claims/02-panel"]
+    assert run("task", "show", "claims/03-export", "--root", remote).exit_code == 3
+
+
+def test_the_tasks_are_the_remotes_when_the_local_main_is_behind(remote):
+    other = second_clone(remote)
+    commit_files(other, EXPORT, "Tasks: claims")
+    git(other, "push", "-q", "origin", "main")
+
+    assert task_ids(remote)[-1] == "claims/03-export"
+    shown = run("task", "show", "claims/03-export", "--root", remote)
+    assert (shown.exit_code, "the export" in shown.stdout) == (0, True)
+    assert git(remote, "rev-list", "--count", "main..origin/main").strip() == "1"
+
+
+def test_a_branch_another_clone_pushed_reads_as_claimed_with_no_fetch_by_hand(remote):
+    git(second_clone(remote), "push", "-q", "origin", "main:task/claims/01-endpoint")
+    rows = json.loads(run("task", "list", "--json", "--root", remote).stdout)
+    assert {row["id"]: row["state"] for row in rows} == {
+        "claims/01-endpoint": "claimed",
+        "claims/02-panel": "ready",
+    }
+    shown = run("task", "show", "claims/01-endpoint", "--root", remote)
+    assert "state\tclaimed" in shown.stdout
+
+
+def test_a_fetch_that_fails_warns_and_the_tasks_are_as_last_fetched(remote):
+    git(remote, "remote", "set-url", "origin", str(remote.parent / "gone.git"))
+    listed = run("task", "list", "--root", remote)
+    assert listed.exit_code == 0
+    assert "Warning: could not fetch from the remote" in listed.stderr
+    assert listed.stdout.count("\n") == 2
+    shown = run("task", "show", "claims/02-panel", "--root", remote)
+    assert shown.exit_code == 0
+    assert "Warning: could not fetch from the remote" in shown.stderr
+
+
+def test_a_root_below_the_top_lists_the_tasks_that_folder_has_on_main(remote):
+    below = {
+        f"examples/demo/{path}": text
+        for path, text in (ACCEPTED | EXPORT).items()
+        if path.startswith("intent/")
+    }
+    commit_files(remote, below, "an example")
+    git(remote, "push", "-q", "origin", "main")
+    late = remote / "examples/demo/intent/claims/tasks/04-late/task.md"
+    late.parent.mkdir()
+    late.write_text(task_text(1, "R1", 1, "not committed"))
+
+    assert task_ids(remote / "examples" / "demo") == [
+        "claims/01-endpoint",
+        "claims/02-panel",
+        "claims/03-export",
+    ]
+    assert task_ids(remote) == ["claims/01-endpoint", "claims/02-panel"]
+
+
+def test_with_no_remote_the_tasks_are_those_on_the_local_main(repository):
+    commit_files(repository, ACCEPTED, "claims, accepted")
+    git(repository, "switch", "-q", "-c", "tasks/claims")
+    commit_files(repository, EXPORT, "Tasks: claims")
+    done = run("task", "list", "--root", repository)
+    assert (done.exit_code, done.stderr) == (0, "")
+    assert task_ids(repository) == ["claims/01-endpoint", "claims/02-panel"]
+
+
+def test_in_a_folder_that_is_no_repository_the_tasks_are_read_from_its_files(
+    tmp_path,
+):
+    for relative, text in (ACCEPTED | EXPORT).items():
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_text(text)
+    assert task_ids(tmp_path)[-1] == "claims/03-export"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ("intent", "list"),
+        ("intent", "show", "claims"),
+        ("requirement", "list"),
+        ("document", "check"),
+    ],
+)
+def test_only_the_task_commands_fetch(remote, command):
+    git(second_clone(remote), "push", "-q", "origin", "main:task/claims/01-endpoint")
+    assert run(*command, "--root", remote).exit_code == 0
+    assert git(remote, "branch", "-r", "--list", "origin/task/*").strip() == ""
+    run("task", "list", "--root", remote)
+    assert git(remote, "branch", "-r", "--list", "origin/task/*").strip() != ""

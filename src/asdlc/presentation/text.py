@@ -87,3 +87,7 @@ def intent_record(intent: Intent) -> str:
 
 def error(message: str) -> str:
     return f"Error: {message}"
+
+
+def warning(message: str) -> str:
+    return f"Warning: {message}"
