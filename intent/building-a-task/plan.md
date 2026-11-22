@@ -222,9 +222,15 @@ The same file, on the same fixtures, for what the command does with git:
 
 Needs step 2. It is a step of its own because `task start` with it would be more than one task, and nothing on the way to the eval cases calls it.
 
-**`src/asdlc/io/git.py`** gains `switch_from_remote(root, branch)`, which is `git switch -C <branch> origin/<branch>`. It makes the local branch at the remote's commit, or moves one that is there.
+**`src/asdlc/io/git.py`** gains `switch_from_remote(root, branch)`, which is `git switch --no-track -C <branch> origin/<branch>`, and then `git branch --set-upstream-to=origin/<branch> <branch>`, whose failure is no failure of the switch. It makes the local branch at the remote's commit, or moves one that is there.
+
+This was `git switch -C <branch> origin/<branch>` until the step was built, on 2026-11-22. That command records the upstream itself. Where git cannot write its configuration, as in a sandboxed session, it exits 1 part way: the branch is made, the checkout is still on the old branch, and the new one's files are left staged there. This was tried in a throwaway repository with `.git/config.lock` in the way, and with `--no-track` the switch works there.
+
+It also gains `lacks(root, branch, ref)`: whether a ref has a commit that a branch has not, from `git rev-list --count`. A merge commit counts, which `commits` leaves out.
 
 **`src/asdlc/domain/build.py`**: `refusal` gains a flag that says `--resume` was given, and with it R8's two reasons: a task whose branch is not on the remote, and a task that is `done`.
+
+As it was built, the resume has the shape the start has. `Found` gains three facts, which `read_start` reads: whether the remote's branch has a commit the local one lacks, whether a merge is in progress, and the files it has left in conflict. `resume(id, found, documents)` decides from the record and gives a `Resume`, which says what the list below does, or a `Refused`. A `Refused` carries the files in conflict when a merge is in progress, for the command to print.
 
 **`src/asdlc/cli.py`**: `task start` gains the switch `--resume`. With it, in the order the spec's Design gives:
 

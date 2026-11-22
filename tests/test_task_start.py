@@ -4,14 +4,17 @@ The command reads once, decides, then acts. What it decides is tested on plain
 data in `tests/domain/test_build.py`. The tests here are for the other two
 parts, where git's own behaviour is the thing checked: `read_start` reads each
 fact from the right place, and the command makes the branch, pushes, opens the
-draft, and puts the checkout back when a step fails. They run on a clone whose
-`origin` is a bare repository on disk, with a stand-in for `gh`, and reach no
-network.
+draft, and puts the checkout back when a step fails. With `--resume` it is the
+branch the checkout ends up on, the merge of the remote's branch, and a merge
+that is left in conflict. They run on a clone whose `origin` is a bare
+repository on disk, with a stand-in for `gh`, and reach no network.
 """
 
 import json
+import subprocess
 import sys
 
+import pytest
 from click.testing import CliRunner
 
 from asdlc.cli import cli, read_start
@@ -172,6 +175,9 @@ def test_with_no_remote_a_start_reads_that_there_is_nothing_there(repository):
         on="main",
         held={},
         left=None,
+        behind=False,
+        merging=False,
+        conflicts=(),
     )
     git(repository, "switch", "-q", "--detach", "main")
     assert read_start(repository, ENDPOINT).on == ""
@@ -450,3 +456,327 @@ def test_a_root_below_the_top_and_a_target_that_is_no_task_are_bad_usage(reposit
 
 def test_outside_a_repository_there_is_nothing_to_start(tmp_path):
     assert start(tmp_path).exit_code == 4
+
+
+def resume(root, id: str = ENDPOINT, *flags: str):
+    return start(root, id, "--resume", *flags)
+
+
+def asked(gh) -> list[str]:
+    """Give the subcommand of each call the stand-in took."""
+    return [call[1] for call in calls(gh)]
+
+
+def subjects(root) -> list[str]:
+    """Give the subjects of what the checkout has and the remote's main lacks."""
+    return git(root, "log", "--reverse", "--format=%s", "origin/main..HEAD").split(
+        "\n"
+    )[:-1]
+
+
+def parents(root) -> int:
+    return len(git(root, "log", "-1", "--format=%p").split())
+
+
+def started(remote, gh, work: dict[str, str] | None = None, pull: bool | None = True):
+    """Have another clone start the task, and give that clone.
+
+    The remote gets the task's branch with its start commit, and `work` in one
+    more commit when there is any. `pull` is whether its pull request is a
+    draft, or None for a task that has lost its pull request.
+    """
+    other = second_clone(remote)
+    git(other, "switch", "-q", "--no-track", "-c", BRANCH, "origin/main")
+    git(other, "commit", "-q", "--allow-empty", "-m", SUBJECT)
+    if work:
+        commit_files(other, work, "the endpoint")
+    git(other, "push", "-q", "origin", BRANCH)
+    if pull is not None:
+        write_pulls(gh, pull_row(BRANCH, 1, draft=pull))
+    return other
+
+
+def both_sides(remote, gh, mine: dict[str, str], theirs: dict[str, str], pushed=False):
+    """Start the task here, then put a commit here and one on the remote.
+
+    The one here is pushed only when `pushed` says so, and the one on the
+    remote is another clone's, made on top of what was pushed. The checkout is
+    left on main, and the task has a draft pull request. Give the other clone.
+    """
+    git(remote, "switch", "-q", "--no-track", "-c", BRANCH, "origin/main")
+    git(remote, "commit", "-q", "--allow-empty", "-m", SUBJECT)
+    git(remote, "push", "-q", "origin", BRANCH)
+    commit_files(remote, mine, "mine")
+    if pushed:
+        git(remote, "push", "-q", "origin", BRANCH)
+    git(remote, "switch", "-q", "main")
+    other = second_clone(remote)
+    git(other, "switch", "-q", BRANCH)
+    commit_files(other, theirs, "theirs")
+    git(other, "push", "-q", "origin", BRANCH)
+    write_pulls(gh, pull_row(BRANCH, 1, draft=True))
+    return other
+
+
+WORK = {"api/status.py": "status = 'ok'\n"}
+MINE = {"api/status.py": "status = 'mine'\n"}
+THEIRS = {"api/status.py": "status = 'theirs'\n"}
+
+
+def test_a_resume_in_a_clone_with_no_branch_for_the_task_makes_one_from_the_remotes(
+    remote, gh
+):
+    other = started(remote, gh, WORK)
+    main = commit(remote, "main")
+
+    done = resume(remote)
+
+    assert done.exit_code == 0, done.output
+    assert done.stdout == f"{BRANCH}\t{LINK}\n"
+    assert (on(remote), commit(remote)) == (BRANCH, commit(other))
+    assert git(remote, "status", "--porcelain") == ""
+    assert (remote / "api" / "status.py").read_text() == WORK["api/status.py"]
+    assert commit(remote, "main") == main
+    # It has a draft already, so none is opened and none is changed.
+    assert asked(gh) == ["list"]
+
+
+def test_a_branch_left_by_a_start_that_was_cut_short_is_replaced_by_the_remotes(
+    remote, gh
+):
+    git(remote, "switch", "-q", "--no-track", "-c", BRANCH, "origin/main")
+    git(
+        remote,
+        "-c",
+        "user.name=cut short",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        SUBJECT,
+    )
+    left = commit(remote)
+    git(remote, "switch", "-q", "main")
+    other = started(remote, gh, WORK)
+    assert left != commit(other, "HEAD~1")
+
+    done = resume(remote)
+
+    assert done.exit_code == 0, done.output
+    assert (on(remote), commit(remote)) == (BRANCH, commit(other))
+    assert subjects(remote) == [SUBJECT, "the endpoint"]
+    assert left not in git(remote, "rev-list", "HEAD").split()
+
+
+def test_a_resume_from_the_tasks_own_branch_leaves_the_checkout_there(remote, gh):
+    other = started(remote, gh, WORK)
+    here = commit(other)
+
+    done = resume(other, ENDPOINT, "--json")
+
+    assert done.exit_code == 0, done.output
+    assert json.loads(done.stdout) == {"branch": BRANCH, "pull_request": LINK}
+    assert (on(other), commit(other)) == (BRANCH, here)
+    assert git(other, "status", "--porcelain") == ""
+    assert asked(gh) == ["list"]
+
+
+def test_a_started_task_that_lost_its_pull_request_gets_a_draft_opened(remote, gh):
+    started(remote, gh, WORK, pull=None)
+
+    done = resume(remote)
+
+    assert done.exit_code == 0, done.output
+    assert done.stdout == f"{BRANCH}\t{LINK}\n"
+    assert held_pulls(gh) == [pull_row(BRANCH, 1, draft=True)]
+    (create,) = opened(gh)
+    wanted = dict(zip(create[3::2], create[4::2], strict=True))
+    assert create[2] == "--draft"
+    assert (wanted["--base"], wanted["--head"]) == ("main", BRANCH)
+    assert wanted["--title"] == "Task: the endpoint"
+
+
+def test_a_pull_request_that_was_ready_is_made_a_draft_again(remote, gh):
+    started(remote, gh, WORK, pull=False)
+    shown = json.loads(run("task", "show", ENDPOINT, "--json", "--root", remote).stdout)
+    assert shown["state"] == "in review"
+
+    done = resume(remote)
+
+    assert done.exit_code == 0, done.output
+    assert done.stdout == f"{BRANCH}\t{LINK}\n"
+    assert held_pulls(gh) == [pull_row(BRANCH, 1, draft=True)]
+    assert calls(gh)[-1] == ["pr", "ready", "1", "--undo"]
+    assert opened(gh) == []
+    shown = json.loads(run("task", "show", ENDPOINT, "--json", "--root", remote).stdout)
+    assert shown["state"] == "claimed"
+
+
+def test_a_local_branch_that_is_behind_the_remotes_is_brought_up(remote, gh):
+    other = both_sides(remote, gh, {"mine.py": "mine = 1\n"}, WORK, pushed=True)
+    behind = commit(remote, BRANCH)
+
+    done = resume(remote)
+
+    assert done.exit_code == 0, done.output
+    assert (on(remote), commit(remote)) == (BRANCH, commit(other))
+    assert commit(remote, "HEAD~1") == behind
+    assert parents(remote) == 1
+
+
+def test_with_a_commit_on_each_side_the_remotes_branch_is_merged_and_a_push_is_taken(
+    remote, gh
+):
+    other = both_sides(remote, gh, {"mine.py": "mine = 1\n"}, WORK)
+    mine = commit(remote, BRANCH)
+    git(remote, "fetch", "-q", "origin")
+    before = read_start(remote, ENDPOINT)
+    assert (before.behind, before.merging, before.conflicts) == (True, False, ())
+
+    done = resume(remote)
+
+    assert done.exit_code == 0, done.output
+    assert done.stdout == f"{BRANCH}\t{LINK}\n"
+    assert on(remote) == BRANCH
+    assert {commit(remote, "HEAD^1"), commit(remote, "HEAD^2")} == {mine, commit(other)}
+    assert (remote / "mine.py").is_file()
+    assert (remote / "api" / "status.py").is_file()
+    assert git(remote, "status", "--porcelain") == ""
+    assert read_start(remote, ENDPOINT).behind is False
+
+    git(remote, "push", "-q", "origin", BRANCH)
+    assert commit(origin(remote), BRANCH) == commit(remote)
+
+
+def test_a_merge_that_conflicts_is_left_with_its_files_printed_and_the_draft_made(
+    remote, gh
+):
+    both_sides(remote, gh, MINE, THEIRS)
+    write_pulls(gh, pull_row(BRANCH, 1, draft=False))
+    mine = commit(remote, BRANCH)
+
+    done = resume(remote)
+
+    assert done.exit_code == 1, done.output
+    assert done.stdout == "api/status.py\n"
+    assert "did not merge into the local branch cleanly" in done.stderr
+    assert "1 file(s) are in conflict" in done.stderr
+    # The merge is left as git left it, on the task's branch.
+    assert (on(remote), commit(remote)) == (BRANCH, mine)
+    assert commit(remote, "MERGE_HEAD") == commit(remote, f"origin/{BRANCH}")
+    # Both sides added the file, which git marks `AA`.
+    assert git(remote, "status", "--porcelain") == "AA api/status.py\n"
+    # The pull request was made a draft before the merge, so the task reads
+    # as claimed while the conflict is open.
+    assert held_pulls(gh) == [pull_row(BRANCH, 1, draft=True)]
+    found = read_start(remote, ENDPOINT)
+    assert (found.merging, found.conflicts) == (True, ("api/status.py",))
+
+
+def test_a_merge_in_progress_is_answered_until_it_is_committed(remote, gh):
+    both_sides(remote, gh, MINE, THEIRS)
+    git(remote, "fetch", "-q", "origin")
+    git(remote, "switch", "-q", BRANCH)
+    with pytest.raises(subprocess.CalledProcessError):
+        git(remote, "merge", "-q", "--no-edit", f"origin/{BRANCH}")
+    before = everything(remote, gh)
+
+    # In conflict: the files are printed, and it is not an uncommitted change.
+    done = resume(remote)
+    assert done.exit_code == 1, done.output
+    assert done.stdout == "api/status.py\n"
+    assert f"a merge is in progress on '{BRANCH}'" in done.stderr
+    assert "1 file(s) are in conflict" in done.stderr
+    assert "uncommitted" not in done.stderr
+    assert json.loads(resume(remote, ENDPOINT, "--json").stdout) == ["api/status.py"]
+    assert everything(remote, gh) == before
+    assert commit(remote, "MERGE_HEAD") == commit(remote, f"origin/{BRANCH}")
+
+    # Resolved and not committed: nothing is printed, and it says to commit.
+    (remote / "api" / "status.py").write_text("status = 'both'\n")
+    git(remote, "add", "api/status.py")
+    done = resume(remote)
+    assert done.exit_code == 1, done.output
+    assert done.stdout == ""
+    assert "no file is left in conflict. Commit the merge" in done.stderr
+    assert commit(remote, "MERGE_HEAD") == commit(remote, f"origin/{BRANCH}")
+
+    # Committed: the resume goes through, with nothing left to merge.
+    git(remote, "commit", "-q", "--no-edit")
+    merged = commit(remote)
+    done = resume(remote)
+    assert done.exit_code == 0, done.output
+    assert done.stdout == f"{BRANCH}\t{LINK}\n"
+    assert (on(remote), commit(remote), parents(remote)) == (BRANCH, merged, 2)
+
+
+def test_a_resume_that_is_refused_says_why_and_changes_nothing(remote, gh):
+    started(remote, gh, WORK)
+    git(remote, "fetch", "-q", "origin")
+    tree = remote.parent / "tree"
+    git(remote, "worktree", "add", "-q", str(tree), BRANCH)
+    before = everything(remote, gh), everything(tree, gh)
+
+    failed(
+        resume(remote),
+        f"cannot resume {ENDPOINT}",
+        f"checked out in another worktree: {tree}",
+    )
+    failed(resume(remote, PANEL), f"cannot resume {PANEL}: it is not started")
+
+    assert (everything(remote, gh), everything(tree, gh)) == before
+    assert asked(gh) == ["list", "list"]
+
+
+@pytest.mark.parametrize(
+    ("fails", "pull", "words"),
+    [
+        ("create", None, ["could not be opened", f"{ENDPOINT} still has none"]),
+        ("ready", False, ["could not be made a draft again", "still in review"]),
+    ],
+)
+def test_when_the_pull_request_cannot_be_made_a_draft_the_checkout_is_put_back(
+    remote, gh, fails, pull, words
+):
+    started(remote, gh, WORK, pull=pull)
+    gh.fail.write_text(f"{fails}\n")
+    git(remote, "switch", "-q", "--detach", "main")
+    before = everything(remote, gh)
+
+    failed(resume(remote), f"told to fail on {fails}", *words)
+
+    # Back on the commit it was on, and the branch this run made is gone. The
+    # remote's branch is another start's, and is left.
+    assert everything(remote, gh) == before
+    assert on(remote) == ""
+    assert commit(origin(remote), BRANCH) != commit(remote)
+
+
+def test_a_resume_that_fails_keeps_a_local_branch_it_did_not_make(remote, gh):
+    both_sides(remote, gh, {"mine.py": "mine = 1\n"}, WORK)
+    write_pulls(gh)
+    gh.fail.write_text("create\n")
+    before = everything(remote, gh)
+
+    failed(resume(remote), "could not be opened")
+
+    assert everything(remote, gh) == before
+    assert (on(remote), BRANCH in branches(remote)) == ("main", True)
+
+
+def test_when_git_will_not_make_the_merge_the_checkout_is_put_back(
+    remote, gh, monkeypatch
+):
+    both_sides(remote, gh, {"mine.py": "mine = 1\n"}, WORK)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    git(remote, "config", "--unset", "user.name")
+    git(remote, "config", "--unset", "user.email")
+    git(remote, "config", "user.useConfigOnly", "true")
+    before = everything(remote, gh)
+
+    failed(resume(remote), "git would not merge", "user.name and user.email")
+
+    # No merge is left to finish, so this is a failure like any other.
+    assert everything(remote, gh) == before
+    assert on(remote) == "main"
