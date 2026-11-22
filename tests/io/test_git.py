@@ -416,3 +416,89 @@ def test_a_merge_that_conflicts_is_left_and_its_files_are_listed(remote):
     assert git.merge(remote, "main") is True
     assert (remote / "README.md").is_file()
     assert run_git(remote, "status", "--porcelain") == ""
+
+
+def test_a_branch_is_put_at_the_remotes_commit_whether_it_is_made_or_moved(remote):
+    task = "task/claims/01-endpoint"
+    other = second_clone(remote)
+    git.switch_new(other, task, "origin/main")
+    commit_files(other, {"api/status.py": "status = 'ok'\n"}, "the endpoint")
+    run_git(other, "push", "-q", "origin", task)
+    git.fetch(remote)
+    theirs = run_git(other, "rev-parse", "HEAD")
+
+    # The clone has no such branch: it is made, with the remote's as its upstream.
+    assert git.switch_from_remote(remote, task) is True
+    assert git.current_branch(remote) == task
+    assert run_git(remote, "rev-parse", "HEAD") == theirs
+    assert run_git(remote, "status", "--porcelain") == ""
+    upstream = run_git(remote, "rev-parse", "--abbrev-ref", f"{task}@{{upstream}}")
+    assert upstream.strip() == f"origin/{task}"
+
+    # One that is there, somewhere else, is moved: from another branch, and
+    # from the branch itself.
+    run_git(remote, "switch", "-q", "main")
+    run_git(remote, "branch", "-q", "-f", task, "main")
+    assert git.switch_from_remote(remote, task) is True
+    assert run_git(remote, "rev-parse", "HEAD") == theirs
+    run_git(remote, "reset", "-q", "--hard", "main")
+    assert git.switch_from_remote(remote, task) is True
+    assert (git.current_branch(remote), run_git(remote, "rev-parse", "HEAD")) == (
+        task,
+        theirs,
+    )
+
+    # The remote has no branch of that name: nothing is made, and nothing moves.
+    assert git.switch_from_remote(remote, "task/claims/02-panel") is False
+    assert git.current_branch(remote) == task
+    assert git.has_branch(remote, "refs/heads/task/claims/02-panel") is False
+
+
+def test_a_branch_is_put_at_the_remotes_commit_where_no_upstream_can_be_recorded(
+    remote,
+):
+    task = "task/claims/01-endpoint"
+    other = second_clone(remote)
+    git.switch_new(other, task, "origin/main")
+    commit_files(other, {"api/status.py": "status = 'ok'\n"}, "the endpoint")
+    run_git(other, "push", "-q", "origin", task)
+    git.fetch(remote)
+    # Git writes its configuration through this file, and cannot while it is
+    # there. A sandboxed session cannot write the configuration either.
+    lock = remote / ".git" / "config.lock"
+    lock.write_text("")
+
+    assert git.switch_from_remote(remote, task) is True
+
+    lock.unlink()
+    assert git.current_branch(remote) == task
+    assert run_git(remote, "rev-parse", "HEAD") == run_git(other, "rev-parse", "HEAD")
+    assert run_git(remote, "status", "--porcelain") == ""
+    assert git.setting(remote, f"branch.{task}.remote") == ""
+
+
+def test_a_branch_lacks_what_only_the_other_has_and_a_merge_commit_counts(remote):
+    task = "task/claims/01-endpoint"
+    git.switch_new(remote, task, "origin/main")
+    assert git.lacks(remote, task, "origin/main") is False
+    assert git.lacks(remote, "origin/main", task) is False
+
+    commit_files(remote, {"api/status.py": "status = 'ok'\n"}, "the endpoint")
+    assert git.lacks(remote, "origin/main", task) is True
+    assert git.lacks(remote, task, "origin/main") is False
+
+    # A ref that is not there has nothing, and nothing is lacking in it.
+    assert git.lacks(remote, task, "origin/task/claims/none") is False
+    assert git.lacks(remote, "refs/heads/none", "origin/main") is False
+
+    # Two merges of the same two commits: each lacks only the other's merge
+    # commit, which `commits` leaves out.
+    run_git(remote, "switch", "-q", "main")
+    commit_files(remote, {"README.md": "claims\n"}, "main moves on")
+    run_git(remote, "branch", "-q", "theirs", task)
+    run_git(remote, "switch", "-q", task)
+    run_git(remote, "merge", "-q", "--no-ff", "-m", "merge here", "main")
+    run_git(remote, "switch", "-q", "theirs")
+    run_git(remote, "merge", "-q", "--no-ff", "-m", "merge there", "main")
+    assert git.commits(remote, f"{task}..theirs") == ()
+    assert git.lacks(remote, task, "theirs") is True

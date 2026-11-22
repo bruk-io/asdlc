@@ -288,6 +288,38 @@ def switch_new(root: Path, branch: str, ref: str) -> bool:
     return made is not None
 
 
+def switch_from_remote(root: Path, branch: str) -> bool:
+    """Put a local branch at the remote's commit for it, and switch to it.
+
+    It makes the branch when there is none and moves one that is there, as
+    `git switch -C <branch> origin/<branch>` does. False when git refuses.
+
+    That command also records the remote's branch as the upstream, and where
+    git cannot write its configuration, as in a sandboxed session, it stops
+    part way: the branch is made, the checkout is still on the old one, and the
+    new one's files are left staged there. So the switch is made with
+    `--no-track`, and the upstream is recorded afterwards where it can be. It
+    is for a person's own `git push` later, and nothing here reads it.
+    """
+    remote = f"origin/{branch}"
+    made = _git(
+        root, "switch", "--quiet", "--no-track", "--force-create", branch, remote
+    )
+    if made is None:
+        return False
+    _git(root, "branch", "--quiet", f"--set-upstream-to={remote}", branch)
+    return True
+
+
+def lacks(root: Path, branch: str, ref: str) -> bool:
+    """Say whether `ref` has a commit that `branch` has not.
+
+    False when either of them is not there.
+    """
+    counted = _git(root, "rev-list", "--count", f"{branch}..{ref}")
+    return bool(counted) and int(counted) > 0
+
+
 def delete_branch(root: Path, branch: str) -> bool:
     """Delete a local branch, merged or not; False when git refuses."""
     return _git(root, "branch", "--quiet", "-D", branch) is not None

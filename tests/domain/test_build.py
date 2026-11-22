@@ -6,6 +6,7 @@ from asdlc.domain.build import (
     Commit,
     Found,
     Refused,
+    Resume,
     Start,
     Stop,
     answer,
@@ -15,8 +16,10 @@ from asdlc.domain.build import (
     leftover,
     lost_claim,
     refusal,
+    resume,
     start,
     start_subject,
+    unmerged,
     unopened,
 )
 from asdlc.domain.lint import library
@@ -281,6 +284,9 @@ CLEAR = Found(
     on="main",
     held={},
     left=None,
+    behind=False,
+    merging=False,
+    conflicts=(),
 )
 
 
@@ -448,3 +454,199 @@ def test_a_local_branch_with_work_on_it_is_not_used_and_is_named(left, count):
 
 def test_a_local_branch_does_not_make_its_task_read_as_claimed():
     assert isinstance(decide(left=(), on=BRANCH), Start)
+
+
+def test_a_merge_in_progress_on_another_branch_does_not_change_what_a_start_does():
+    assert decide(merging=True, conflicts=("api/status.py",)) == decide()
+
+
+# A resume with nothing in its way: the task's branch is on the remote with a
+# draft pull request, and this clone has no branch for it.
+DRAFT = Pull(BRANCH, 7, LINK, True)
+STARTED = replace(CLEAR, branches=frozenset({"main", BRANCH}), pulls=(DRAFT,))
+
+
+def pick_up(id: str = "claims/01-endpoint", **changes: object) -> Resume | Refused:
+    return resume(id, replace(STARTED, **changes), DOCUMENTS)
+
+
+def test_a_started_task_with_no_local_branch_gets_one_at_the_remotes_commit():
+    decided = pick_up()
+    assert isinstance(decided, Resume)
+    assert (decided.task.id, decided.task.branch) == ("claims/01-endpoint", BRANCH)
+    assert (decided.reuse, decided.replace, decided.merge) == (False, True, False)
+    assert decided.pull == DRAFT
+
+
+@pytest.mark.parametrize("left", [(), (START,)])
+def test_a_branch_a_start_left_is_replaced_by_the_remotes_and_nothing_is_merged(left):
+    decided = pick_up(left=left, behind=True)
+    assert isinstance(decided, Resume)
+    assert (decided.reuse, decided.replace, decided.merge) == (True, True, False)
+
+
+@pytest.mark.parametrize("behind", [True, False])
+def test_a_local_branch_with_work_is_kept_and_merged_into_when_the_remote_has_more(
+    behind,
+):
+    decided = pick_up(left=(START, WORK), behind=behind)
+    assert isinstance(decided, Resume)
+    assert (decided.reuse, decided.replace, decided.merge) == (True, False, behind)
+
+
+def test_a_resume_is_told_which_pull_request_is_the_tasks_or_that_it_has_none():
+    other = Pull("task/claims/02-panel", 8, "https://example.invalid/pull/8", False)
+    ready = Pull(BRANCH, 7, LINK, False)
+
+    lost = pick_up(pulls=(other,))
+    assert isinstance(lost, Resume)
+    assert lost.pull is None
+
+    in_review = pick_up(pulls=(other, ready))
+    assert isinstance(in_review, Resume)
+    assert in_review.pull == ready
+
+
+def test_a_resume_from_the_tasks_own_branch_is_not_refused_for_being_on_it():
+    assert isinstance(pick_up(on=BRANCH, left=(START, WORK)), Resume)
+
+
+@pytest.mark.parametrize(
+    ("changes", "words"),
+    [
+        ({"remote": False}, ["no remote named 'origin'"]),
+        ({"pulls": None}, ["pull requests could not be listed", "gh"]),
+        ({"checks": None}, ["has no checks", ".asdlc/checks"]),
+        (
+            {"uncommitted": ("notes.txt", "api/status.py")},
+            ["uncommitted changes: notes.txt, api/status.py"],
+        ),
+    ],
+)
+def test_a_resume_refuses_what_a_start_could_not_finish_with(changes, words):
+    refused(pick_up(**changes), *words)
+    refused(pick_up("claims/09-nothing", cut=False, **changes), *words)
+
+
+def test_a_resume_with_no_main_on_the_remote_has_no_main_to_read():
+    refused(pick_up(main=False), "the remote has no main", stop=Stop.NO_MAIN)
+
+
+def test_a_resume_of_a_target_found_nowhere_matches_nothing():
+    refused(
+        pick_up("claims/09-nothing", cut=False),
+        "no task 'claims/09-nothing'",
+        stop=Stop.NO_TASK,
+    )
+
+
+@pytest.mark.parametrize(
+    ("id", "changes", "words"),
+    [
+        (
+            "claims/01-endpoint",
+            {"branches": frozenset({"main"}), "pulls": ()},
+            [
+                f"it is not started: its branch '{BRANCH}' is not on the remote",
+                "Start it: asdlc task start claims/01-endpoint",
+            ],
+        ),
+        (
+            "claims/03-export",
+            {},
+            ["it is not started: its branch 'task/claims/03-export' is not on"],
+        ),
+        ("claims/01-endpoint", {"merges": (MERGED,)}, ["it is done"]),
+        (
+            "claims/09-late",
+            {"cut": True},
+            ["it is not on main yet. It waits for the merge of 'tasks/claims'"],
+        ),
+        (
+            "claims/02-panel",
+            {"on": BRANCH, "branches": frozenset({"main", BRANCH, PANEL.branch})},
+            [f"this checkout is on '{BRANCH}'", "claims/01-endpoint is being built"],
+        ),
+        (
+            "claims/01-endpoint",
+            {"held": {BRANCH: "/work/trees/one"}, "left": (START, WORK)},
+            ["checked out in another worktree: /work/trees/one"],
+        ),
+    ],
+)
+def test_what_a_resume_refuses_and_the_reason_it_gives(id, changes, words):
+    refused(pick_up(id, **changes), f"cannot resume {id}: ", *words)
+
+
+def test_a_pull_request_for_a_branch_the_remote_has_not_got_is_no_start_to_resume():
+    # A pull request from a fork names the fork's branch.
+    decided = pick_up(branches=frozenset({"main"}))
+    refused(decided, "cannot resume claims/01-endpoint: it is not started")
+
+
+@pytest.mark.parametrize("state", [State.READY, State.WAITING])
+def test_asked_about_a_resume_a_task_that_is_not_started_is_refused(state):
+    there = replace(ENDPOINT, state=state)
+    assert refusal(ENDPOINT.id, (there,), resume=True) == (
+        f"it is not started: its branch '{BRANCH}' is not on the remote. "
+        "Start it: asdlc task start claims/01-endpoint"
+    )
+
+
+@pytest.mark.parametrize("state", [State.CLAIMED, State.IN_REVIEW])
+def test_asked_about_a_resume_a_started_task_is_not_refused(state):
+    there = replace(ENDPOINT, state=state, pull_request=LINK)
+    assert refusal(ENDPOINT.id, (there,), resume=True) is None
+    assert refusal(ENDPOINT.id, (replace(there, pull_request=""),), resume=True) is None
+
+
+def test_asked_about_a_resume_a_task_that_is_done_is_refused():
+    there = replace(ENDPOINT, state=State.DONE)
+    assert refusal(ENDPOINT.id, (there,), resume=True) == (
+        "it is done: its branch was merged"
+    )
+
+
+def test_a_merge_in_progress_on_the_tasks_branch_is_answered_with_its_conflicts():
+    files = ("api/status.py", "notes.txt")
+    decided = pick_up(on=BRANCH, merging=True, conflicts=files, uncommitted=files)
+    assert decided == Refused(
+        f"a merge is in progress on '{BRANCH}', and 2 file(s) are in conflict. "
+        "Resolve them, commit the merge, then run this again",
+        files=files,
+    )
+
+
+def test_a_merge_with_no_file_left_in_conflict_is_to_be_committed():
+    staged = ("api/status.py",)
+    decided = pick_up(on=BRANCH, merging=True, conflicts=(), uncommitted=staged)
+    assert decided == Refused(
+        f"a merge is in progress on '{BRANCH}', and no file is left in conflict. "
+        "Commit the merge, then run this again"
+    )
+    nothing_staged = pick_up(on=BRANCH, merging=True, conflicts=(), uncommitted=())
+    assert nothing_staged == decided
+
+
+def test_a_merge_in_progress_on_another_branch_is_an_uncommitted_change():
+    files = ("api/status.py",)
+    decided = pick_up(on="main", merging=True, conflicts=files, uncommitted=files)
+    refused(decided, "uncommitted changes: api/status.py")
+    assert decided.files == ()
+
+
+def test_what_a_resume_could_not_finish_with_comes_before_a_merge_in_progress():
+    decided = pick_up(on=BRANCH, merging=True, conflicts=("a.py",), checks=None)
+    refused(decided, "has no checks")
+    assert decided.files == ()
+
+
+def test_a_merge_the_command_made_that_conflicts_says_where_it_came_from():
+    reason = unmerged(BRANCH, ("api/status.py",), found=False)
+    assert reason == (
+        f"the remote's '{BRANCH}' did not merge into the local branch cleanly, "
+        "and 1 file(s) are in conflict. Resolve them, commit the merge, then "
+        "run this again"
+    )
+    none_left = unmerged(BRANCH, (), found=False)
+    assert "and no file is left in conflict. Commit the merge" in none_left

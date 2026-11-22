@@ -296,7 +296,7 @@ def _top(options: Options) -> Path:
 
 
 def read_start(root: Path, id: str) -> build.Found:
-    """Read what a start of the task `<slug>/<task>` decides from, once.
+    """Read what a start or a resume of the task `<slug>/<task>` decides from, once.
 
     `root` is the top of the checkout. The remote is read as it was last
     fetched, so the caller fetches first. Each fact is one call into `io`, and
@@ -310,6 +310,8 @@ def read_start(root: Path, id: str) -> build.Found:
     left = (
         git.commits(root, f"{main}..{branch}") if git.has_branch(root, branch) else None
     )
+    theirs = f"refs/remotes/origin/{branch_of(id)}"
+    merging = git.merging(root)
     return build.Found(
         remote=git.has_remote(root),
         main=git.has_branch(root, main),
@@ -323,6 +325,9 @@ def read_start(root: Path, id: str) -> build.Found:
         on=git.current_branch(root),
         held=git.held_elsewhere(root),
         left=None if left is None else tuple(build.Commit(*row) for row in left),
+        behind=left is not None and git.lacks(root, branch, theirs),
+        merging=merging,
+        conflicts=git.conflicts(root) if merging else (),
     )
 
 
@@ -377,21 +382,98 @@ def _carry_out(root: Path, start: build.Start) -> str:
     return opened.out
 
 
-def _put_back(root: Path, position: str, start: build.Start) -> None:
-    """Undo a start that failed after it moved the checkout.
+def _as_draft(root: Path, resume: build.Resume) -> str:
+    """Leave a resumed task with a draft pull request, and give its link.
 
-    The checkout goes back where it was, and the local branch goes unless it
-    was there before this run.
+    One is opened when the branch has none, and one that was ready is made a
+    draft again. When that fails this raises.
     """
-    branch = start.task.branch
+    task, theirs = resume.task, resume.pull
+    if theirs is None:
+        opened = github.open_draft(
+            root, task.branch, pull.title(task), pull.description(task)
+        )
+        if not opened.ok:
+            if opened.err:
+                click.echo(opened.err, err=True)
+            raise _fail(
+                f"the pull request for '{task.branch}' could not be opened, so "
+                f"{task.id} still has none",
+                FAILED,
+            )
+        return opened.out
+    if not theirs.draft:
+        undone = github.set_ready(root, theirs.number, ready=False)
+        if not undone.ok:
+            if undone.err:
+                click.echo(undone.err, err=True)
+            raise _fail(
+                f"the pull request {theirs.link} could not be made a draft again, "
+                f"so {task.id} is still in review",
+                FAILED,
+            )
+    return theirs.link
+
+
+def _carry_on(root: Path, resume: build.Resume) -> tuple[str, bool]:
+    """Do what a resume decided: the switch, the pull request, then the merge.
+
+    Give the pull request's link, and whether the branch is left with no merge
+    to finish. When the switch or the pull request fails, or git will not make
+    the merge at all, this raises, and the caller puts the checkout back. The
+    merge is last, so a task whose merge is left in conflict has its draft by
+    then and reads as claimed. A merge left in conflict is not a failure here:
+    the caller says what is in conflict, and leaves the checkout as git left it.
+    """
+    task = resume.task
+    if resume.replace:
+        moved = git.switch_from_remote(root, task.branch)
+    else:
+        moved = git.switch(root, task.branch)
+    if not moved:
+        raise _fail(f"git would not switch to '{task.branch}'", FAILED)
+    link = _as_draft(root, resume)
+    if not resume.merge or git.merge(root, f"origin/{task.branch}"):
+        return link, True
+    if not git.merging(root):
+        raise _fail(
+            f"git would not merge the remote's '{task.branch}' into the local "
+            "branch. A merge makes a commit, so git has to know who is "
+            "committing: set user.name and user.email",
+            FAILED,
+        )
+    return link, False
+
+
+def _put_back(root: Path, position: str, branch: str, made: bool) -> None:
+    """Undo a start or a resume that failed after it moved the checkout.
+
+    The checkout goes back where it was. The local branch goes when this run
+    made it, and stays when it was there before.
+    """
     if position == branch:
         return
     if not git.switch_back(root, position):
         click.echo(
             text.warning(f"could not put the checkout back on '{position}'"), err=True
         )
-    elif not start.reuse:
+    elif made:
         git.delete_branch(root, branch)
+
+
+def _conflicts(options: Options, paths: tuple[str, ...]) -> None:
+    """Print the files a merge has left in conflict, one to a line."""
+    if paths:
+        _emit(
+            output.listing(
+                paths,
+                line=str,
+                identifier=str,
+                document=str,
+                as_json=options.json,
+                quiet=options.quiet,
+            )
+        )
 
 
 @click.group(context_settings=_SETTINGS)
@@ -631,8 +713,9 @@ def task_show(options: Options, id: str) -> None:
 
 @task.command("start", context_settings=_SETTINGS)
 @click.argument("id")
+@click.option("--resume", is_flag=True, help="Pick up a task that is started already.")
 @universal
-def task_start(options: Options, id: str) -> None:
+def task_start(options: Options, id: str, resume: bool) -> None:
     """Start a task. Prints its branch and the link of its pull request.
 
     The target is <slug>/<task>. The checkout the command is run in moves to
@@ -642,6 +725,14 @@ def task_start(options: Options, id: str) -> None:
     Only a task that reads as ready on the remote is started, in a checkout
     with nothing uncommitted. When the start fails part way, the checkout is
     put back where it was.
+
+    With --resume the task is one that is started already, and the checkout
+    moves to its branch as the remote has it. A draft pull request is opened
+    when the branch has none, and one that was ready is made a draft again.
+    A local branch with work on it is kept, and the remote's branch is merged
+    into it. When that merge conflicts it is left for you to finish: the files
+    in conflict are printed and the command exits 1. Resolve them, commit the
+    merge, and run it again.
     """
     _, name = _split(id)
     if name is None:
@@ -652,16 +743,25 @@ def task_start(options: Options, id: str) -> None:
     documents, findings = library(found.texts)
     _note(options, f"read {len(documents)} documents at {git.REMOTE_MAIN}")
     _warn_of(findings)
-    decided = build.start(id, found, documents)
+    decide = build.resume if resume else build.start
+    decided = decide(id, found, documents)
     if isinstance(decided, build.Refused):
+        _conflicts(options, decided.files)
         raise _fail(decided.reason, _STOPS[decided.stop])
     position = git.position(root)
-    try:
-        link = _carry_out(root, decided)
-    except BaseException:
-        _put_back(root, position, decided)
-        raise
     branch = decided.task.branch
+    try:
+        if isinstance(decided, build.Start):
+            link, merged = _carry_out(root, decided), True
+        else:
+            link, merged = _carry_on(root, decided)
+    except BaseException:
+        _put_back(root, position, branch, made=not decided.reuse)
+        raise
+    if not merged:
+        left = git.conflicts(root)
+        _conflicts(options, left)
+        raise _fail(build.unmerged(branch, left, found=False), FAILED)
     _emit(
         output.single(
             text=f"{branch}\t{link}",

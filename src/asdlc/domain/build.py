@@ -2,7 +2,8 @@
 
 Nothing here touches git or GitHub. The facts are handed over as plain data,
 once, in a `Found`. The functions here decide from it, and whoever called them
-does what they answer.
+does what they answer. A start and a resume read the same facts, and each has
+one function that decides: `start` and `resume`.
 """
 
 from collections.abc import Mapping, Sequence
@@ -26,7 +27,7 @@ class Commit:
 
 @dataclass(frozen=True)
 class Found:
-    """What a start reads before it decides, as plain data.
+    """What a start or a resume reads before it decides, as plain data.
 
     It is read once, after the fetch. "The remote" is `origin`, as it was last
     fetched.
@@ -46,6 +47,10 @@ class Found:
     # A local branch of the task's name: the commits it has and the remote's
     # main lacks. None when there is no such branch.
     left: tuple[Commit, ...] | None
+    # What a resume decides from, and a start does not.
+    behind: bool  # the remote's branch for the task has a commit the local one lacks
+    merging: bool  # a merge is in progress in the checkout
+    conflicts: tuple[str, ...]  # the files that merge has left in conflict
 
 
 class Stop(StrEnum):
@@ -58,10 +63,15 @@ class Stop(StrEnum):
 
 @dataclass(frozen=True)
 class Refused:
-    """A start that is not made, and the reason to give."""
+    """A start or a resume that is not made, and the reason to give.
+
+    `files` are the files a merge in progress has left in conflict. The command
+    prints them, because resolving them is what comes next.
+    """
 
     reason: str
     stop: Stop = Stop.REFUSED
+    files: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -71,6 +81,17 @@ class Start:
     task: Task
     reuse: bool  # switch to the branch a start that was cut short left
     started: bool  # that branch has its start commit already
+
+
+@dataclass(frozen=True)
+class Resume:
+    """What a resume does, once nothing stands in its way."""
+
+    task: Task
+    reuse: bool  # the clone has a local branch for the task; False: this run makes it
+    replace: bool  # put the local branch at the remote's commit, and merge nothing
+    pull: Pull | None  # the task's open pull request; None: a draft is opened
+    merge: bool  # merge the remote's branch into the local one
 
 
 def start_subject(id: str) -> str:
@@ -161,6 +182,35 @@ def has_start(commits: Sequence[Commit], id: str) -> bool:
     return first is not None and first.subject == start_subject(id) and not first.files
 
 
+def unmerged(branch: str, files: Sequence[str], *, found: bool) -> str:
+    """Say what is to be done about a merge on a task's branch that is not committed.
+
+    `files` are those still in conflict. `found` says the merge was in progress
+    when the command was run, and is not one the command has just made.
+    """
+    what = (
+        f"a merge is in progress on '{branch}'"
+        if found
+        else f"the remote's '{branch}' did not merge into the local branch cleanly"
+    )
+    if not files:
+        return (
+            f"{what}, and no file is left in conflict. Commit the merge, then "
+            "run this again"
+        )
+    return (
+        f"{what}, and {len(files)} file(s) are in conflict. Resolve them, "
+        "commit the merge, then run this again"
+    )
+
+
+def _not_started(id: str) -> str:
+    return (
+        f"it is not started: its branch '{branch_of(id)}' is not on the remote. "
+        f"Start it: asdlc task start {id}"
+    )
+
+
 def _held_up(task: Task, known: Sequence[Task]) -> str:
     states = {other.id: other.state for other in known}
     waited = [id for id in task.depends if states.get(id) is not State.DONE]
@@ -174,6 +224,7 @@ def refusal(
     *,
     on: str = "",
     held: Mapping[str, str] | None = None,
+    resume: bool = False,
 ) -> str | None:
     """Say why a task cannot be started; None when it can.
 
@@ -183,7 +234,12 @@ def refusal(
     branch the checkout is on. `held` gives the folder of the worktree for each
     branch another worktree of the clone has checked out.
 
-    The reason reads after "cannot start <id>: ".
+    With `resume` the question is whether a started task can be picked up. What
+    the checkout and the worktrees refuse is the same. A task that is claimed
+    or in review can be, one whose branch is not on the remote was never
+    started, and one that is done has nothing left to pick up.
+
+    The reason reads after "cannot start <id>: ", or "cannot resume <id>: ".
     """
     branch = branch_of(id)
     here = next((task for task in known if task.branch == on and task.id != id), None)
@@ -200,6 +256,11 @@ def refusal(
     if task is None:
         slug = id.split("/")[0]
         return f"it is not on main yet. It waits for the merge of 'tasks/{slug}'"
+    if resume:
+        if task.state is State.DONE:
+            return "it is done: its branch was merged"
+        started = task.state in (State.CLAIMED, State.IN_REVIEW)
+        return None if started else _not_started(id)
     if task.state is State.WAITING:
         return _held_up(task, known)
     if task.state in (State.CLAIMED, State.IN_REVIEW):
@@ -215,7 +276,10 @@ def refusal(
 
 
 def _cannot_finish(found: Found) -> Refused | None:
-    """Give the reason a start can tell beforehand that it could not finish."""
+    """Give the reason a start can tell beforehand that it could not finish.
+
+    An uncommitted change is one more such reason, and `_dirty` gives it.
+    """
     if not found.remote:
         return Refused(
             "this repository has no remote named 'origin', so a task's branch has "
@@ -233,12 +297,26 @@ def _cannot_finish(found: Found) -> Refused | None:
             f"the remote's main has no checks: {CHECKS} holds no command line "
             "there. Put the command lines in it, one to a line, and merge that first"
         )
-    if found.uncommitted:
-        return Refused(
-            f"this checkout has uncommitted changes: {', '.join(found.uncommitted)}. "
-            "Commit them or remove them first"
-        )
     return None
+
+
+def _dirty(found: Found) -> Refused | None:
+    """Give the refusal of a checkout with a change that is not committed."""
+    if not found.uncommitted:
+        return None
+    return Refused(
+        f"this checkout has uncommitted changes: {', '.join(found.uncommitted)}. "
+        "Commit them or remove them first"
+    )
+
+
+def _no_task(id: str) -> Refused:
+    slug = id.split("/")[0]
+    return Refused(
+        f"no task '{id}' on the remote's main, in this checkout or on the "
+        f"remote's tasks/{slug}. List them: asdlc task list",
+        Stop.NO_TASK,
+    )
 
 
 def start(id: str, found: Found, documents: Sequence[Document]) -> Start | Refused:
@@ -248,18 +326,13 @@ def start(id: str, found: Found, documents: Sequence[Document]) -> Start | Refus
     person can act on them: first what the command could not finish with, then
     a target that names nothing, then the task and the branches themselves.
     """
-    stopped = _cannot_finish(found)
+    stopped = _cannot_finish(found) or _dirty(found)
     if stopped is not None:
         return stopped
     known = stated(documents, found.branches, found.pulls or (), found.merges)
     task = next((task for task in known if task.id == id), None)
     if task is None and not found.cut:
-        slug = id.split("/")[0]
-        return Refused(
-            f"no task '{id}' on the remote's main, in this checkout or on the "
-            f"remote's tasks/{slug}. List them: asdlc task list",
-            Stop.NO_TASK,
-        )
+        return _no_task(id)
     reason = refusal(id, known, on=found.on, held=found.held)
     if reason is None and found.left is not None and not leftover(found.left, id):
         reason = (
@@ -270,4 +343,47 @@ def start(id: str, found: Found, documents: Sequence[Document]) -> Start | Refus
         return Refused(f"cannot start {id}: {reason}")
     return Start(
         task, reuse=found.left is not None, started=has_start(found.left or (), id)
+    )
+
+
+def resume(id: str, found: Found, documents: Sequence[Document]) -> Resume | Refused:
+    """Decide what `asdlc task start --resume` does: the resume, or why there is none.
+
+    `documents` are `found.texts`, parsed. The reasons come in the order `start`
+    gives its own in, with one more before an uncommitted change: a merge that
+    is in progress on the task's branch. That is work to finish and not a
+    change to commit or remove, so it gets its own answer, with the files it
+    has left in conflict.
+
+    A local branch with work on it is switched to, and the remote's branch is
+    merged into it when that has anything new. No local branch, or one that a
+    start left with at most its start commit, is put at the remote's commit.
+    """
+    branch = branch_of(id)
+    stopped = _cannot_finish(found)
+    if stopped is not None:
+        return stopped
+    if found.merging and found.on == branch:
+        reason = unmerged(branch, found.conflicts, found=True)
+        return Refused(reason, files=found.conflicts)
+    dirty = _dirty(found)
+    if dirty is not None:
+        return dirty
+    known = stated(documents, found.branches, found.pulls or (), found.merges)
+    task = next((task for task in known if task.id == id), None)
+    if task is None and not found.cut:
+        return _no_task(id)
+    reason = refusal(id, known, on=found.on, held=found.held, resume=True)
+    if reason is None and branch not in found.branches:
+        # A pull request from a fork can name the branch when the remote has none.
+        reason = _not_started(id)
+    if reason is not None or task is None:
+        return Refused(f"cannot resume {id}: {reason}")
+    replace = found.left is None or leftover(found.left, id)
+    return Resume(
+        task,
+        reuse=found.left is not None,
+        replace=replace,
+        pull=next((pull for pull in found.pulls or () if pull.branch == branch), None),
+        merge=found.behind and not replace,
     )
