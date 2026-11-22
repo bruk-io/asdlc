@@ -1,5 +1,6 @@
 import json
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,16 +30,28 @@ def example() -> Path:
     return ROOT / "examples" / "claims"
 
 
-@pytest.fixture
-def repository(tmp_path: Path) -> Path:
-    """A git repository whose main holds one accepted intent."""
-    root = tmp_path.resolve()
+@pytest.fixture(scope="session")
+def repository_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """What `repository` copies. Git makes it once a session, and no test changes it."""
+    root = tmp_path_factory.mktemp("repository-template").resolve()
     git(root, "init", "-q", "-b", "main")
     intent = root / "intent" / "claims" / "intent.md"
     intent.parent.mkdir(parents=True)
     intent.write_text("---\nkind: intent\nauthor: a\n---\n")
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "intent")
+    return root
+
+
+@pytest.fixture
+def repository(repository_template: Path, tmp_path: Path) -> Path:
+    """A git repository whose main holds one accepted intent.
+
+    It is a copy of one git made earlier in the session, file for file, so making
+    it starts no process. The test owns the copy.
+    """
+    root = tmp_path.resolve()
+    shutil.copytree(repository_template, root, dirs_exist_ok=True)
     return root
 
 
@@ -77,10 +90,19 @@ def commit_files(root: Path, texts: dict[str, str], subject: str) -> None:
 
 
 def clone_of(origin: Path, folder: Path) -> Path:
-    """Clone a bare repository into a new folder, with a name and an email set."""
-    git(origin.parent, "clone", "-q", str(origin), str(folder))
-    git(folder, "config", "user.name", "Dana")
-    git(folder, "config", "user.email", "dana@example.com")
+    """Clone a bare repository into a new folder, with a name and an email set.
+
+    The clone's `asdlc.gh` names `gh/gh` beside the bare repository. Nothing is
+    there until the `gh` fixture puts its stand-in there, so a command run on the
+    clone finds no `gh` at all, and never starts the one this machine has.
+    """
+    settings = {
+        "user.name": "Dana",
+        "user.email": "dana@example.com",
+        "asdlc.gh": str(origin.parent / "gh" / "gh"),
+    }
+    kept = [word for key in settings for word in ("-c", f"{key}={settings[key]}")]
+    git(origin.parent, "clone", "-q", *kept, str(origin), str(folder))
     return folder
 
 
@@ -89,21 +111,41 @@ def second_clone(remote: Path) -> Path:
     return clone_of(remote.parent / "origin.git", remote.parent / "second")
 
 
-@pytest.fixture
-def remote(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A clone whose `origin` is a bare repository beside it, on disk.
+@pytest.fixture(scope="session")
+def remote_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """What `remote` copies: a bare repository and a clone of it, in one folder.
 
-    The remote's main holds `ACCEPTED`, in one commit, and the clone is on main at
-    that commit. Nothing here reaches the network.
+    Git makes them once a session, and no test changes them.
     """
-    base = tmp_path_factory.mktemp("remote").resolve()
+    base = tmp_path_factory.mktemp("remote-template").resolve()
     origin = base / "origin.git"
     git(base, "init", "-q", "--bare", "-b", "main", str(origin))
     seed = base / "seed"
     git(base, "init", "-q", "-b", "main", str(seed))
     commit_files(seed, ACCEPTED, "claims, accepted")
     git(seed, "push", "-q", str(origin), "main")
-    return clone_of(origin, base / "clone")
+    shutil.rmtree(seed)
+    clone_of(origin, base / "clone")
+    return base
+
+
+@pytest.fixture
+def remote(remote_template: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A clone whose `origin` is a bare repository beside it, on disk.
+
+    The remote's main holds `ACCEPTED`, in one commit, and the clone is on main at
+    that commit. Nothing here reaches the network.
+
+    Both are a copy of what git made earlier in the session, file for file, so
+    making them starts no process. The one thing a copy gets wrong is a path
+    written into the clone's configuration: its `origin` and its `asdlc.gh` name
+    the folder they were made in, so they are pointed at the copy.
+    """
+    base = tmp_path_factory.mktemp("remote").resolve()
+    shutil.copytree(remote_template, base, dirs_exist_ok=True)
+    settings = base / "clone" / ".git" / "config"
+    settings.write_text(settings.read_text().replace(str(remote_template), str(base)))
+    return base / "clone"
 
 
 # A stand-in for `gh`, as a shell script: it answers the `pr` calls asdlc makes
@@ -116,16 +158,27 @@ GH_STAND_IN = r"""#!/bin/sh
 #               comment read from stdin, the comment as one more field
 #   fail        when it holds the name of a subcommand (list, create, comment
 #               or ready), that subcommand fails
-here=$(dirname "$0")
+case $0 in
+*/*) here=${0%/*} ;;
+*) here=. ;;
+esac
 pulls="$here/pulls.json"
 tab=$(printf '\t')
+newline='
+'
 
 flat() {
-    # Put any text on one line: a backslash, a tab and a newline each become
-    # two characters.
-    printf '%s\n' "$1" |
-        sed -e 's/\\/\\\\/g' -e "s/$tab/\\\\t/g" |
-        sed -e ':a' -e '$!N' -e '$!ba' -e 's/\n/\\n/g'
+    # Put any text on one line, in $flat: a backslash, a tab and a newline each
+    # become two characters. Most arguments hold none of the three, and one
+    # that holds none starts no process.
+    case $1 in
+    *\\* | *"$tab"* | *"$newline"*)
+        flat=$(printf '%s\n' "$1" |
+            sed -e 's/\\/\\\\/g' -e "s/$tab/\\\\t/g" |
+            sed -e ':a' -e '$!N' -e '$!ba' -e 's/\n/\\n/g')
+        ;;
+    *) flat=$1 ;;
+    esac
 }
 
 rows() {
@@ -148,11 +201,15 @@ refuse() {
 
 line=
 for argument in "$@"; do
-    line="${line:+$line$tab}$(flat "$argument")"
+    flat "$argument"
+    line="${line:+$line$tab}$flat"
 done
 if [ "$1 $2" = "pr comment" ]; then
     case " $* " in
-    *" --body-file - "*) line="$line$tab$(flat "$(cat)")" ;;
+    *" --body-file - "*)
+        flat "$(cat)"
+        line="$line$tab$flat"
+        ;;
     esac
 fi
 printf '%s\n' "$line" >>"$here/calls"
@@ -266,7 +323,8 @@ def gh(remote: Path) -> Gh:
 
     It holds no pull request to begin with. Its script, its JSON file and its
     record are in a folder beside the clone, so the clone's working tree stays
-    clean. Another clone runs it once its own `asdlc.gh` names `program`.
+    clean. The clone's `asdlc.gh` names the script already, and so does that of
+    a clone `second_clone` makes: without this fixture nothing is at that path.
     """
     folder = remote.parent / "gh"
     folder.mkdir()
@@ -280,5 +338,4 @@ def gh(remote: Path) -> Gh:
     stand_in.program.chmod(0o755)
     stand_in.calls.write_text("")
     write_pulls(stand_in)
-    git(remote, "config", "asdlc.gh", str(stand_in.program))
     return stand_in
