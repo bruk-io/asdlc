@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -8,6 +9,17 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_auto_num_workers() -> int:
+    """Say how many workers `-n auto` starts: one a processor, and eight at most.
+
+    Nearly all of a test's time here is starting git, and past eight workers the
+    starts get in each other's way: on a machine with 28 processors the suite
+    takes 8 seconds with 8 workers and 14 with 28.
+    """
+    return min(os.cpu_count() or 1, 8)
 
 
 def git(root: Path, *args: str) -> str:

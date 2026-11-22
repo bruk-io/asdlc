@@ -4,7 +4,8 @@ A Claude Code plugin implementing Anthropic's AI-native SDLC playbook. This is v
 
 ## Commands
 
-- `just check` - everything: `asdlc document check` on the example, formatting, ruff and every test. Exits non-zero on any failure. Run it before saying any change is done, and paste its result.
+- `just check` - everything: `asdlc document check` on the example, formatting, ruff and every test. Exits non-zero on any failure. Run it before saying any change is done, and paste its result. It runs the tests in parallel, on up to eight workers.
+- `uv run pytest tests/test_cli.py` - one file's tests, or one test with `-k`, one at a time.
 - `uv run asdlc requirement list --root examples/claims` - try a command against the worked example.
 - `claude plugin validate .` and `claude plugin validate plugins/asdlc` - the marketplace and plugin manifests.
 - `just eval` - run the plugin's eval cases with `claude plugin eval`: three runs a case, with the plugin and without it. It runs a model and spends money, so it is not part of `just check` or of CI. `just eval --tag <skill>` runs one skill's cases, and `just eval --case <name> --runs 1 --ablation none` is one cheap run of one case.
@@ -56,6 +57,8 @@ The repository is a marketplace holding one Python package and one plugin. `.cla
 - A new decision goes in `domain` as a function that takes data and returns data. Reading goes in `io`, wording in `presentation`.
 - A command that changes something reads once, decides, then acts. `cli.py` reads what it needs through `io` into one record of plain data, a function in `domain` turns the record into a refusal or into what to do, and `cli.py` does it. `asdlc task start` is the one to copy: `read_start` in `cli.py`, `start` in `domain/build.py`.
 - A test is at the level of what it checks. A decision, which is every refusal and its reason, is a unit test on plain data in `tests/domain`. A test runs real git only when git's own behaviour is what it checks: a branch, a push, a merge, a worktree, a checkout put back after a failure. When a decision can only be reached by running a command, it is in the wrong layer: move it to `domain` first, then test it there.
+- A test that needs a git repository takes the `repository` or the `remote` fixture in `tests/conftest.py` when one of them fits, in place of having git build one. Each hands over a copy of a repository git made once in the session, so it starts no process, and the copy is the test's alone: `tests/test_fixtures.py` checks that. A clone from `remote` finds no `gh` unless the test also takes the `gh` fixture, which puts a stand-in there.
+- Nearly all of the suite's time is starting git, `gh` and shells, so a test is as slow as the processes it starts. Tests run in parallel and in no fixed order: one never reads what another wrote.
 - A hook says why it denied something, and never fails silently.
 - A skill lands with its eval cases: one tagged with the skill's name and `acts`, one with its name and `stays-out`, and in each a grader that is a pattern and not a judge. `tests/test_evals.py` fails `just check` otherwise. Pilot a case with one run before the full three, and read what the run wrote before changing a grader. A case's `scaffold.sh` writes its documents by hand, and a test lints what each scaffold builds.
 - Fix the code, not the check. Never weaken a check or a test to make it pass.
