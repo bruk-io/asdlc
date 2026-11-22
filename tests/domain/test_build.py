@@ -8,13 +8,16 @@ from asdlc.domain.build import (
     Refused,
     Start,
     Stop,
+    answer,
     check_lines,
     claimed,
     has_start,
     leftover,
+    lost_claim,
     refusal,
     start,
     start_subject,
+    unopened,
 )
 from asdlc.domain.lint import library
 from asdlc.domain.tasks import Pull, State, Task
@@ -85,6 +88,53 @@ def test_a_push_that_printed_no_line_for_the_branch_claimed_nothing():
     other = pushed("*", "[new branch]", "task/claims/02-panel")
     assert claimed(other, BRANCH) is False
     assert claimed(other + pushed("=", "[up to date]"), BRANCH) is False
+
+
+def test_what_a_push_answered_for_a_branch_is_its_one_character():
+    assert answer(pushed("*", "[new branch]"), BRANCH) == "*"
+    assert answer(pushed("=", "[up to date]"), BRANCH) == "="
+    assert answer(pushed("!", "[rejected] (stale info)"), BRANCH) == "!"
+    assert answer("To /somewhere/origin.git\nDone\n", BRANCH) == ""
+    assert answer(pushed("*", "[new branch]", "task/claims/02-panel"), BRANCH) == ""
+
+
+@pytest.mark.parametrize(
+    ("flag", "how"),
+    [("=", "the remote had the branch already"), ("!", "the remote refused")],
+)
+def test_a_start_that_lost_the_claim_names_the_pull_request_of_the_one_that_won(
+    flag, how
+):
+    theirs = Pull(BRANCH, 7, LINK, True)
+    other = Pull("task/claims/02-panel", 8, "https://example.invalid/pull/8", True)
+    assert lost_claim("claims/01-endpoint", flag, (other, theirs)) == (
+        f"another start claimed claims/01-endpoint first, and {how} this one's "
+        f"push. Its pull request: {LINK}"
+    )
+    none_yet = lost_claim("claims/01-endpoint", flag, (other,))
+    assert none_yet.endswith("this one's push. It has no pull request yet")
+
+
+@pytest.mark.parametrize("flag", ["", " ", "+"])
+def test_a_push_with_no_such_answer_is_not_put_down_to_another_start(flag):
+    reason = lost_claim("claims/01-endpoint", flag, (Pull(BRANCH, 7, LINK, True),))
+    assert reason == (
+        f"the push did not make '{BRANCH}' on the remote, so claims/01-endpoint "
+        "is not started"
+    )
+
+
+def test_a_start_whose_pull_request_could_not_be_opened_says_what_became_of_it():
+    undone = unopened("claims/01-endpoint", deleted=True)
+    assert f"the pull request for '{BRANCH}' could not be opened" in undone
+    assert "the branch is off the remote again" in undone
+    assert "claims/01-endpoint is not started" in undone
+    assert "--resume" not in undone
+
+    left = unopened("claims/01-endpoint", deleted=False)
+    assert f"the pull request for '{BRANCH}' could not be opened" in left
+    assert "could not be deleted from the remote, so it is left there" in left
+    assert "`asdlc task start --resume claims/01-endpoint` finishes the start" in left
 
 
 def test_a_branch_with_nothing_or_only_its_start_commit_is_a_leftover():

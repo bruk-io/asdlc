@@ -5,8 +5,6 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from asdlc.domain.build import Commit
-
 FETCH_LIMIT = 20.0
 REMOTE_MAIN = "origin/main"
 
@@ -224,6 +222,19 @@ def checked_out(root: Path) -> dict[str, Path]:
     return held
 
 
+def held_elsewhere(root: Path) -> dict[str, str]:
+    """Give each branch another worktree of the clone holds, and that worktree.
+
+    `root` is the top of one worktree, which is the one left out.
+    """
+    here = root.resolve()
+    return {
+        branch: str(folder)
+        for branch, folder in checked_out(root).items()
+        if folder.resolve() != here
+    }
+
+
 def switch_new(root: Path, branch: str, ref: str) -> bool:
     """Make a branch at `ref` with no upstream and switch to it; False when refused.
 
@@ -257,12 +268,34 @@ def push_claim(root: Path, branch: str) -> Ran:
     return Ran(done.returncode == 0, done.stdout, done.stderr)
 
 
-def commits(root: Path, span: str) -> tuple[Commit, ...]:
+def head(root: Path) -> str:
+    """Give the commit the checkout is on."""
+    return (_git(root, "rev-parse", "HEAD") or "").strip()
+
+
+def delete_remote(root: Path, branch: str, commit: str) -> bool:
+    """Delete a branch from the remote, only while the remote has it at `commit`.
+
+    The lease is what says "only while": a branch that has moved is someone
+    else's by now, and is left. False when nothing was deleted.
+    """
+    lease = f"--force-with-lease={branch}:{commit}"
+    done = subprocess.run(
+        ["git", "-C", str(root), "push", "--quiet", lease, "origin", f":{branch}"],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+    return done.returncode == 0
+
+
+def commits(root: Path, span: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
     """Give the commits of a range, oldest first, without merge commits.
 
-    Each comes with its id, its subject and the files it changed. A commit
-    always comes after the commits it was made on top of. Between two lines of
-    history that a merge joined, the order is git's.
+    Each is `(id, subject, the files it changed)`. A commit always comes after
+    the commits it was made on top of. Between two lines of history that a
+    merge joined, the order is git's.
     """
     listed = _git(
         root,
@@ -273,9 +306,7 @@ def commits(root: Path, span: str) -> tuple[Commit, ...]:
     for record in (listed or "").split("\x1e")[1:]:
         head, _, rest = record.partition("\n")
         id, _, subject = head.partition("\x1f")
-        found.append(
-            Commit(id, subject, tuple(line for line in rest.split("\n") if line))
-        )
+        found.append((id, subject, tuple(line for line in rest.split("\n") if line)))
     return tuple(found)
 
 

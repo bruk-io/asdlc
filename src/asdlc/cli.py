@@ -24,8 +24,17 @@ from asdlc.domain.guard import Verdict, guard, waiting
 from asdlc.domain.lint import library
 from asdlc.domain.requirements import Requirement, Standing, lineage, requirements
 from asdlc.domain.shell import push_folder
-from asdlc.domain.tasks import Task, done, intents, merged_branches, stated, tasks
-from asdlc.io import checkout, files, git, github
+from asdlc.domain.tasks import (
+    Pull,
+    Task,
+    branch_of,
+    done,
+    intents,
+    merged_branches,
+    stated,
+    tasks,
+)
+from asdlc.io import files, git, github
 from asdlc.io.hook import read_file_write, read_shell_command
 from asdlc.presentation import data, output, pull, text
 from asdlc.presentation import hook as hook_text
@@ -174,13 +183,19 @@ def _merged(options: Options) -> frozenset[str]:
     return merged_branches(git.merge_subjects(*found))
 
 
+def _pulls(root: Path) -> tuple[Pull, ...] | None:
+    """Give the open pull requests as the domain's records; None when not listed."""
+    rows = github.open_pulls(root)
+    return None if rows is None else tuple(Pull(*row) for row in rows)
+
+
 def _tasks(options: Options, documents: tuple[Document, ...]) -> tuple[Task, ...]:
     """Every task with its state, from the branches, pull requests and merges."""
     found = _main(options)
     if found is None:
         return tasks(documents, merged=_merged(options))
     root, ref = found
-    listed = github.open_pulls(root)
+    listed = _pulls(root)
     if listed is None:
         program = github.program(root)
         _note(
@@ -280,11 +295,56 @@ def _top(options: Options) -> Path:
     return root
 
 
+def read_start(root: Path, id: str) -> build.Found:
+    """Read what a start of the task `<slug>/<task>` decides from, once.
+
+    `root` is the top of the checkout. The remote is read as it was last
+    fetched, so the caller fetches first. Each fact is one call into `io`, and
+    this is where they become the plain data the domain decides from.
+    """
+    slug, name = id.split("/")
+    branch = f"refs/heads/{branch_of(id)}"
+    document = scaffold.path(Kind.TASK, slug, name)
+    here = files.read_text(root / document) is not None
+    main = git.REMOTE_MAIN
+    left = (
+        git.commits(root, f"{main}..{branch}") if git.has_branch(root, branch) else None
+    )
+    return build.Found(
+        remote=git.has_remote(root),
+        main=git.has_branch(root, main),
+        pulls=_pulls(root),
+        checks=git.file_at(root, main, build.CHECKS),
+        uncommitted=git.uncommitted(root),
+        texts=git.document_texts_at(root, main),
+        branches=git.remote_branches(root),
+        merges=git.merge_subjects(root, main),
+        cut=here or git.file_at(root, f"origin/tasks/{slug}", document) is not None,
+        on=git.current_branch(root),
+        held=git.held_elsewhere(root),
+        left=None if left is None else tuple(build.Commit(*row) for row in left),
+    )
+
+
+def _after_losing(root: Path, flag: str) -> tuple[Pull, ...]:
+    """Read what another start left, once a push has lost to it.
+
+    The fetch is so the task reads as claimed here from now on, and the pull
+    requests are for the reason to name the one that won. Neither is read when
+    the remote gave no answer about the branch at all.
+    """
+    if flag not in ("=", "!"):
+        return ()
+    git.fetch(root)
+    return _pulls(root) or ()
+
+
 def _carry_out(root: Path, start: build.Start) -> str:
     """Do what a start decided: the branch, the start commit, the push, the draft.
 
     Give the pull request's link. When any of it fails this raises, and the
-    caller puts the checkout back.
+    caller puts the checkout back. A draft that cannot be opened also takes the
+    branch off the remote again, while the remote still has this start's commit.
     """
     task = start.task
     if start.reuse:
@@ -301,25 +361,19 @@ def _carry_out(root: Path, start: build.Start) -> str:
             FAILED,
         )
     pushed = git.push_claim(root, task.branch)
-    if not build.claimed(pushed.out, task.branch):
+    flag = build.answer(pushed.out, task.branch)
+    if flag != "*":
         if pushed.err.strip():
             click.echo(pushed.err.strip(), err=True)
-        raise _fail(
-            f"the push did not make '{task.branch}' on the remote, so {task.id} "
-            "is not started",
-            FAILED,
-        )
+        raise _fail(build.lost_claim(task.id, flag, _after_losing(root, flag)), FAILED)
     opened = github.open_draft(
         root, task.branch, pull.title(task), pull.description(task)
     )
     if not opened.ok:
         if opened.err:
             click.echo(opened.err, err=True)
-        raise _fail(
-            f"the pull request for '{task.branch}' could not be opened. The branch "
-            "is on the remote",
-            FAILED,
-        )
+        deleted = git.delete_remote(root, task.branch, git.head(root))
+        raise _fail(build.unopened(task.id, deleted), FAILED)
     return opened.out
 
 
@@ -594,7 +648,7 @@ def task_start(options: Options, id: str) -> None:
         raise click.UsageError("a task is named <slug>/<task>")
     root = _top(options)
     _fetched(options, must=True)
-    found = checkout.found(root, id)
+    found = read_start(root, id)
     documents, findings = library(found.texts)
     _note(options, f"read {len(documents)} documents at {git.REMOTE_MAIN}")
     _warn_of(findings)
