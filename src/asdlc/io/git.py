@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,14 +61,56 @@ def document_texts_at(
     Each is `(path from the prefix, text)`, the shape `files.document_texts`
     gives. `prefix` is empty for the repository's root, and otherwise a folder
     below it that ends in a slash.
+
+    It starts two git processes however many files there are: one lists them,
+    and one prints the text of each.
     """
     folder = f"{prefix}intent"
-    listed = _git(root, "ls-tree", "-r", "-z", "--name-only", ref, "--", folder)
-    paths = sorted(path for path in (listed or "").split("\0") if path.endswith(".md"))
-    texts = ((path, _git(root, "show", f"{ref}:{path}")) for path in paths)
-    return tuple(
-        (path.removeprefix(prefix), text) for path, text in texts if text is not None
+    listed = _git(root, "ls-tree", "-r", "-z", ref, "--", folder) or ""
+    # Each entry is `<mode> <type> <object>`, a tab, then the path.
+    entries = (entry.partition("\t") for entry in listed.split("\0"))
+    found = sorted(
+        (path, about.split(" ")[-1])
+        for about, _, path in entries
+        if path.endswith(".md")
     )
+    texts = _texts(root, [id for _, id in found])
+    return tuple(
+        (path.removeprefix(prefix), text)
+        for (path, _), text in zip(found, texts, strict=True)
+        if text is not None
+    )
+
+
+def _texts(root: Path, ids: Sequence[str]) -> list[str | None]:
+    """Give the text of each object named, in order; None for one git has not got.
+
+    One git process prints them all. For each it is asked for, `cat-file --batch`
+    prints a line `<object> <type> <size>`, then that many bytes, then a newline;
+    for one it has not got, the line is `<object> missing` and nothing follows.
+    A text is read as Python reads a text file: as UTF-8, with any line ending
+    made a newline.
+    """
+    if not ids:
+        return []
+    done = subprocess.run(
+        ["git", "-C", str(root), "cat-file", "--batch"],
+        input="".join(f"{id}\n" for id in ids).encode(),
+        capture_output=True,
+    )
+    printed, texts, at = done.stdout, [], 0
+    for _ in ids:
+        end = printed.find(b"\n", at)
+        about = printed[at:end].split(b" ") if end >= 0 else []
+        if len(about) != 3:
+            texts.append(None)
+            at = end + 1 if end >= 0 else len(printed)
+            continue
+        after = end + 1 + int(about[2])
+        raw = printed[end + 1 : after].decode()
+        texts.append(raw.replace("\r\n", "\n").replace("\r", "\n"))
+        at = after + 1
+    return texts
 
 
 def remote_branches(root: Path) -> frozenset[str]:
