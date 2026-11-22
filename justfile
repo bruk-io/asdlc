@@ -3,9 +3,9 @@ check:
     uv run asdlc document check --root examples/claims
     uv run ruff format --check .
     uv run ruff check .
-    uv run pytest -q
+    uv run pytest -q -n auto
 
-# the tests alone
+# the tests alone, one at a time unless told otherwise: `just test -n auto`
 test *args:
     uv run pytest {{args}}
 

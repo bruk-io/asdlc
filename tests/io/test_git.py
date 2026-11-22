@@ -165,6 +165,40 @@ def test_documents_are_read_at_a_ref_and_not_from_the_working_tree(remote):
     assert dict(read)["intent/claims/spec.md"] == ACCEPTED["intent/claims/spec.md"]
 
 
+def test_each_document_at_a_ref_has_the_text_a_read_of_its_file_gives(remote):
+    tasks = "intent/claims/tasks"
+    odd = {
+        f"{tasks}/03-empty/task.md": "",
+        f"{tasks}/04-cut-short/task.md": "---\nkind: task\n---\n# No end",
+        f"{tasks}/05-windows/task.md": "---\r\nkind: task\r\n---\r\ncaf\u00e9\r\n",
+    }
+    notes = {"intent/claims/notes.txt": "not a document\n"}
+    commit_files(remote, odd | notes, "three odd documents, and one file that is none")
+
+    read = git.document_texts_at(remote, "main")
+
+    assert read == files.document_texts(remote)
+    assert len(read) == 8
+    assert [dict(read)[path] for path in odd] == [
+        "",
+        "---\nkind: task\n---\n# No end",
+        "---\nkind: task\n---\ncaf\u00e9\n",
+    ]
+
+
+def test_a_submodule_named_like_a_document_is_left_out_and_the_rest_are_whole(remote):
+    # It sorts between two documents, so git answers `missing` in mid-batch.
+    entry = f"160000,{'1' * 40},intent/claims/linked.md"
+    run_git(remote, "update-index", "--add", "--cacheinfo", entry)
+    run_git(remote, "commit", "-q", "-m", "a submodule named like a document")
+
+    read = git.document_texts_at(remote, "main")
+
+    documents = {path: ACCEPTED[path] for path in ACCEPTED if path.endswith(".md")}
+    assert dict(read) == documents
+    assert [path for path, _ in read] == sorted(documents)
+
+
 def test_documents_below_a_prefix_come_with_paths_from_that_prefix(remote):
     intent = "---\nkind: intent\nauthor: a\n---\n"
     commit_files(remote, {"examples/demo/intent/x/intent.md": intent}, "an example")

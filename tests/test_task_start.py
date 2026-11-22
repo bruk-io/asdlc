@@ -181,7 +181,6 @@ def test_a_start_moves_the_checkout_to_a_branch_from_the_remotes_main_and_opens_
     remote, gh
 ):
     other = second_clone(remote)
-    git(other, "config", "asdlc.gh", gh.program)
     commit_files(other, {"README.md": "claims\n"}, "main moves on")
     git(other, "push", "-q", "origin", "main")
     behind = commit(remote, "main")
@@ -388,7 +387,6 @@ def test_of_two_starts_at_one_instant_the_second_finds_the_branch_already_there(
     monkeypatch.setenv("GIT_AUTHOR_DATE", "2026-11-18T12:00:00+00:00")
     monkeypatch.setenv("GIT_COMMITTER_DATE", "2026-11-18T12:00:00+00:00")
     winner = second_clone(remote)
-    git(winner, "config", "asdlc.gh", gh.program)
     log = racing(remote, winner, "post-checkout")
 
     done = start(remote)
@@ -400,7 +398,6 @@ def test_a_start_that_another_overtakes_as_it_pushes_is_refused_by_the_remote(
     remote, gh
 ):
     winner = second_clone(remote)
-    git(winner, "config", "asdlc.gh", gh.program)
     log = racing(remote, winner, "pre-push")
 
     done = start(remote)
