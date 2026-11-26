@@ -26,7 +26,7 @@
     });
     // The two panels in the corner: opening one closes the other. The selected-building card closes from its own button.
     // The camera button: each press moves on to the next thing to follow (the work, Bruk, nothing) and reframes the view on it.
-    { const names = { work: 'The Work', bruk: (D.owner && D.owner.name) || 'You', off: 'Free' }, order = ['work', 'bruk', 'off'], btn = $('#cam');
+    { const names = { work: 'The Work', bruk: (D.owner && D.owner.name) || 'You', off: 'Free' }, order = ['bruk', 'work', 'off'], btn = $('#cam'); btn.textContent = 'Camera: ' + names[S.follow];   // it starts on the person
       btn.addEventListener('click', () => { S.follow = order[(order.indexOf(S.follow) + 1) % 3] || 'work'; btn.textContent = 'Camera: ' + names[S.follow]; btn.setAttribute('aria-pressed', S.follow !== 'off'); if (three && S.follow !== 'off') three.reframe(); }); }
     const panels = { 'open-list': 'drawer' };
     for (const id in panels) $('#' + id).addEventListener('click', () => { for (const other in panels) { const open = other === id && $('#' + panels[other]).hidden; $('#' + panels[other]).hidden = !open; $('#' + other).setAttribute('aria-expanded', open); } });

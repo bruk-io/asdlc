@@ -11,7 +11,7 @@
   const SERIES = { build: '--series-a', review: '--series-b', fix: '--series-c', verify: '--series-d', other: '--series-e',
                    sonnet: '--series-b', opus: '--series-a', fable: '--series-c', o: '--series-c', r: '--series-a', w: '--series-b' };
   const HS = 0.12 * BIG, ROW_GAP = FOOT + 4.2, COL_GAP = FOOT + 3.6; // HS: building height per dollar
-  const S = { t: 0, playing: false, speed: 420, follow: 'work', mode: 'phase', picked: null };
+  const S = { t: 0, playing: false, speed: 420, follow: 'bruk', mode: 'phase', picked: null };
   let D, agents, towers, rows, tMin, tMax, cum, three = null;
 
   fetch('data.json').then((r) => r.json()).then(init).catch((e) => { $('#err').hidden = false; $('#err').textContent = 'Could not load the data file: ' + e.message; });
