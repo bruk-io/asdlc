@@ -26,8 +26,8 @@
     });
     // The two panels in the corner: opening one closes the other. The selected-building card closes from its own button.
     // The camera button: each press moves on to the next thing to follow (the work, Bruk, nothing) and reframes the view on it.
-    { const names = { work: 'The Work', bruk: (D.owner && D.owner.name) || 'You', off: 'Free' }, order = ['bruk', 'work', 'off'], btn = $('#cam'); btn.textContent = 'Camera: ' + names[S.follow];   // it starts on the person
-      btn.addEventListener('click', () => { S.follow = order[(order.indexOf(S.follow) + 1) % 3] || 'work'; btn.textContent = 'Camera: ' + names[S.follow]; btn.setAttribute('aria-pressed', S.follow !== 'off'); if (three && S.follow !== 'off') three.reframe(); }); }
+    { const names = { work: 'The Work', bruk: (D.owner && D.owner.name) || 'You', off: 'Free' }, order = ['bruk', 'work', 'off'], btn = $('#cam'), face = () => label(btn, 'camera', 'Camera: following ' + names[S.follow].toLowerCase() + '. Press to change', names[S.follow]); face();   // it starts on the person
+      btn.addEventListener('click', () => { S.follow = order[(order.indexOf(S.follow) + 1) % 3] || 'work'; face(); btn.setAttribute('aria-pressed', S.follow !== 'off'); if (three && S.follow !== 'off') three.reframe(); }); }
     const panels = { 'open-list': 'drawer' };
     for (const id in panels) $('#' + id).addEventListener('click', () => { for (const other in panels) { const open = other === id && $('#' + panels[other]).hidden; $('#' + panels[other]).hidden = !open; $('#' + other).setAttribute('aria-expanded', open); } });
     $('#detail').addEventListener('click', (ev) => { if (ev.target.closest('#close-detail')) pick(null, false); });
@@ -39,7 +39,14 @@
       S.playing = false; S.t = best; refresh();
       const live = awakeAt(best); if (three && live.length) three.flyTo(live[Math.floor(live.length / 2)].tw);
     };
-    $('#busy').addEventListener('click', jumpBusy);
+    $('#busy').addEventListener('click', jumpBusy); label($('#busy'), 'bolt', 'Jump to the busiest moment', 'Busiest'); label($('#open-list'), 'list', 'Every building', 'Buildings');
+    // The invitation shown when the page first opens: one press starts the replay from the beginning, and it goes away for good.
+    // Doing anything else with the replay puts it away too. It is left out when the page is opened at a set time or view.
+    { const watch = $('#watch'), away = () => { watch.hidden = true; };
+      if (/(at|cam|do)=/.test(location.hash)) away();
+      label($('#watch-go'), 'play', 'Watch the build from the start', 'Watch the Build');
+      $('#watch-go').addEventListener('click', () => { away(); S.t = tMin; S.playing = true; });
+      ['#play', '#busy', '#tl'].forEach((id) => $(id).addEventListener('pointerdown', away)); addEventListener('keydown', (ev) => { if (ev.key === ' ' || ev.key.startsWith('Arrow')) away(); }); }
     if (location.hash === '#busiest') setTimeout(jumpBusy, 0);
     // #at=0.4 starts with the playhead that fraction of the way along, for the screenshot tool. It can follow a #cam=... setting after an ampersand.
     { const m = /at=([\d.]+)/.exec(location.hash); if (m) S.t = tMin + (tMax - tMin) * Math.min(1, +m[1]); }
@@ -55,7 +62,7 @@
     $('#r-cost').textContent = '$' + Math.round(cum[i]);
     $('#r-live').textContent = agents.filter((a) => present(a, t) && !asleep(a, t) && a.kind !== 'Main').length;
     $('#r-merged').textContent = D.prs.filter((p) => p.task && p.t <= t).length;
-    $('#play').textContent = S.playing ? 'Pause' : (t >= tMax - 1 ? 'Replay' : 'Play');
+    label($('#play'), S.playing ? 'pause' : (t >= tMax - 1 ? 'replay' : 'play'), S.playing ? 'Pause' : (t >= tMax - 1 ? 'Replay from the start' : 'Play'));
     const act = {}; agents.forEach((a) => { if (a.kind !== 'Main' && present(a, t) && !asleep(a, t)) (act[a.tw.rowName] = act[a.tw.rowName] || new Set()).add(a.tw.id); });
     const names = Object.keys(act);
     $('#now').textContent = names.length ? names.map((n) => n + ' · ' + act[n].size + (act[n].size === 1 ? ' tower' : ' towers')).join('   ') : (t >= tMax - 1 ? '' : 'Quiet');

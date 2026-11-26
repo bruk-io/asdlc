@@ -30,11 +30,11 @@
           next += eighth; step++;
         }
       };
-      const timer = setInterval(() => { try { tick(); } catch (e) { if (!failed) { failed = true; $('#music').textContent = 'Music Unavailable'; } } }, 60);
+      const timer = setInterval(() => { try { tick(); } catch (e) { if (!failed) { failed = true; label($('#music'), 'mute', 'Music is not available in this browser'); } } }, 60);
       master.gain.setTargetAtTime(0.5, ctx.currentTime, 0.4); if (ctx.state === 'suspended') ctx.resume();
       return { stop() { clearInterval(timer); master.gain.setTargetAtTime(0, ctx.currentTime, 0.12); setTimeout(() => ctx.close(), 700); },
         // A soft rising four-note chime, for a merge.
         chime() { [60, 64, 67, 72].forEach((m, i) => note(m, ctx.currentTime + 0.03 + i * 0.13, 1.4, 0.07, 'sine', 0.04)); } };   // an octave down, pure tones, eased in: a soft glow, not a ping
     }
-    { const btn = $('#music'), set = (on) => { if (on && !audio) audio = startMusic(); else if (!on && audio) { audio.stop(); audio = null; } btn.setAttribute('aria-pressed', !!audio); btn.textContent = audio ? 'Music On' : 'Music Off'; };
-      btn.addEventListener('click', () => set(!audio)); if (/[#&]music\b/.test(location.hash)) set(true); }
+    { const btn = $('#music'), set = (on) => { if (on && !audio) audio = startMusic(); else if (!on && audio) { audio.stop(); audio = null; } btn.setAttribute('aria-pressed', !!audio); label(btn, audio ? 'music' : 'mute', audio ? 'Music on. Press to turn it off' : 'Music off. Press to turn it on'); };
+      btn.addEventListener('click', () => set(!audio)); if (/[#&]music\b/.test(location.hash)) set(true); else set(false); }

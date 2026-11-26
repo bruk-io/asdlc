@@ -98,3 +98,14 @@ tr.pick { cursor: pointer; } tr.pick:hover td { background: var(--ui-surface); }
 @media (max-width: 700px) { .scale input[type=range] { width: 96px; } }
 
 .btn[aria-pressed="true"] { background: var(--ui-primary); border-color: var(--ui-primary); color: #fff; box-shadow: 0 3px 0 #2f8a47; }
+
+/* Icons on buttons, and the invitation shown when the page first opens. */
+.btn { display: inline-flex; align-items: center; gap: 7px; }
+.btn svg { flex: none; }
+.btn.icon { padding: 8px 11px; }
+.watch { position: absolute; left: 50%; top: 44%; transform: translate(-50%, -50%); display: flex; flex-direction: column; align-items: center; gap: 12px; pointer-events: auto; text-align: center; }
+.watch[hidden] { display: none; }
+.watch .btn { font-size: 20px; padding: 16px 28px; border-width: 3px; box-shadow: 0 5px 0 #2f8a47, 0 14px 30px rgb(20 40 20 / 0.28); }
+.watch .btn svg { width: 26px; height: 26px; }
+.watch p { margin: 0; padding: 6px 14px; border-radius: 999px; background: var(--ui-surface-raised); border: 2px solid var(--ui-border); font-size: 13.5px; font-weight: 700; color: var(--ui-text-muted); max-width: min(360px, 80vw); }
+@media (prefers-reduced-motion: no-preference) { .watch .btn { animation: nudge 2.4s ease-in-out infinite; } @keyframes nudge { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } } }
