@@ -38,7 +38,7 @@
     const printer = place('printer', {}, yard.x - 2.4, 0, yard.z, 0.5), rack = place('rack', {}, yard.x, 0, yard.z - 2.0, 0.2), desk = place('desk', {}, yard.x + 2.4, 0, yard.z + 0.4, -0.4),
       workbench = place('workbench', {}, yard.x - 1.6, 0, yard.z + 3.0, 0.15), stove = place('stove', {}, yard.x + 1.8, 0, yard.z + 3.2, -0.2);
     const at = (prop, back, mode, ms) => { const a = prop.rotation.y; return { x: prop.position.x + Math.sin(a) * back, z: prop.position.z + Math.cos(a) * back, fx: prop.position.x, fz: prop.position.z, mode, ms }; };
-    let doing = null, lastKind = '';
+    let doing = null, lastKind = '', sawTick = 0;
     const ROUTINE = {
       forage() { for (const m of mushrooms) if (!m.visible && performance.now() > m.userData.back) m.visible = true;
         let best = null, near = 1e9; for (const m of mushrooms) { if (!m.visible) continue; const d = Math.hypot(m.position.x - owner.position.x, m.position.z - owner.position.z); if (d < near) { near = d; best = m; } }
@@ -47,7 +47,7 @@
       print() { return at(printer, 1.1, Math.random() < 0.5 ? 'tinker' : 'admire', 9000); },                // watching a print, or fiddling with it
       homelab() { return at(rack, 1.0, 'tinker', 8000); },                                                 // tinkering with the rack
       design() { return at(desk, 0.95, 'sketch', 9000); },
-      wood() { return at(workbench, 0.85, 'saw', 9000); },                                                  // woodworking
+      wood() { return at(workbench, 0.95, 'saw', 11000); },                                                  // woodworking
       cook() { return at(stove, 0.85, 'stir', 9000); },                                                    // cooking, with whatever he foraged                                                 // sketching a part to print
       bench() { const b = benches[firstDo && !doing ? 0 : Math.floor(Math.random() * benches.length)]; return { x: b.position.x, z: b.position.z + 0.08, fx: b.position.x, fz: b.position.z + 10, mode: 'sit', ms: 11000 }; },
       admire() { const done = towers.filter((w) => w.top > 1); const w = done[Math.floor(Math.random() * done.length)] || mainTower; return { x: w.x - 0.4, z: w.z + FOOT / 2 + 3.2, fx: w.x, fz: w.z, mode: 'admire', ms: 6000 }; },
@@ -67,6 +67,8 @@
       owner.position.y = 0.07 + Math.max(0, ground(owner.position.x, owner.position.z));
       ASSETS.person.animate(owner, { mode, now, moving: true }); owner.userData.tag.position.y = mode === 'party' ? 3.2 : 2.05;
       ASSETS.printer.animate(printer, { now }); ASSETS.rack.animate(rack, { now }); ASSETS.stove.animate(stove, { now });
+      // Sawing throws chips and sawdust off the board, in time with the forward stroke.
+      if (mode === 'saw' && !reduced && Math.cos(now * 0.0105) > 0.6 && now - sawTick > 110) { sawTick = now; const a = workbench.rotation.y, bx = workbench.position.x + Math.sin(a) * 0.2 + Math.cos(a) * 0.15, bz = workbench.position.z + Math.cos(a) * 0.2 - Math.sin(a) * 0.15; fx.emit('chips', bx, 0.95, bz, 2); if (Math.random() < 0.5) fx.emit('dust', bx, 0.8, bz, 1); }
     }
     // Keep him out of the buildings: if a step lands inside one's keep-out circle, slide him back to its edge and a little round it.
     const KEEP = FOOT * 0.71 + 0.55;

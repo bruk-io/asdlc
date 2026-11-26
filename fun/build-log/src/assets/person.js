@@ -47,7 +47,7 @@ ASSETS.person = {
     const u = g.userData, still = s.moving === false, t = still ? 0 : s.now || 0, m = s.mode, run = m === 'run', walk = m === 'walk' || run, talk = m === 'talk', party = m === 'party', cheer = m === 'cheer' || party, idle = m === 'idle';
     const i = u.inner, L = u.arms[0], R = u.arms[1], pace = run ? 0.021 : 0.013, step = Math.sin(t * pace), beat = Math.abs(Math.sin(t * (party ? 0.016 : 0.011)));
     const sit = m === 'sit', slice = cheer ? 1700 : 3200, move = m === 'wave' ? 3 : Math.floor(t / slice) % 4, into = (t % slice) / slice;      // which move he is on, and how far through it
-    let y = Math.sin(t * 0.003) * 0.012 + 0.012, lean = 0, tilt = 0, turn = 0, headX = 0, headY = 0, headZ = 0, swing = Math.sin(t * 0.004) * 0.03;
+    let y = Math.sin(t * 0.003) * 0.012 + 0.012, lean = 0, tilt = 0, turn = 0, fwd = 0, headX = 0, headY = 0, headZ = 0, swing = Math.sin(t * 0.004) * 0.03;
     L.rotation.set(0, 0, 0); R.rotation.set(0, 0, 0);
     if (walk) { y = Math.abs(step) * (run ? 0.16 : 0.1); tilt = step * 0.08; lean = run ? 0.24 : 0.1; L.rotation.x = step * (run ? 1.1 : 0.7); R.rotation.x = -step * (run ? 1.1 : 0.7); swing = step * (run ? 0.3 : 0.16); }
     else if (talk) { R.rotation.z = 2.3 + Math.sin(t * 0.012) * 0.35; L.rotation.z = -0.25 - Math.sin(t * 0.006) * 0.12; headZ = Math.sin(t * 0.004) * 0.08; headX = Math.sin(t * 0.007) * 0.05 - 0.04; swing = Math.sin(t * 0.004) * 0.06; }
@@ -62,7 +62,11 @@ ASSETS.person = {
     else if (m === 'gaze') { R.rotation.set(-0.7, 0, 2.75); L.rotation.z = -0.7; headY = Math.sin(t * 0.0008) * 0.35; tilt = Math.sin(t * 0.001) * 0.03; }                                                                              // a hand shading his eyes, looking out to sea
     else if (m === 'tinker') { headX = 0.22; headY = Math.sin(t * 0.0013) * 0.25; lean = 0.1; L.rotation.x = -1.25 + Math.sin(t * 0.009) * 0.18; R.rotation.x = -1.25 + Math.sin(t * 0.011 + 1) * 0.18; L.rotation.z = 0.2; R.rotation.z = -0.2; y += Math.abs(Math.sin(t * 0.004)) * 0.012; }   // both hands in the machine
     else if (m === 'sketch') { headX = 0.3; headZ = Math.sin(t * 0.0015) * 0.06; lean = 0.14; R.rotation.x = -1.15 + Math.sin(t * 0.013) * 0.07; R.rotation.z = -0.2 + Math.sin(t * 0.008) * 0.22; L.rotation.x = -0.9; L.rotation.z = 0.35; }                                                  // drawing, one hand steadying the sheet
-    else if (m === 'saw') { const push = Math.sin(t * 0.012); headX = 0.25; lean = 0.2 + push * 0.04; R.rotation.x = -0.95 + push * 0.5; R.rotation.z = -0.1; L.rotation.x = -1.1; L.rotation.z = 0.3; swing = push * 0.08; }   // sawing a board, the other hand holding it down
+    else if (m === 'saw') {   // sawing a board: long strokes from the shoulder with the whole body rocking into each one, the other hand pressing the board down
+      const stroke = Math.sin(t * 0.0105), push = stroke * 0.5 + 0.5, bite = Math.max(0, Math.cos(t * 0.0105));   // push: 0 drawn back, 1 fully forward; bite: the forward half, when the teeth cut
+      headX = 0.28 + push * 0.05; headY = -0.1; lean = 0.12 + push * 0.2; turn = -0.2 + push * 0.08; y = -0.03 - push * 0.02; tilt = -0.04; fwd = (push - 0.5) * 0.2;
+      R.rotation.x = -1.0 - push * 0.45; R.rotation.z = -0.1; L.rotation.x = -1.2; L.rotation.z = 0.42 + bite * 0.04; swing = stroke * 0.12;
+    }
     else if (m === 'stir') { headX = 0.22; headY = Math.sin(t * 0.0012) * 0.2; lean = 0.08; R.rotation.x = -1.2 + Math.sin(t * 0.007) * 0.14; R.rotation.z = -0.15 + Math.cos(t * 0.007) * 0.2; L.rotation.z = -0.55; y += Math.sin(t * 0.0035) * 0.01; }      // stirring a pot, a hand on his hip
     else if (m === 'crouch') { y = -0.2; lean = 0.38; headX = 0.25; R.rotation.x = -1.0 - Math.sin(t * 0.004) * 0.15; L.rotation.z = -0.3; }                                                                                             // bending down to the flowers
     else if (idle || m === 'wave') {
@@ -74,7 +78,11 @@ ASSETS.person = {
     // Sitting swings the legs out in front; everything else stands on them.
     u.legs.forEach((leg, k) => { const sd = k ? 1 : -1, kick = sit ? Math.sin(t * 0.004 + k * 2) * 0.03 : 0; leg.rotation.x = sit ? -Math.PI / 2 : 0; leg.position.set(sd * 0.11, sit ? 0.36 + kick : 0.2, sit ? 0.16 : 0);
       u.shoes[k].position.set(sd * 0.11, sit ? 0.37 + kick : 0.05, sit ? 0.36 : 0.04); u.shoes[k].rotation.x = sit ? -1.2 : 0; });
-    i.position.y = y; i.rotation.set(lean, turn, tilt); u.head.rotation.set(headX, headY, headZ);
+    // The saw is made the first time he saws and held in his right hand, blade pointing away from him.
+    if (m === 'saw' && !u.saw) { const k = u.kit, saw = new THREE.Group(); saw.add(k.mesh(k.geo.box, '--w-stone', 0.012, 0.11, 0.46, 0, -0.02, 0.27, false), k.mesh(k.geo.box, '--w-wood', 0.035, 0.15, 0.1, 0, 0, 0, false));
+      saw.position.set(0.06, -0.34, 0.03); k.outline(saw, 0.01); R.add(saw); u.saw = saw; }
+    if (u.saw) { u.saw.visible = m === 'saw'; u.saw.rotation.x = -R.rotation.x - lean + 0.16; }   // the blade stays level and slides: it does not swing with the arm
+    i.position.y = y; i.position.z = fwd; i.rotation.set(lean, turn, tilt); u.head.rotation.set(headX, headY, headZ);
     for (const l of u.locks) { u.e.set(swing * Math.cos(l.userData.k * 1.7) - lean * 0.6, 0, swing * Math.sin(l.userData.k * 1.3 + 1)); l.quaternion.copy(l.userData.rest).multiply(u.q.setFromEuler(u.e)); }   // the ponytail swings behind every movement
     { const blink = !still && ((t * 0.00027) % 1) < 0.035; for (const e of u.eyes) e.scale.y = blink ? 0.008 : e.userData.open || (e.userData.open = e.scale.y); }
     const icon = talk ? 'chat' : cheer ? 'cheer' : null;   // a speech bubble when he is talking, a star when he is cheering the agents on
