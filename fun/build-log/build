@@ -1,0 +1,56 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.13"
+# dependencies = ["click>=8.1"]
+# ///
+"""Assemble the build log page and the asset viewer from the files under src/ into dist/."""
+
+from pathlib import Path
+
+import click
+
+ROOT = Path(__file__).resolve().parent
+SRC, DIST = ROOT / "src", ROOT / "dist"
+# The publish host wraps a page in this skeleton; the local copies carry it so they open on their own.
+SKELETON = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>body{margin:0;font:14px system-ui}img{max-width:100%}[hidden]{display:none!important}</style></head><body>\n'
+
+
+def cat(*patterns: str) -> str:
+    """Join every file matching each pattern, in name order, with a comment naming each one."""
+    out: list[str] = []
+    for pattern in patterns:
+        for f in sorted(SRC.glob(pattern)):
+            mark = f"/* === src/{f.relative_to(SRC)} === */" if f.suffix in {".js", ".css"} else ""
+            out.append(f"{mark}\n{f.read_text()}")
+    return "\n".join(out)
+
+
+def page(template: str, style: str, script: str) -> str:
+    """Fill a page template with its stylesheet and script."""
+    return (SRC / template).read_text().replace("{{STYLE}}", style).replace("{{SCRIPT}}", script)
+
+
+@click.command()
+def main() -> None:
+    """Build dist/index.html and dist/viewer.html, plus local copies that open without the publish host."""
+    DIST.mkdir(exist_ok=True)
+    shared = cat("shared/*.js", "textures/*.js", "assets/*.js")
+    palette = cat("shared/*.css")
+    built = {
+        "index.html": page("page.html", palette + cat("style.css"), shared + "\n" + cat("js/*.js")),
+        "viewer.html": page("viewer/viewer.html", palette + cat("viewer/viewer.css"), shared + "\n" + cat("viewer/viewer.js")),
+    }
+    for name, text in built.items():
+        (DIST / name).write_text(text)
+        (DIST / f"local-{name}").write_text(SKELETON + text)
+        click.echo(f"dist/{name}  {len(text):,} bytes")
+    data = ROOT / "data" / "data.json"
+    if data.exists():
+        (DIST / "data.json").write_bytes(data.read_bytes())
+        click.echo(f"dist/data.json  {data.stat().st_size:,} bytes")
+    else:
+        click.echo("Warning: data/data.json is missing; run data/collect first.", err=True)
+
+
+if __name__ == "__main__":
+    main()

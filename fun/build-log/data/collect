@@ -1,0 +1,333 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.13"
+# dependencies = ["click>=8.1"]
+# ///
+"""Build data.json for a build log: the agents, buildings, rows, pull requests, activity and tool-call events of one repository's Claude Code sessions.
+
+It reads the Claude Code transcripts for the repository, its asdlc task files, and its pull requests (through `gh`).
+Tool calls are recorded as a time and a one-letter kind only. No arguments, paths, commands, output or message text leave the transcripts.
+"""
+import datetime as dt
+import glob, json, os, re, subprocess, sys
+
+import click
+
+
+@click.command()
+@click.argument("out_path", type=click.Path(dir_okay=False))
+@click.option("--repo", default=".", type=click.Path(exists=True, file_okay=False), help="The repository whose sessions to read. Default: the current folder.")
+@click.option("--transcripts", default=None, type=click.Path(file_okay=False), help="Claude Code's transcript folder for the repository. Default: worked out from --repo.")
+@click.option("--title", default=None, help="The page's title. Default: the repository's name and 'Build Log'.")
+@click.option("--owner", default=None, help="The name over the person's head. Default: the first word of git's user.name.")
+@click.option("--build-word", "build_words", multiple=True, help="A program of this repository that counts as building or testing. May be repeated.")
+def options(**given: object) -> dict:
+    """Write OUT_PATH from the Claude Code sessions of one repository."""
+    return given
+
+
+OPT = options.main(standalone_mode=False)
+if not isinstance(OPT, dict):  # --help was shown
+    sys.exit(0)
+REPO = os.path.abspath(OPT["repo"])
+PROJECT_KEY = re.sub(r"[^A-Za-z0-9]", "-", REPO)  # how Claude Code names a repository's folders
+P = os.path.abspath(OPT["transcripts"]) if OPT["transcripts"] else os.path.expanduser("~/.claude/projects/" + PROJECT_KEY)
+if not os.path.isdir(P):
+    raise click.ClickException(f"No Claude Code transcripts at {P}. Pass --transcripts.")
+SLUGS = sorted(os.path.basename(d) for d in glob.glob(REPO + "/intent/*") if os.path.isdir(d))  # the repository's asdlc intents
+SLUG_RE = "(?:" + "|".join(map(re.escape, SLUGS)) + ")" if SLUGS else r"[\w-]+"
+
+
+def git(*args: str) -> str:
+    """Run a git or gh command in the repository and return what it prints, or nothing if it fails."""
+    try:
+        return subprocess.run(list(args), cwd=REPO, capture_output=True, text=True).stdout.strip()
+    except OSError:
+        return ""
+
+
+# $ per million tokens: input, output, cache read, cache write 5m, cache write 1h (price table cached 2026-11-03)
+RATES = {"claude-opus-5": (5, 25, 0.5, 6.25, 10), "claude-sonnet-5": (2, 10, 0.2, 2.5, 4), "claude-fable-5-2": (8, 40, 0.2, 10, 16)}
+SHORT = {"claude-opus-5": "opus", "claude-sonnet-5": "sonnet", "claude-fable-5-2": "fable"}
+# One letter per kind of tool call. For Bash only the program name is looked at, to tell version control and builds apart; it is never stored.
+KINDS = {"r": "read or search files", "w": "write or edit a file", "g": "git or GitHub", "b": "build, test or check", "s": "other shell command", "z": "wait or poll", "x": "a tool call failed",
+         "n": "web search or fetch", "d": "delegate to another agent", "k": "load a skill", "o": "report a result", "t": "other tool"}
+TOOL_KIND = {"Read": "r", "Glob": "r", "Grep": "r", "Edit": "w", "Write": "w", "NotebookEdit": "w", "WebSearch": "n", "WebFetch": "n", "Agent": "d", "Task": "d",
+             "SendMessage": "d", "Skill": "k", "StructuredOutput": "o"}
+READ_WORDS = {"cat", "sed", "head", "tail", "grep", "rg", "ls", "find", "wc", "awk", "jq", "cut", "sort", "diff", "file", "stat", "tree", "nm", "which", "md5", "pwd", "date"}
+BUILD_WORDS = set(OPT["build_words"]) | {"cargo", "just", "pytest", "uv", "uvx", "npm", "pnpm", "node", "cmake", "ninja", "make", "ctest", "python", "python3", "rustc", "asdlc", "bun"}
+WAIT_WORDS = {"sleep", "until", "wait", "watch"}
+SHELL_WRAPPERS = {"cd", "sudo", "env", "time", "timeout", "nohup", "for", "while", "do", "then", "if", "else", "set", "export", "(", "{", "!"}
+
+
+def shell_programs(command: str) -> list[str]:
+    """List the program that starts each part of a shell command, without its arguments."""
+    programs = []
+    for part in re.split(r"&&|\|\||[;|\n]", command):
+        words = [w for w in part.split() if not re.fullmatch(r"\w+=.*", w)]
+        while words and words[0] in SHELL_WRAPPERS:
+            words = words[2:] if words[0] == "timeout" else words[1:]
+        if words and re.fullmatch(r"[\w./+-]+", words[0]):
+            programs.append(words[0].rsplit("/", 1)[-1])
+    return programs
+
+
+def tool_kind(name: str, tool_input: object) -> str:
+    """Classify one tool call without keeping anything about it but its kind."""
+    if name == "Bash":
+        programs = set(shell_programs(str(tool_input.get("command", "")) if isinstance(tool_input, dict) else ""))
+        for kind, words in (("b", BUILD_WORDS), ("g", {"git", "gh"}), ("z", WAIT_WORDS), ("r", READ_WORDS)):
+            if programs & words:
+                return kind
+        return "s"
+    return TOOL_KIND.get(name, "t")
+
+
+def epoch(ts: str) -> float:
+    return dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+
+
+def wf_label(summary: str) -> str:
+    """Sort a workflow run into an asdlc stage from its one-line summary. Runs that build tasks are "wave"."""
+    s = summary.lower()
+    for starts, label in (("build a wave", "wave"), ("research the intent", "Spec"), ("cut the first pass", "Tasks"), ("cut a later pass", "Task cut")):
+        if s.startswith(starts):
+            return label
+    for word, label in (("wave", "wave"), ("plan", "Plan"), ("spec", "Spec"), ("task", "Tasks"), ("build", "wave")):  # other wordings, loosely
+        if word in s:
+            return label
+    return "Other"
+
+
+def first_prompt(path: str) -> str:
+    """Return the start of the first user message in a transcript."""
+    for line in open(path, errors="ignore"):
+        try:
+            o = json.loads(line)
+        except Exception:
+            continue
+        c = (o.get("message") or {}).get("content")
+        if o.get("type") == "user" and c:
+            if isinstance(c, list):
+                c = " ".join(b.get("text", "") for b in c if isinstance(b, dict))
+            return str(c)[:6000]
+    return ""
+
+
+PROMPT_PHASE = (("Build the asdlc task", "Build"), ("Review the pull request", "Review"), ("You are finishing", "Fix"), ("Verify that", "Verify"))
+
+
+def side_name(path: str, aid: str) -> str:
+    """Name a side agent by its type only. Its description is free text written for the task, so it is never copied out."""
+    try:
+        kind = str(json.load(open(path.replace(".jsonl", ".meta.json"))).get("agentType") or "")
+    except Exception:
+        kind = ""
+    return kind if re.fullmatch(r"[A-Za-z][\w:-]{0,30}", kind) else "side agent"
+
+
+meta, wf_of_dir = {}, {}
+for f in sorted(glob.glob(f"/private/tmp/claude-*/{PROJECT_KEY}/*/tasks/*.output") + glob.glob(os.path.join(os.environ.get("TMPDIR", "/tmp"), f"claude-*/{PROJECT_KEY}/*/tasks/*.output"))):
+    try:
+        d = json.load(open(f))
+    except Exception:
+        continue
+    wp = [a for a in d.get("workflowProgress") or [] if isinstance(a, dict) and a.get("agentId")]
+    if not wp:
+        continue
+    wid = os.path.basename(f).split(".")[0]
+    for a in wp:
+        meta[a["agentId"]] = {"label": a.get("label", ""), "phase": a.get("phaseTitle", "?"), "wf": wid, "kind": wf_label(d.get("summary", "")), "tools": a.get("toolCalls") or 0}
+
+agents, seen = [], set()
+for f in glob.glob(P + "/**/*.jsonl", recursive=True):
+    b = os.path.basename(f)
+    if b == "journal.jsonl":
+        continue
+    m = re.match(r"agent-(.+)\.jsonl", b)
+    aid = m.group(1) if m else "main"
+    wfdir = re.search(r"workflows/(wf_[^/]+)", f)
+    if os.path.dirname(f) == P:
+        info = {"label": "orchestrator", "phase": "Main session", "wf": "main", "kind": "Main", "tools": 0}
+    elif aid in meta:
+        info = dict(meta[aid])
+        if wfdir:
+            wf_of_dir[wfdir.group(1)] = info["wf"]
+    elif wfdir:
+        info = {"label": "retried agent", "phase": "Retry", "wf": "dir:" + wfdir.group(1), "kind": "wave", "tools": 0}
+    else:
+        info = {"label": side_name(f, aid), "phase": "Repair", "wf": "repairs", "kind": "Repairs", "tools": 0}
+    pts, model, tok = [], None, {"out": 0, "read": 0, "write": 0, "req": 0}
+    cost = {"o": 0.0, "r": 0.0, "w": 0.0}
+    events, seen_calls = [], set()
+    for line in open(f, errors="ignore"):
+        if '"is_error":true' in line or '"is_error": true' in line:
+            # A tool call that came back as a failure: kept as a time only, like every other event.
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            content = (o.get("message") or {}).get("content")
+            failed = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("is_error")] if isinstance(content, list) else []
+            for block in failed:
+                if o.get("timestamp") and ("x", block.get("tool_use_id")) not in seen_calls:
+                    seen_calls.add(("x", block.get("tool_use_id")))
+                    events.append((epoch(o["timestamp"]), "x"))
+            continue
+        if '"usage"' not in line:
+            continue
+        try:
+            o = json.loads(line)
+        except Exception:
+            continue
+        msg = o.get("message") or {}
+        u = msg.get("usage")
+        if not isinstance(u, dict) or msg.get("model") not in RATES:
+            continue
+        for block in msg.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id") not in seen_calls and o.get("timestamp"):
+                seen_calls.add(block.get("id"))
+                events.append((epoch(o["timestamp"]), tool_kind(block.get("name", ""), block.get("input"))))
+        k = (msg.get("id"), o.get("requestId"))
+        if k in seen:
+            continue
+        seen.add(k)
+        model = msg["model"]
+        r = RATES[model]
+        cc = u.get("cache_creation") or {}
+        w1, w5 = cc.get("ephemeral_1h_input_tokens") or 0, cc.get("ephemeral_5m_input_tokens") or 0
+        if w1 + w5 == 0:
+            w5 = u.get("cache_creation_input_tokens") or 0
+        i, ot, cr = u.get("input_tokens") or 0, u.get("output_tokens") or 0, u.get("cache_read_input_tokens") or 0
+        cost["o"] += ot * r[1] / 1e6
+        cost["r"] += cr * r[2] / 1e6
+        cost["w"] += (w5 * r[3] + w1 * r[4] + i * r[0]) / 1e6
+        tok["out"] += ot; tok["read"] += cr; tok["write"] += w1 + w5; tok["req"] += 1
+        if o.get("timestamp"):
+            pts.append((epoch(o["timestamp"]), cost["o"] + cost["r"] + cost["w"]))
+    if not pts:
+        continue
+    pts.sort()
+    total = cost["o"] + cost["r"] + cost["w"]
+    # Keep the shape of the activity: every break longer than ten minutes, plus an even sample.
+    keep = {0, len(pts) - 1}
+    for j in range(1, len(pts)):
+        if pts[j][0] - pts[j - 1][0] > 600:
+            keep.update((j - 1, j))
+    step = max(1, len(pts) // 10)
+    keep.update(range(0, len(pts), step))
+    # Each point: time, share of the agent's cost spent by then, and 1 when the stretch before it was a real pause.
+    curve = [[round(pts[j][0]), round(pts[j][1] / total, 4) if total else 1, int(j > 0 and pts[j][0] - pts[j - 1][0] > 600)] for j in sorted(keep)]
+    t = re.search(r":(\d\d-[a-z0-9-]+?)(\.\.)?$", info["label"]) if info["kind"] == "wave" else None
+    if info["kind"] == "wave" and (not t or info["phase"] == "Retry"):
+        fp = first_prompt(f)
+        t = re.search(SLUG_RE + r"/(?:tasks/)?(\d\d-[a-z0-9-]+)", fp) or t
+        for start, ph in PROMPT_PHASE:
+            if fp.lstrip().startswith(start) and info["phase"] == "Retry":
+                info["phase"] = ph
+    agents.append({"id": aid[:10], "label": info["label"], "phase": info["phase"], "model": SHORT[model], "wf": info["wf"], "kind": info["kind"],
+                   "task": t.group(1) if t else None, "t0": round(pts[0][0]), "t1": round(pts[-1][0]), "cost": round(total, 3),
+                   "co": round(cost["o"], 3), "cr": round(cost["r"], 3), "cw": round(cost["w"], 3), "out": tok["out"], "read": tok["read"],
+                   "write": tok["write"], "req": tok["req"], "tools": sum(1 for e in events if e[1] != "x"), "errors": sum(1 for e in events if e[1] == "x"), "curve": curve,
+                   # Tool calls as "<seconds since the one before><kind>" repeated, starting from t0: compact, and nothing but time and kind.
+                   "ev": "".join(f"{max(0, round(ts - prev))}{kind}" for (ts, kind), prev in zip(sorted(events), [pts[0][0]] + [e[0] for e in sorted(events)]))})
+
+for a in agents:  # retried agents join the workflow whose folder they sit in
+    if a["wf"].startswith("dir:"):
+        a["wf"] = wf_of_dir.get(a["wf"][4:], a["wf"])
+
+prs = json.loads(git("gh", "pr", "list", "--state", "all", "--limit", "500", "--json", "number,title,mergedAt,state,headRefName,url") or "[]")
+pr_by_task = {}
+for p in prs:
+    m = re.match(r"task/" + SLUG_RE + r"/(.+)", p["headRefName"])
+    if m:
+        pr_by_task[m.group(1)] = p
+titles = {}
+for f in glob.glob(REPO + "/intent/*/tasks/*/task.md"):
+    for line in open(f):
+        if line.startswith("# "):
+            titles[os.path.basename(os.path.dirname(f))] = re.sub(r"^#\s*(Task:\s*)?", "", line.strip())
+            break
+
+rows, wave_n = {}, 0
+for wid in sorted({a["wf"] for a in agents}, key=lambda w: min(a["t0"] for a in agents if a["wf"] == w)):
+    mine = [a for a in agents if a["wf"] == wid]
+    kind = mine[0]["kind"]
+    if kind == "wave":
+        wave_n += 1
+        name = f"Wave {wave_n}"
+    else:
+        name = {"Main": "Orchestrator", "Repairs": "Repair crew"}.get(kind, kind)
+    rows[wid] = {"id": wid, "name": name, "kind": kind, "t0": min(a["t0"] for a in mine), "towers": []}
+towers = {}
+for a in sorted(agents, key=lambda a: a["t0"]):
+    if a["task"]:
+        key, title = a["task"], titles.get(a["task"], a["task"])
+    elif a["kind"] in ("Main", "Repairs"):
+        key, title = a["label"], {"orchestrator": "Main session: orchestration and merges"}.get(a["label"], a["label"])
+    else:
+        key, title = a["phase"], a["phase"]
+    tid = a["wf"] + "/" + key
+    if tid not in towers:
+        pr = pr_by_task.get(key)
+        towers[tid] = {"id": tid, "key": key, "title": title, "row": a["wf"], "pr": pr and pr["number"], "url": pr and pr["url"],
+                       "merged": pr and pr["mergedAt"] and round(epoch(pr["mergedAt"])), "state": pr and pr["state"]}
+        rows[a["wf"]]["towers"].append(tid)
+    a["tower"] = tid
+
+doc_prs = [{"n": p["number"], "t": round(epoch(p["mergedAt"])), "title": p["title"], "task": bool(re.match(r"task/", p["headRefName"]))}
+           for p in prs if p["mergedAt"]]
+out = {"generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "repo": json.loads(git("gh", "repo", "view", "--json", "url") or "{}").get("url", ""),
+       "title": OPT["title"] or os.path.basename(REPO).replace("-", " ").title() + " Build Log",
+       "rates": {SHORT[k]: v for k, v in RATES.items()}, "tool_kinds": KINDS, "agents": agents, "towers": list(towers.values()),
+       "rows": sorted(rows.values(), key=lambda r: r["t0"]), "prs": sorted(doc_prs, key=lambda p: p["t"])}
+
+
+def owner_messages() -> list[int]:
+    """List when the person running the project typed a message in the main session. Times only: no text is kept."""
+    times = []
+    for f in glob.glob(P + "/*.jsonl"):
+        for line in open(f, errors="ignore"):
+            if '"type":"user"' not in line:
+                continue
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            if o.get("type") != "user" or o.get("isMeta") or o.get("isSidechain") or o.get("isCompactSummary") or "toolUseResult" in o or not o.get("timestamp"):
+                continue
+            c = (o.get("message") or {}).get("content")
+            blocks = c if isinstance(c, list) else []
+            if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks):
+                continue
+            text = (c if isinstance(c, str) else " ".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")).strip()
+            typed = text and (not text.startswith("<") or text.startswith("<command-name"))
+            if typed and not text.startswith(("Another Claude session", "This session is being continued", "[Request interrupted")):
+                times.append(round(epoch(o["timestamp"])))
+    return sorted(set(times))
+
+
+out["owner"] = {"name": OPT["owner"] or (git("git", "config", "user.name").split() or ["You"])[0], "msgs": owner_messages()}
+
+
+def check_private(out: dict) -> None:
+    """Stop if anything but the expected fields is about to be written: this file may be shared, and must hold no tool arguments, tool results or message text."""
+    fields = {"agents": {"id", "label", "phase", "model", "wf", "kind", "task", "t0", "t1", "cost", "co", "cr", "cw", "out", "read", "write", "req", "tools", "errors", "curve", "ev", "tower"},
+              "towers": {"id", "key", "title", "row", "pr", "url", "merged", "state"}, "rows": {"id", "name", "kind", "t0", "towers"}, "prs": {"n", "t", "title", "task"}}
+    assert set(out) == {"generated", "repo", "title", "rates", "tool_kinds", "owner", *fields}, sorted(out)
+    for name, allowed in fields.items():
+        for item in out[name]:
+            assert set(item) <= allowed, (name, sorted(set(item) - allowed))
+    assert set(out["owner"]) == {"name", "msgs"} and all(isinstance(m, int) for m in out["owner"]["msgs"])
+    for a in out["agents"]:
+        assert re.fullmatch(r"(\d+[a-z])*", a["ev"]), "tool events must be a time gap and one letter each"
+        assert re.fullmatch(r"[\w .:()/-]{1,60}", a["label"]), a["label"]
+    text = json.dumps(out)
+    for needle in (os.path.expanduser("~"), os.path.basename(os.path.expanduser("~")), "@"):
+        assert needle not in text, f"found {needle!r} in the data"
+
+
+check_private(out)
+json.dump(out, open(OPT["out_path"], "w"), separators=(",", ":"))
+print(len(agents), "agents;", len(towers), "towers;", len(rows), "rows;", len(doc_prs), "merged PRs;", round(sum(a["cost"] for a in agents), 2), "USD;", os.path.getsize(OPT["out_path"]), "bytes")
+print([(r["name"], len(r["towers"])) for r in out["rows"]])

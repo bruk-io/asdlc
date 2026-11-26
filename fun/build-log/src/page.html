@@ -1,0 +1,66 @@
+<title>Build Log</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700&family=Nunito:wght@400;600;700;800&display=swap">
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+{{STYLE}}</style>
+
+<main class="game">
+  <section class="stage" id="stage" aria-label="3D village of tasks and agents">
+    <div class="err" id="err" hidden>The 3D view needs WebGL, which this browser did not provide. The timeline and the building list still work.</div>
+    <div class="tip" id="tip" hidden></div>
+    <div class="tag" id="tag" hidden></div>
+  </section>
+
+  <div class="hud">
+    <header class="hud-top">
+      <div class="brand">
+        <h1 id="title">Build Log</h1>
+        <div class="readouts" aria-label="Readouts at the playhead">
+          <div class="readout"><span class="label">Clock</span><span class="seg" id="r-clock">-- --- --:--</span></div>
+          <div class="readout"><span class="label">Spent</span><span class="seg" id="r-cost">$0</span></div>
+          <div class="readout live"><span class="label">Awake</span><span class="seg" id="r-live">0</span></div>
+          <div class="readout"><span class="label">Merged</span><span class="seg" id="r-merged">0</span></div>
+        </div>
+        <div class="now label" id="now"></div>
+      </div>
+      <div class="corner">
+        <button class="btn" id="music" type="button" aria-pressed="false"></button>
+        <button class="btn" id="cam" type="button" aria-pressed="true" title="Reframe the view and choose what the camera follows"></button>
+        <button class="btn" id="open-list" type="button" aria-expanded="false" aria-controls="drawer"></button>
+      </div>
+    </header>
+
+
+    <aside class="card" id="detail" hidden aria-label="Selected building"></aside>
+
+    <aside class="card drawer" id="drawer" hidden aria-label="Every building">
+      <h2>Every building</h2>
+      <div class="scroll"><table id="table"><thead><tr><th>Row</th><th>Task</th><th class="n">Cost</th><th class="n">Agents</th><th class="n">Hours</th><th>Pull request</th></tr></thead><tbody></tbody></table></div>
+    </aside>
+
+    <div class="watch" id="watch">
+      <button class="btn primary" id="watch-go" type="button"></button>
+      <p id="watch-note">A replay of the Claude Code sessions that built this.</p>
+    </div>
+
+    <footer class="dock">
+      <div class="hint" id="hint">Drag to roll the planet · right-drag to turn · scroll to zoom · double-click a building</div>
+      <div class="bar" aria-label="Playback">
+        <button class="btn primary" id="play" type="button"></button>
+        <label class="scale" for="speed"><span class="label">Speed</span>
+          <input type="range" id="speed" min="0" max="100" step="1" value="50" aria-describedby="speed-out">
+          <output id="speed-out" for="speed">7 min/s</output></label>
+        <button class="btn" id="busy" type="button"></button>
+        <span class="label note" id="tl-note"></span>
+      </div>
+      <div class="timeline" aria-label="Timeline">
+        <div class="tl-wrap"><canvas id="tl" width="1200" height="150" tabindex="0" aria-label="Timeline. Drag or use the arrow keys to scrub."></canvas><div class="tip" id="tl-tip" hidden></div></div>
+      </div>
+    </footer>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+{{SCRIPT}}</script>
