@@ -1,0 +1,4 @@
+dist/
+shots/
+data/data.json
+.DS_Store

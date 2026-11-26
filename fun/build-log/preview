@@ -1,0 +1,61 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.13"
+# dependencies = ["click>=8.1"]
+# ///
+"""Build, then take a screenshot of the page or of one asset in the viewer, using headless Chrome on the GPU."""
+
+import functools
+import http.server
+import subprocess
+import threading
+import urllib.parse
+from pathlib import Path
+
+import click
+
+ROOT = Path(__file__).resolve().parent
+CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+
+@click.command()
+@click.argument("what", type=click.Choice(["page", "viewer"]))
+@click.argument("asset", required=False)
+@click.option("--set", "settings", multiple=True, help="A viewer option, as name=value. Repeatable.")
+@click.option("--at", default=1200, show_default=True, help="Animation time in milliseconds for a still of the viewer.")
+@click.option("--live", is_flag=True, help="Let the animation run on the real clock, for effects that need time to pass.")
+@click.option("--turn", default=0.6, show_default=True, help="Turntable angle in radians for a still of the viewer.")
+@click.option("--page-hash", default="", help="Hash for the page, for example busiest.")
+@click.option("--size", default="1200,800", show_default=True, help="Window size as width,height.")
+@click.option("--out", default="shots/shot.png", show_default=True, help="Where to write the screenshot.")
+def main(what: str, asset: str | None, settings: tuple[str, ...], at: int, live: bool, turn: float, page_hash: str, size: str, out: str) -> None:
+    """Screenshot WHAT (page or viewer). For the viewer, ASSET names the asset to show."""
+    subprocess.run([str(ROOT / "build")], check=True, capture_output=True)
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(ROOT / "dist"))
+    handler.log_message = lambda *a: None  # type: ignore[method-assign]
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    if what == "page":
+        url = f"{base}/local-index.html" + (f"#{page_hash}" if page_hash else "")
+    else:
+        query = dict(s.split("=", 1) for s in settings) | {"turn": str(turn), "spin": "0"} | ({} if live else {"t": str(at)})
+        url = f"{base}/local-viewer.html?{urllib.parse.urlencode(query)}#{asset or 'critter'}"
+    target = (ROOT / out).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
+    cmd = [CHROME, "--headless=new", "--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist", "--user-data-dir=/tmp/grampus-build-log-chrome",
+           f"--window-size={size}", "--virtual-time-budget=9000", f"--screenshot={target}", url]
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=240)
+    except subprocess.TimeoutExpired:
+        raise click.ClickException("Chrome did not finish within 240 seconds.")
+    finally:
+        server.shutdown()
+    if not target.exists():
+        raise click.ClickException("Chrome wrote no screenshot.")
+    click.echo(str(target))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,27 @@
+<title>Build Log Asset Viewer</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700&family=Nunito:wght@400;600;700;800&display=swap">
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+{{STYLE}}</style>
+
+<div class="vw">
+  <header><h1>Asset Viewer</h1><p class="lede">One asset at a time, on a turntable. Pick an asset, then try its options and its animation.</p></header>
+  <div class="cols">
+    <nav class="list" id="list" aria-label="Assets"></nav>
+    <section>
+      <div class="stage" id="stage"><div class="err" id="err" hidden></div></div>
+      <div class="bar" id="controls"></div>
+      <div class="bar">
+        <label class="field"><input type="checkbox" id="spin" checked> Turntable</label>
+        <label class="field"><input type="checkbox" id="anim" checked> Animate</label>
+        <label class="field"><input type="checkbox" id="ground" checked> Ground</label>
+        <span class="field" id="info"></span>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+{{SCRIPT}}</script>

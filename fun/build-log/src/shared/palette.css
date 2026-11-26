@@ -1,0 +1,18 @@
+/* Every colour in the page and the 3D world. Assets ask for these by name, so changing one here changes it everywhere. */
+:root {
+  --w-sky-top: #4fb3f6; --w-sky-bot: #d6f1ff; --w-grass: #7fd65c; --w-earth: #b47a42; --w-path: #e2ad6e; --w-plot: #f0e2c0;
+  --w-water: #6cc6ee; --w-trunk: #b9783f; --w-leaf: #4fc24a; --w-leaf-2: #2fa257; --w-roof: #ea4f3a; --w-dome: #ffd35c; --w-wood: #dba25c; --w-cream: #fff8e7;
+  --w-cloud: #ffffff; --w-glow: #ffe9a8; --w-blush: #ff9fb0; --w-fruit: #e8392f; --w-door: #d8503a; --w-live: #ffe14d; --w-stone: #c9c6bd;
+  --w-roof-2: #d9783f; --w-roof-3: #4f9aa8; --w-door-2: #3f86c9; --w-door-3: #3fa66a; --w-ink: #3a2a1c;
+  --p-skin: #b9794e; --p-hair: #1f1612; --p-fade: #4a3225; --p-hoodie: #3f86c9; --p-pants: #39404f;
+  --m-brown: #8f5a34; --m-tan: #c7a071; --m-gold: #e0a030; --m-stem: #efe2c6; --m-gill: #d9c39a;
+  --series-a: #f6a23c; --series-b: #4aa8e8; --series-c: #ef6f9a; --series-d: #9b7fe0; --series-e: #f3e7c6;
+  --ui-bg: #fbf5e6; --ui-surface: #f4ead2; --ui-surface-raised: #fffaf0; --ui-surface-overlay: #ffffff; --ui-surface-recessed: #efe2c2;
+  --ui-text: #4a3b2a; --ui-text-muted: #7a6a55; --ui-text-bright: #2f2418; --ui-primary: #4fb968; --ui-primary-hover: #43a65b; --ui-primary-text: #ffffff;
+  --ui-primary-glow: rgba(79, 185, 104, 0.2); --ui-secondary: #f1e3bf; --ui-secondary-hover: #e9d7a8; --ui-secondary-text: #4a3b2a; --ui-border: #e3d3ab; --ui-border-muted: #efe4c6;
+  --ui-border-bright: #cdb98a; --ui-ring: #4aa8e8; --ui-link: #2f8f6f; --ui-success: #4aa8e8;
+  --font-sans: "Nunito", ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-seg: "Baloo 2", "Nunito", ui-rounded, system-ui, sans-serif;
+}
+:root { color-scheme: light; }

@@ -1,0 +1,18 @@
+body { background: var(--ui-bg); color: var(--ui-text); font-family: var(--font-sans); font-size: 16px; line-height: 1.5; }
+.vw { max-width: 1180px; margin: 0 auto; padding-block: 20px 40px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: flex; flex-direction: column; gap: 16px; }
+h1 { font-family: var(--font-seg); font-size: 30px; font-weight: 700; margin: 0; }
+.lede { margin: 4px 0 0; color: var(--ui-text-muted); font-size: 14px; }
+.cols { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 720px) { .cols { grid-template-columns: minmax(0, 1fr); } .list { flex-direction: row; flex-wrap: wrap; } }
+.list { display: flex; flex-direction: column; gap: 6px; }
+.list button, .bar button { font: inherit; font-weight: 700; font-size: 14px; text-align: left; border: 2px solid var(--ui-border); background: var(--ui-surface-raised); color: var(--ui-text); border-radius: 999px; padding: 7px 14px; cursor: pointer; }
+.list button[aria-pressed="true"], .bar button[aria-pressed="true"] { background: var(--ui-primary); border-color: var(--ui-primary); color: #fff; }
+.stage { position: relative; height: min(64vh, 620px); min-height: 320px; border: 2px solid var(--ui-border); border-radius: 22px; overflow: hidden; background: var(--w-sky-bot); }
+.stage canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.err { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; color: var(--ui-text-muted); }
+.bar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-top: 12px; }
+.group { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.group .name, .field { font-size: 13px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ui-text-muted); }
+.field { display: inline-flex; gap: 8px; align-items: center; text-transform: none; letter-spacing: 0; font-weight: 600; }
+.field input { accent-color: var(--ui-primary); width: 16px; height: 16px; }
+:focus-visible { outline: 2px solid var(--ui-ring); outline-offset: 2px; }
