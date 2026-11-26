@@ -5,7 +5,7 @@
       const hit = kit.mesh(box, new THREE.MeshBasicMaterial({ visible: false }), 0.95, 1.7, 0.95, 0, 0.85, 0, false); hit.userData = { agent: a, critter: true }; c.add(hit); pickables.push(hit);
       c.visible = false; scene.add(c);
     });
-    const fx = makeParticles(kit, scene, 700); let fxClock = 0, fxTick = 0, followAgent = null; const lightDir = new THREE.Vector3(), lightWas = new THREE.Vector3(), sunVil = new THREE.Vector3(), moonVil = new THREE.Vector3(), unframe = new THREE.Quaternion(); let lightAt = 0;
+    const fx = makeParticles(kit, scene, 700); let fxClock = 0, fxTick = 0, frameNo = 0, followAgent = null; const lightDir = new THREE.Vector3(), lightWas = new THREE.Vector3(), sunVil = new THREE.Vector3(), moonVil = new THREE.Vector3(), unframe = new THREE.Quaternion(); let lightAt = 0;
 
 
     // What a critter should be acting out at clock time t. During replay many tool calls pass each second, so this takes the calls in a window

@@ -14,7 +14,7 @@ function makeKit(css) {
   const colourOf = (name) => name === '@ink' ? '#2b2622' : name.startsWith('--') ? css(name) || '#888888' : name; // a CSS variable name, or a colour as it stands
   const outlineMats = {};
   const kit = {
-    css, mats, toon, colour: colourOf,
+    css, mats, toon, colour: colourOf, outlines: [],   // every outline mesh made, so a scene can switch the far ones off
     // A named material takes its colour from the CSS variable of that name, the moment it is made.
     mat(name) { return mats[name] || (mats[name] = toon(Object.assign({ color: new THREE.Color(colourOf(name)) }, MAPS[name] ? { map: kit.tex(MAPS[name]) } : {}))); },
     recolour() { for (const k in mats) mats[k].color.set(colourOf(k)); },
@@ -36,7 +36,7 @@ function makeKit(css) {
         fragmentShader: 'uniform vec3 c; void main() { gl_FragColor = vec4(c, 1.0); }' }));
       const found = [], walk = (x) => { if (x.userData.plain || x.userData.blob || x.userData.outline) return; if (x.isMesh && (Array.isArray(x.material) ? x.material[0] : x.material).isMeshToonMaterial) found.push(x); x.children.forEach(walk); };
       walk(obj);
-      for (const x of found) { const o = new THREE.Mesh(x.geometry, m); o.userData.outline = true; o.raycast = () => {}; o.castShadow = o.receiveShadow = false; x.add(o); }
+      for (const x of found) { const o = new THREE.Mesh(x.geometry, m); o.userData.outline = true; o.raycast = () => {}; o.castShadow = o.receiveShadow = false; x.add(o); kit.outlines.push(o); }
       return obj;
     },
     // A rounded-rectangle footprint of height 1, centred on y, so it can be scaled in y without bending its corners.

@@ -6,7 +6,13 @@
       const firstFrame = fxClock === 0;
       const dt = Math.min(0.05, Math.max(0, (now - fxClock) / 1000)), lively = S.playing && !reduced; fxClock = now;
       const beat = lively && now - fxTick > 240; if (beat) fxTick = now;
-      if (t !== shadowT || S.playing) { renderer.shadowMap.needsUpdate = true; shadowT = t; }
+      // Shadows are the most expensive thing drawn, so they are redrawn only when they would look different: every third frame while the replay
+      // runs, at once when the clock is moved by hand, and now and then otherwise so that the clouds' shadows keep drifting.
+      frameNo++; if (t !== shadowT && !S.playing) { renderer.shadowMap.needsUpdate = true; } else if (frameNo % ((S.playing ? 3 : 12) * (camera.position.distanceTo(controls.target) > 150 ? 4 : 1)) === 0) renderer.shadowMap.needsUpdate = true; shadowT = t;   // from far out, a quarter as often again
+      // Outlines are a second copy of every shape. Only those near the middle of the view are worth drawing, and none at all from far out.
+      if (frameNo % 6 === 1) { const cd = camera.position.distanceTo(controls.target), reach = 22 + cd * 1.2, any = cd < 150, tx = controls.target.x, tz = controls.target.z;
+        for (const o of kit.outlines) { const p = o.parent, e = p.matrixWorld.elements; o.visible = any && !p.userData.ghost && Math.hypot(e[12] - tx, e[14] - tz) < reach; } }
+      const followBruk = S.follow === 'bruk' || (S.follow === 'work' && t >= tMax - 1), cax = camera.position.x, cay = camera.position.y, caz = camera.position.z, sightX = owner.position.x - cax, sightY = owner.position.y + 1.2 - cay, sightZ = owner.position.z - caz, sight2 = sightX * sightX + sightZ * sightZ;
       { const want = nightAt(S.t), next = firstFrame || Math.abs(want - night) < 0.004 ? want : night + (want - night) * Math.min(1, dt * 3); if (next !== night) setNight(next); }
       const pulse = reduced ? 1 : 0.8 + Math.sin(now * 0.006) * 0.25;
       const crowd = [];
@@ -71,6 +77,15 @@
         tw.wasMerged = merged;
         tw.scaffold.visible = building && !merged && tw.top > 0.14;
         if (tw.scaffold.visible) ASSETS.scaffold.resize(tw.scaffold, tw.top + 0.55);
+        // While the camera follows Bruk, a building standing between the camera and him turns see-through: its walls fade and its trim is put away.
+        let hide = 0; if (followBruk && sight2 > 1e-6) { const u = ((tw.x - cax) * sightX + (tw.z - caz) * sightZ) / sight2;
+          if (u > 0.03 && u < 0.96 && Math.hypot(tw.x - cax - sightX * u, tw.z - caz - sightZ * u) < FOOT * 0.85 && cay + sightY * u < y + 1.2) hide = 1; }
+        tw.fade = (tw.fade || 0) + (hide - (tw.fade || 0)) * Math.min(1, dt * 7); if (tw.fade < 0.01) tw.fade = 0;
+        if (tw.fade || tw.wasFaded) { const op = 1 - 0.85 * tw.fade, ghost = tw.fade > 0;
+          for (const a of tw.agents) { for (const m of a.segs) { const u = m.userData; u.ghost = ghost; m.castShadow = op > 0.5; for (const mt of [u.side, u.top]) { if (mt.transparent !== ghost) { mt.transparent = ghost; mt.depthWrite = !ghost; mt.needsUpdate = true; } mt.opacity = op; } if (ghost && m.children[0]) m.children[0].visible = false; }
+            if (tw.fade > 0.4) a.slab.visible = false; }
+          if (tw.fade > 0.4) tw.roof.visible = tw.dome.visible = tw.door.visible = tw.flag.visible = tw.scaffold.visible = false;
+          tw.wasFaded = ghost; }
       }
       busyNow = S.playing ? fn : 0;
       // Nobody stands on anybody: agents that end up too close step apart, and they make room for Bruk.
@@ -93,7 +108,7 @@
         const high = (v) => tmp.copy(v).setY(Math.max(0.42, v.y)).normalize(); lightDir.copy(high(night < 0.5 ? sunVil : moonVil));
         // Sunlight hands over to moonlight at dusk by fading out and back in, so shadows melt away and return instead of swinging across the sky.
         const fade = Math.min(1, Math.abs(night - 0.5) / 0.24), ease = fade * fade * (3 - 2 * fade); sun.intensity = sunBase * ease; amb.intensity = ambBase + (1 - ease) * sunBase * 0.5;
-        if (firstFrame || (lightDir.distanceTo(lightWas) > 0.0012 && now - lightAt > 30)) { lightWas.copy(lightDir); lightAt = now; sun.position.copy(sun.target.position).addScaledVector(lightDir, 80 * K); renderer.shadowMap.needsUpdate = true; } }
+        if (firstFrame || (lightDir.distanceTo(lightWas) > 0.0012 && now - lightAt > 90)) { lightWas.copy(lightDir); lightAt = now; sun.position.copy(sun.target.position).addScaledVector(lightDir, 80 * K); renderer.shadowMap.needsUpdate = true; } }
       if (!reduced) {
         for (const c of clouds) { c.position.x += c.userData.v * dt; if (c.position.x > SKYW) c.position.x = -SKYW; }
         birds.forEach((b) => { const k = b.userData.k, a = now * 0.00016 + k * 0.11, R = 34 + (k % 3) * 2.5; b.visible = night < 0.6;
