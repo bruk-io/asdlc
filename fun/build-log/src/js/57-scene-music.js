@@ -26,15 +26,15 @@
           const chance = (pos % 2 === 0 ? 0.5 + busy * 0.4 : 0.12 + busy * 0.45) * (1 - 0.45 * dark);
           if (Math.random() < chance) { walk = Math.max(0, Math.min(SCALE.length - 1, walk + Math.round((Math.random() - 0.5) * 4))); const m = pos === 0 ? tones[Math.floor(Math.random() * tones.length)] : SCALE[walk]; pluck(m - (dark > 0.6 ? 12 : 0), next, 0.13 + busy * 0.05); }
           if (busy > 0.5 && pos % 2 === 1 && dark < 0.5) shaker(next, 0.02);
-          if (dark > 0.6 && pos === 6 && Math.random() < 0.35) note(tones[2] + 12, next, 2.2, 0.04, 'sine', 0.05);
+          if (dark > 0.6 && pos === 6 && Math.random() < 0.35) note(tones[2], next, 2.4, 0.03, 'sine', 0.12);
           next += eighth; step++;
         }
       };
       const timer = setInterval(() => { try { tick(); } catch (e) { if (!failed) { failed = true; $('#music').textContent = 'Music Unavailable'; } } }, 60);
       master.gain.setTargetAtTime(0.5, ctx.currentTime, 0.4); if (ctx.state === 'suspended') ctx.resume();
       return { stop() { clearInterval(timer); master.gain.setTargetAtTime(0, ctx.currentTime, 0.12); setTimeout(() => ctx.close(), 700); },
-        // A rising four-note chime, for a merge.
-        chime() { [72, 76, 79, 84].forEach((m, i) => pluck(m, ctx.currentTime + 0.02 + i * 0.09, 0.2)); } };
+        // A soft rising four-note chime, for a merge.
+        chime() { [60, 64, 67, 72].forEach((m, i) => note(m, ctx.currentTime + 0.03 + i * 0.13, 1.4, 0.07, 'sine', 0.04)); } };   // an octave down, pure tones, eased in: a soft glow, not a ping
     }
     { const btn = $('#music'), set = (on) => { if (on && !audio) audio = startMusic(); else if (!on && audio) { audio.stop(); audio = null; } btn.setAttribute('aria-pressed', !!audio); btn.textContent = audio ? 'Music On' : 'Music Off'; };
       btn.addEventListener('click', () => set(!audio)); if (/[#&]music\b/.test(location.hash)) set(true); }
