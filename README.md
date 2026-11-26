@@ -111,6 +111,8 @@ Try them on the worked example: `uv run asdlc requirement list --all --root exam
 
 It starts nothing in a checkout with uncommitted changes, and nothing it can tell it could not finish: with no remote, with a `gh` that cannot reach the repository's pull requests, or with no checks on `main`. When it fails part way, it puts the checkout back where it was.
 
+When two clones start one task at the same moment, one push makes the branch and the other start is undone and says whose pull request won. When the pull request cannot be opened, the start takes its branch off the remote again, so the task reads as ready. When the remote will not give the branch up, the start says that it is left there, and names `asdlc task start --resume` to finish it.
+
 The checks are the command lines in `.asdlc/checks` on the remote's `main`, one to a line, with `#` for a comment. They are what a task has to pass before its pull request is marked ready. In this repository the file holds one line, `just check`. No command runs them yet, but no task is started without them.
 
 One checkout holds one task at a time. To build tasks side by side, give each a session of its own in a worktree of its own, started with `claude --worktree <name>`, and run `asdlc task start` there.
@@ -155,7 +157,7 @@ The cases are in `plugins/asdlc/evals/`, in the format `claude plugin eval` read
 
 ## Code
 
-The repository is a marketplace with two parts. `plugins/asdlc/` is the Claude Code plugin: its manifest, its hooks and the script that installs `asdlc` when a session starts. `src/asdlc/` is a Python package in three layers: `domain` decides, `io` reads files and git, `presentation` words the answer, and `cli.py` wires them. `just check` runs `asdlc document check` on the example, formatting, ruff and the tests.
+The repository is a marketplace with two parts. `plugins/asdlc/` is the Claude Code plugin: its manifest, its hooks and the script that installs `asdlc` when a session starts. `src/asdlc/` is a Python package in three layers: `domain` decides, `io` reads and writes files, git and GitHub, and `presentation` words the answer. `domain` and `io` import nothing from each other. `cli.py` is the app layer that joins them, and a test fails if any other module does. `just check` runs `asdlc document check` on the example, formatting, ruff and the tests.
 
 ## What is built, and what is not
 

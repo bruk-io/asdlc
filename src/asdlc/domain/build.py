@@ -1,7 +1,8 @@
 """Building a task: what a start reads, what it decides, and what a start left.
 
-Nothing here touches git or GitHub. `io` reads the facts once into a `Found`,
-the functions here decide from it, and `cli` does what they answer.
+Nothing here touches git or GitHub. The facts are handed over as plain data,
+once, in a `Found`. The functions here decide from it, and whoever called them
+does what they answer.
 """
 
 from collections.abc import Mapping, Sequence
@@ -87,20 +88,62 @@ def check_lines(text: str | None) -> tuple[str, ...]:
     return tuple(line for line in lines if line and not line.startswith("#"))
 
 
-def claimed(porcelain: str, branch: str) -> bool:
-    """Say whether a push made the branch on the remote.
+def answer(porcelain: str, branch: str) -> str:
+    """Give the one character a push answered for a branch; empty with no answer.
 
-    `porcelain` is what `git push --porcelain` printed. Only a line for the
-    branch that begins with `*` is a claim: a branch the push made. `=` is a
-    branch that was there already with this commit, and `!` a push the remote
-    refused, and neither claimed anything.
+    `porcelain` is what `git push --porcelain` printed. `*` is a branch the
+    push made, `=` one that was there already with this commit, and `!` a push
+    the remote refused.
     """
     for line in porcelain.splitlines():
         flag, _, rest = line.partition("\t")
         pushed_to = rest.partition("\t")[0].rpartition(":")[2]
         if pushed_to == f"refs/heads/{branch}":
-            return flag == "*"
-    return False
+            return flag
+    return ""
+
+
+def claimed(porcelain: str, branch: str) -> bool:
+    """Say whether a push made the branch on the remote.
+
+    Only that is a claim. A branch that was there already, and a push the
+    remote refused, claimed nothing.
+    """
+    return answer(porcelain, branch) == "*"
+
+
+def lost_claim(id: str, flag: str, pulls: Sequence[Pull]) -> str:
+    """Say why a start whose push claimed nothing is not a start.
+
+    `flag` is what the push answered for the branch. `pulls` are the open pull
+    requests, read after the push: when another start made the branch first,
+    the reason gives that start's pull request.
+    """
+    branch = branch_of(id)
+    if flag not in ("=", "!"):
+        return f"the push did not make '{branch}' on the remote, so {id} is not started"
+    how = "the remote had the branch already" if flag == "=" else "the remote refused"
+    link = next((pull.link for pull in pulls if pull.branch == branch), "")
+    theirs = f"Its pull request: {link}" if link else "It has no pull request yet"
+    return f"another start claimed {id} first, and {how} this one's push. {theirs}"
+
+
+def unopened(id: str, deleted: bool) -> str:
+    """Say what became of a start whose pull request could not be opened.
+
+    `deleted` says the branch was taken off the remote again.
+    """
+    branch = branch_of(id)
+    if deleted:
+        return (
+            f"the pull request for '{branch}' could not be opened, so the start "
+            f"is undone: the branch is off the remote again, and {id} is not started"
+        )
+    return (
+        f"the pull request for '{branch}' could not be opened, and the branch "
+        "could not be deleted from the remote, so it is left there. "
+        f"`asdlc task start --resume {id}` finishes the start"
+    )
 
 
 def leftover(commits: Sequence[Commit], id: str) -> bool:

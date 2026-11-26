@@ -2,10 +2,9 @@
 
 import os
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-
-from asdlc.domain.build import Commit
 
 FETCH_LIMIT = 20.0
 REMOTE_MAIN = "origin/main"
@@ -62,14 +61,56 @@ def document_texts_at(
     Each is `(path from the prefix, text)`, the shape `files.document_texts`
     gives. `prefix` is empty for the repository's root, and otherwise a folder
     below it that ends in a slash.
+
+    It starts two git processes however many files there are: one lists them,
+    and one prints the text of each.
     """
     folder = f"{prefix}intent"
-    listed = _git(root, "ls-tree", "-r", "-z", "--name-only", ref, "--", folder)
-    paths = sorted(path for path in (listed or "").split("\0") if path.endswith(".md"))
-    texts = ((path, _git(root, "show", f"{ref}:{path}")) for path in paths)
-    return tuple(
-        (path.removeprefix(prefix), text) for path, text in texts if text is not None
+    listed = _git(root, "ls-tree", "-r", "-z", ref, "--", folder) or ""
+    # Each entry is `<mode> <type> <object>`, a tab, then the path.
+    entries = (entry.partition("\t") for entry in listed.split("\0"))
+    found = sorted(
+        (path, about.split(" ")[-1])
+        for about, _, path in entries
+        if path.endswith(".md")
     )
+    texts = _texts(root, [id for _, id in found])
+    return tuple(
+        (path.removeprefix(prefix), text)
+        for (path, _), text in zip(found, texts, strict=True)
+        if text is not None
+    )
+
+
+def _texts(root: Path, ids: Sequence[str]) -> list[str | None]:
+    """Give the text of each object named, in order; None for one git has not got.
+
+    One git process prints them all. For each it is asked for, `cat-file --batch`
+    prints a line `<object> <type> <size>`, then that many bytes, then a newline;
+    for one it has not got, the line is `<object> missing` and nothing follows.
+    A text is read as Python reads a text file: as UTF-8, with any line ending
+    made a newline.
+    """
+    if not ids:
+        return []
+    done = subprocess.run(
+        ["git", "-C", str(root), "cat-file", "--batch"],
+        input="".join(f"{id}\n" for id in ids).encode(),
+        capture_output=True,
+    )
+    printed, texts, at = done.stdout, [], 0
+    for _ in ids:
+        end = printed.find(b"\n", at)
+        about = printed[at:end].split(b" ") if end >= 0 else []
+        if len(about) != 3:
+            texts.append(None)
+            at = end + 1 if end >= 0 else len(printed)
+            continue
+        after = end + 1 + int(about[2])
+        raw = printed[end + 1 : after].decode()
+        texts.append(raw.replace("\r\n", "\n").replace("\r", "\n"))
+        at = after + 1
+    return texts
 
 
 def remote_branches(root: Path) -> frozenset[str]:
@@ -224,6 +265,19 @@ def checked_out(root: Path) -> dict[str, Path]:
     return held
 
 
+def held_elsewhere(root: Path) -> dict[str, str]:
+    """Give each branch another worktree of the clone holds, and that worktree.
+
+    `root` is the top of one worktree, which is the one left out.
+    """
+    here = root.resolve()
+    return {
+        branch: str(folder)
+        for branch, folder in checked_out(root).items()
+        if folder.resolve() != here
+    }
+
+
 def switch_new(root: Path, branch: str, ref: str) -> bool:
     """Make a branch at `ref` with no upstream and switch to it; False when refused.
 
@@ -257,12 +311,34 @@ def push_claim(root: Path, branch: str) -> Ran:
     return Ran(done.returncode == 0, done.stdout, done.stderr)
 
 
-def commits(root: Path, span: str) -> tuple[Commit, ...]:
+def head(root: Path) -> str:
+    """Give the commit the checkout is on."""
+    return (_git(root, "rev-parse", "HEAD") or "").strip()
+
+
+def delete_remote(root: Path, branch: str, commit: str) -> bool:
+    """Delete a branch from the remote, only while the remote has it at `commit`.
+
+    The lease is what says "only while": a branch that has moved is someone
+    else's by now, and is left. False when nothing was deleted.
+    """
+    lease = f"--force-with-lease={branch}:{commit}"
+    done = subprocess.run(
+        ["git", "-C", str(root), "push", "--quiet", lease, "origin", f":{branch}"],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+    return done.returncode == 0
+
+
+def commits(root: Path, span: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
     """Give the commits of a range, oldest first, without merge commits.
 
-    Each comes with its id, its subject and the files it changed. A commit
-    always comes after the commits it was made on top of. Between two lines of
-    history that a merge joined, the order is git's.
+    Each is `(id, subject, the files it changed)`. A commit always comes after
+    the commits it was made on top of. Between two lines of history that a
+    merge joined, the order is git's.
     """
     listed = _git(
         root,
@@ -273,9 +349,7 @@ def commits(root: Path, span: str) -> tuple[Commit, ...]:
     for record in (listed or "").split("\x1e")[1:]:
         head, _, rest = record.partition("\n")
         id, _, subject = head.partition("\x1f")
-        found.append(
-            Commit(id, subject, tuple(line for line in rest.split("\n") if line))
-        )
+        found.append((id, subject, tuple(line for line in rest.split("\n") if line)))
     return tuple(found)
 
 

@@ -11,7 +11,6 @@ import json
 import subprocess
 from pathlib import Path
 
-from asdlc.domain.tasks import Pull
 from asdlc.io import git
 from asdlc.io.git import Ran
 
@@ -39,20 +38,24 @@ def _answer(root: Path, *args: str) -> str | None:
     return ran.out if ran.ok else None
 
 
-def _pull(row: object) -> Pull | None:
+# An open pull request, as it is handed back: branch, number, link, draft or not.
+type PullRow = tuple[str, int, str, bool]
+
+
+def _pull(row: object) -> PullRow | None:
     """Read one row of `pr list --json`; None when it names no branch."""
     if not isinstance(row, dict) or not isinstance(row.get("headRefName"), str):
         return None
     number, link = row.get("number"), row.get("url")
-    return Pull(
-        branch=row["headRefName"],
-        number=number if isinstance(number, int) else 0,
-        link=link if isinstance(link, str) else "",
-        draft=row.get("isDraft") is True,
+    return (
+        row["headRefName"],
+        number if isinstance(number, int) else 0,
+        link if isinstance(link, str) else "",
+        row.get("isDraft") is True,
     )
 
 
-def _pulls(answer: str) -> tuple[Pull, ...] | None:
+def _pulls(answer: str) -> tuple[PullRow, ...] | None:
     """Read what `pr list --json` printed; None when it is not that list."""
     try:
         rows = json.loads(answer or "[]")
@@ -64,8 +67,8 @@ def _pulls(answer: str) -> tuple[Pull, ...] | None:
     return None if None in pulls else tuple(pull for pull in pulls if pull)
 
 
-def open_pulls(root: Path) -> tuple[Pull, ...] | None:
-    """List the open pull requests: branch, number, link, and draft or not.
+def open_pulls(root: Path) -> tuple[PullRow, ...] | None:
+    """List the open pull requests, each as `(branch, number, link, draft or not)`.
 
     A row that does not say whether it is a draft reads as not one.
 

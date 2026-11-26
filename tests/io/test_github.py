@@ -5,7 +5,6 @@ import subprocess
 import pytest
 
 from asdlc.io import files, github
-from asdlc.io.github import Pull
 from tests.conftest import calls, held_pulls, pull_row, write_pulls
 from tests.conftest import git as run_git
 
@@ -32,8 +31,8 @@ def test_open_pull_requests_are_read_through_gh(
     fake_gh(tmp_path_factory.mktemp("bin"), monkeypatch, f"echo '{rows}'")
     assert github.program(repository) == "gh"
     assert github.open_pulls(repository) == (
-        Pull("task/claims/01-a", 0, "", False),
-        Pull("spec/x", 0, "", False),
+        ("task/claims/01-a", 0, "", False),
+        ("spec/x", 0, "", False),
     )
 
 
@@ -63,8 +62,8 @@ def test_each_open_pull_request_is_a_branch_a_number_a_link_and_draft_or_not(
 ):
     write_pulls(gh, pull_row(DRAFT, 7, draft=True), pull_row(READY, 12))
     assert github.open_pulls(remote) == (
-        Pull(DRAFT, 7, "https://example.invalid/pull/7", True),
-        Pull(READY, 12, "https://example.invalid/pull/12", False),
+        (DRAFT, 7, "https://example.invalid/pull/7", True),
+        (READY, 12, "https://example.invalid/pull/12", False),
     )
 
 
@@ -76,11 +75,11 @@ def test_the_program_the_key_names_is_run_in_place_of_gh(
     write_pulls(gh, pull_row(DRAFT, 1, draft=True))
 
     assert github.program(remote) == str(gh.program)
-    assert [pull.branch for pull in github.open_pulls(remote)] == [DRAFT]
+    assert [row[0] for row in github.open_pulls(remote)] == [DRAFT]
     assert calls(gh)[-1][:2] == ["pr", "list"]
 
     run_git(remote, "config", "--unset", "asdlc.gh")
-    assert [pull.branch for pull in github.open_pulls(remote)] == ["from/the/path"]
+    assert [row[0] for row in github.open_pulls(remote)] == ["from/the/path"]
 
 
 def test_a_program_the_key_names_that_is_missing_or_cannot_run_is_no_answer(remote, gh):
@@ -117,7 +116,7 @@ def test_the_stand_in_opens_a_draft_and_prints_its_link(remote, gh):
     )
     assert (opened.returncode, opened.stdout) == (0, "https://example.invalid/pull/1\n")
     assert held_pulls(gh) == [pull_row(DRAFT, 1, draft=True)]
-    assert github.open_pulls(remote) == (Pull(DRAFT, 1, opened.stdout.strip(), True),)
+    assert github.open_pulls(remote) == ((DRAFT, 1, opened.stdout.strip(), True),)
 
     second = stand_in(gh, "pr", "create", "--base", "main", "--head", READY)
     assert second.stdout == "https://example.invalid/pull/2\n"
